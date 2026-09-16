@@ -1,0 +1,13 @@
+# 大文件：模型文件（用户本地放置，不应入库）
+models/
+
+# 数据：输出产物、数据库、日志
+data/
+logs/
+
+# Rust 构建产物
+target/
+
+# Node / Tauri 前端构建产物
+node_modules/
+dist/
