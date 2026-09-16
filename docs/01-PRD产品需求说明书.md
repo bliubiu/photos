@@ -1,6 +1,6 @@
 # 智能证件照工具 产品需求说明书
 
-> 版本：2026.09.16.0（CalVer）
+> 版本：2026.09.16.4（CalVer）
 > 状态：已评审（经设计访谈逐项确认）
 > 关联文档：`CONTEXT.md`（领域术语）、`02-架构设计.md`、`03-实施计划.md`、`docs/04-模型清单.md`、`docs/05-API契约.md`、`docs/06-安全设计.md`、`docs/adr/0001-纯Rust图像栈.md`
 
@@ -109,13 +109,15 @@
 | 目标场景 | 低配机器 / 批量粗处理 | 日常本机、笔记本 CPU | N 卡离线精修、画质优先 |
 | 人脸检测 | MTCNN | RetinaFace | RetinaFace |
 | 人体关键点 | MoveNet-Lightning | MoveNet-Lightning | MoveNet-Thunder |
-| 人像分割 | RMBG-1.4 | BiRefNet-Lite | BiRefNet-Full |
+| 人像分割 | RMBG-1.4/2.0 | BiRefNet-Lite | BiRefNet-Full |
 | 推理后端 | ONNX Runtime CPU | ONNX Runtime CPU | ONNX Runtime CUDA |
 | 典型单张耗时 | 0.8~1.5s | 2~4s | 0.5~1s |
 | 发丝精度 | 一般 | 良好 | 极佳 |
 | 内存占用 | ~800MB | ~1.5GB | ~3GB 显存 |
 | MODNet | 不启用 | 不启用 | 不启用 |
 
+> 无 CUDA 设备时 quality 套件自动降级为 CPU 推理并返回告警，不阻断任务。
+>
 > 为什么不这样搭配的理由论证，见 `02-架构设计.md`。
 
 ## 6. 图像后处理

@@ -1,6 +1,6 @@
 # API 契约
 
-> 版本：2026.09.16.3（CalVer）
+> 版本：2026.09.16.4（CalVer）
 > 状态：M3 可实现的最小契约；OpenAPI 可后续从本文导出
 > 关联：`02-架构设计.md`、`03-实施计划.md`、`04-模型清单.md`
 > 实现边界：`photos-api`；CLI `serve` 与 WebUI **只走本契约**，不另开私有接口
@@ -108,6 +108,7 @@
 
 | 情况 | 状态码 |
 |---|---|
+| 创建成功 | `202` + 任务 id |
 | 参数非法 | `400` + 错误体 |
 | 模型缺失 | `503` + `code=MODEL_MISSING` |
 | 文件过大 | `413` + 错误体 |
@@ -152,7 +153,7 @@
 | `artifact=effect` | 通用效果图 |
 | `artifact=bundle` | 全部产物 zip |
 
-返回二进制流；`Content-Disposition` 带 UTF-8 文件名。参数不匹配或产物不存在：`404`。
+返回二进制流；`Content-Disposition` 带 UTF-8 文件名（与 `GET /tasks/{id}` 的 `artifacts[].filename` 一致，该字段同时供前端展示与下载定位）。参数不匹配或产物不存在：`404`。
 
 ### 3.4 GET `/tasks`
 
@@ -171,13 +172,14 @@
       "status": "succeeded",
       "message": null,
       "created_at": "2026-09-16 12:00:00.000",
-      "elapsed_ms": 2345
+      "elapsed_ms": 2345,
+      "outputs": ["task_17c0f0a2_one_inch_white.jpg", "task_17c0f0a2_one_inch_blue.jpg"]
     }
   ]
 }
 ```
 
-说明：列表供 WebUI **历史任务**（M3 必含）与 CLI 排查使用；只返回元数据，不含像素。
+说明：列表供 WebUI **历史任务**（M3 必含）与 CLI 排查使用；只返回元数据，不含像素。`outputs` 为产物文件名数组（与详情 `artifacts` 一致），满足历史任务「结果路径」展示。
 
 ### 3.5 GET `/models`
 
