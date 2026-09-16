@@ -131,7 +131,8 @@
 > - SemVer 格式：`主版本号Major.次版本号Minor.补丁号Patch[-可选标签 alpha|beta|rc]`
 
 - 使用CalVer（日历版本）版本号
-- **统一版本规范格式**：`YYYY.MM.DD.MICRO`（年.月.日.迭代号）
+- **版本规范格式**：`YYYY.MM.DD.MICRO`（年.月.日.迭代号）
+- **CHANGELOG 标题格式**：`## [YYYY.MM.DD.MICRO] - SemVer`；其中 SemVer 后缀（如 0.1.0）为**兼容标注**，供包管理器与对外发布识别，**版本主口径一律以 CalVer 为准**
 - 项目根目建立 CHANGELOG.md 文档，单个CHANGELOG.md 文档随时间线推移逐渐变得臃肿，定期归档到docs\changelogs目录
 - 根据迭代内容，严格按照 SemVer/CalVer 规则确定新版本号
 - 在稳定分支打 Tag，Tag 名称与版本号一致
@@ -196,7 +197,7 @@
 
 ### 安全
 
-[加密和脱敏](.agents\01.敏感数据加密与脱敏安全设计文档.md)
+[加密和脱敏](.agents\01-敏感数据加密与脱敏安全设计文档.md)
 
 
 
