@@ -70,8 +70,8 @@
 
 - 智能换底色：支持RGB自定义色值、常用红白蓝证件底色一键切换
 - AI美颜：磨皮、美白、提亮、肤色均衡（可开关、强度可调）
-  - OpenCV-rs 传统图像算法磨皮调色
-  - AI 美颜 ONNX 模型
+  - 纯 Rust 传统图像算法磨皮调色（双边滤波等自研算子）
+  - AI 美颜 ONNX 模型（可选扩展，默认不启用）
 - 智能换装：正装替换，适配证件照规范。 人像解析 + 虚拟试衣模型
 
 
@@ -104,9 +104,9 @@
 - clap（CLI 参数解析）
 - Axum（HTTP接口服务）
 - Tauri 2.0
--  ONNX Runtime 推理模型（CPU/CUDA 自适应）
-- **图像处理**：OpenCV-RS（旋转、仿射、融合、裁切、排版）
-- TypeScript 7.0+， React 19.2+, Tailwind CSS , ECharts , Zustand
+- ONNX Runtime 推理模型（CPU/CUDA 自适应）
+- **图像处理**：`image` + `imageproc` + `nalgebra` + 自研算子（旋转、仿射、融合、裁切、排版等；弃用 OpenCV-RS，见 `docs/adr/0001-纯Rust图像栈.md`）
+- TypeScript，React 19.2+，Tailwind CSS，Zustand；**本阶段不引入 ECharts**
 - [按需可选]中文字体内嵌（SIL 协议，无版权风险）：Noto Sans SC + 系统默认字体（保底策略）
 - [按需可选]统一入口运行配置文件：`application.toml`. 参数优先级: 命令行参数 > 环境变量 > toml 配置文件 > 默认值
 
@@ -205,6 +205,7 @@
 - 依赖单向、边界清晰、pub 收敛
 
 - 职责单一化、模块化
+- 禁止引入任何 C/C++ 图像库绑定（含 OpenCV-RS；图像处理仅用纯 Rust 栈，见 ADR-0001）
 - 禁用 npm 包管理，可用pnpm或bun
 - 禁用Maven，可用gradle
 - 使用uv管理python 软件包，禁止使用pip/venv/pipenv/poetry
@@ -218,8 +219,8 @@
 
 - https://github.com/aoguai/LiYing 
 - https://github.com/Zeyi-Lin/HivisionIDPhotos
-
-- rembg
+- rembg（RMBG 推理生态参考，非实现依赖）
+- 架构决策：`docs/adr/0001-纯Rust图像栈.md`
 
 
 
