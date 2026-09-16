@@ -1,0 +1,135 @@
+# 智能证件照工具 —— 统一入口配置样例
+# 文档：docs/02-架构设计.md §4.1
+# 参数优先级：命令行 > 环境变量（PHOTOS_ + 路径大写，. → _）> 本文件 > 默认值
+
+[general]
+data_dir = "data"
+log_dir = "logs"
+log_level = "INFO"          # DEBUG | INFO | ERROR
+default_mode = "balanced"   # speed | balanced | quality
+models_dir = "models"
+
+[models.download]
+enabled = true              # 一键下载为可选便利，处理链路本身零联网
+timeout_secs = 120
+concurrency = 2
+# base_url = "https://example.invalid/models"
+
+[models.mtcnn]
+path = "models/mtcnn.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 640, 640]
+
+[models.retinaface]
+path = "models/retinaface_r50.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 640, 640]
+
+[models.movnet_light]
+path = "models/movenet_lightning.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 192, 192, 3]
+
+[models.movnet_thunder]
+path = "models/movenet_thunder.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 256, 256, 3]
+
+[models.rmbg]
+path = "models/rmbg-1.4.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 1024, 1024]
+
+[models.birefnet_lite]
+path = "models/birefnet-lite.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 1024, 1024]
+
+[models.birefnet_full]
+path = "models/birefnet-full.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 1024, 1024]
+
+[models.modnet]
+path = "models/modnet.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 512, 512]
+# 兼容保留，不进任何预设
+
+[modes.speed]
+face = "mtcnn"
+keypoint = "movnet_light"
+matting = "rmbg"
+execution_provider = "cpu"
+
+[modes.balanced]
+face = "retinaface"
+keypoint = "movnet_light"
+matting = "birefnet_lite"
+execution_provider = "cpu"
+
+[modes.quality]
+face = "retinaface"
+keypoint = "movnet_thunder"
+matting = "birefnet_full"
+execution_provider = "cuda"
+
+[sizes.one_inch]
+name = "一寸"
+width_mm = 25.0
+height_mm = 35.0
+dpi = 300
+width_px = 295
+height_px = 413
+
+[sizes.two_inch]
+name = "二寸"
+width_mm = 35.0
+height_mm = 49.0
+dpi = 300
+width_px = 413
+height_px = 579
+
+[sizes.small_one_inch]
+name = "小一寸"
+width_mm = 22.0
+height_mm = 32.0
+dpi = 300
+width_px = 260
+height_px = 378
+
+[backgrounds.white]
+name = "白"
+rgb = [255, 255, 255]
+
+[backgrounds.blue]
+name = "蓝"
+rgb = [67, 142, 219]
+
+[backgrounds.red]
+name = "红"
+rgb = [184, 45, 50]
+
+[backgrounds.gray]
+name = "灰"
+rgb = [128, 128, 128]
+
+[layout."6inch"]
+name = "6寸相纸"
+width_mm = 102.0
+height_mm = 152.0
+margin_mm = 3.0
+gap_mm = 2.0
+
+[layout.a4]
+name = "A4"
+width_mm = 210.0
+height_mm = 297.0
+margin_mm = 8.0
+gap_mm = 3.0
+
+[beauty]
+enabled = false
+skin_smooth = 0.3
+brighten = 0.2
+whiten = 0.1
