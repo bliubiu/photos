@@ -1,0 +1,35 @@
+# photos-core：领域模型 + pipeline + 图像/推理实现。不依赖任何 HTTP / Tauri。
+[package]
+name = "photos-core"
+description = "证件照处理核心库（领域模型、流水线、图像与推理实现）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# ort：启用 ONNX Runtime 推理后端（OrtEngine）；关闭时仅提供模拟推理层（FakeEngine）。
+# 注：ort 2.0 候选版构建脚本存在文件锁问题，模型就位前默认关闭，避免阻塞构建。
+ort = ["dep:ort"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+image.workspace = true
+imageproc.workspace = true
+nalgebra.workspace = true
+sha2.workspace = true
+ort = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

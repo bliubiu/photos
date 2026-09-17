@@ -1,0 +1,12 @@
+# photos-api：Axum 路由层（M3 实现），挂载 photos-core。
+[package]
+name = "photos-api"
+description = "证件照 HTTP 服务（Axum 路由层，M3 阶段实现）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+photos-core = { path = "../photos-core" }

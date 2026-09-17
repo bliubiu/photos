@@ -1,0 +1,12 @@
+# photos-desktop：Tauri 壳（M3 实现），拉起内嵌 Axum + WebUI。唯一依赖 Tauri。
+[package]
+name = "photos-desktop"
+description = "证件照处理桌面壳（Tauri，M3 阶段实现）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+photos-api = { path = "../photos-api" }
