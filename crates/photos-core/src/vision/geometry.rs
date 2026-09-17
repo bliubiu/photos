@@ -123,9 +123,15 @@ mod tests {
 
     #[test]
     fn 阈值内自动纠偏() {
-        assert_eq!(decide_rotation(21.9, None).unwrap(), RotationDecision::Auto(21.9));
+        assert_eq!(
+            decide_rotation(21.9, None).unwrap(),
+            RotationDecision::Auto(21.9)
+        );
         // 恰好 22° 仍自动
-        assert_eq!(decide_rotation(22.0, None).unwrap(), RotationDecision::Auto(22.0));
+        assert_eq!(
+            decide_rotation(22.0, None).unwrap(),
+            RotationDecision::Auto(22.0)
+        );
         // 校正角为测量角的相反数（扶正）
         let d = decide_rotation(10.0, None).unwrap();
         assert!((d.correction() + 10.0).abs() < 1e-9);
@@ -144,8 +150,14 @@ mod tests {
 
     #[test]
     fn 手动覆盖边界() {
-        assert_eq!(decide_rotation(50.0, Some(45.0)).unwrap(), RotationDecision::Manual(45.0));
-        assert_eq!(decide_rotation(0.0, Some(-45.0)).unwrap(), RotationDecision::Manual(-45.0));
+        assert_eq!(
+            decide_rotation(50.0, Some(45.0)).unwrap(),
+            RotationDecision::Manual(45.0)
+        );
+        assert_eq!(
+            decide_rotation(0.0, Some(-45.0)).unwrap(),
+            RotationDecision::Manual(-45.0)
+        );
         assert!(decide_rotation(0.0, Some(45.1)).is_err());
         assert!(decide_rotation(0.0, Some(-45.1)).is_err());
     }

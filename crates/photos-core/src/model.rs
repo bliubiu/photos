@@ -259,7 +259,10 @@ pub fn download_model(cfg: &Config, model_id: &str) -> CoreResult<()> {
 /// 单次流式下载：HTTP GET 响应体写入临时文件（覆盖写入，保证重试幂等）
 fn download_to(url: &str, tmp: &Path, timeout: std::time::Duration) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-    let resp = agent.get(url).call().map_err(|e| format!("请求失败：{e}"))?;
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("请求失败：{e}"))?;
     let status = resp.status();
     if !(200..300).contains(&status) {
         return Err(format!("HTTP 状态码 {status}"));
@@ -291,8 +294,8 @@ pub fn ensure_model_downloaded(cfg: &Config, model_id: &str) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use crate::storage::Store;
+    use std::io::Write;
 
     fn setup() -> (tempfile::TempDir, Config, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -429,7 +432,10 @@ mod tests {
         let spec = cfg.models.get_mut("retinaface").unwrap();
         spec.path = dir.join("retinaface.onnx").display().to_string();
         spec.sha256 = expected.to_string();
-        spec.download = Some(crate::config::ModelDownload { url: Some(url.into()), ..Default::default() });
+        spec.download = Some(crate::config::ModelDownload {
+            url: Some(url.into()),
+            ..Default::default()
+        });
         cfg
     }
 
@@ -506,7 +512,8 @@ mod tests {
     fn 无下载地址自动下载报错() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
-        cfg.models.get_mut("retinaface").unwrap().path = dir.path().join("retinaface.onnx").display().to_string();
+        cfg.models.get_mut("retinaface").unwrap().path =
+            dir.path().join("retinaface.onnx").display().to_string();
         cfg.models.get_mut("retinaface").unwrap().download = None;
         let err = ensure_model_downloaded(&cfg, "retinaface").unwrap_err();
         assert!(err.to_string().contains("自动下载失败"), "实际：{err}");

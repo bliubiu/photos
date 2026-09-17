@@ -78,7 +78,9 @@ pub fn build_input(img: &RgbImage, dims: &[i64], retinaface: bool) -> CoreResult
 /// 填充色取常见推理灰值 [114,114,114]；scale 为原图→目标图的统一缩放系数。
 pub fn letterbox(img: &RgbImage, target_w: u32, target_h: u32) -> (RgbImage, LetterBox) {
     let (w, h) = img.dimensions();
-    let scale = (target_w as f32 / w.max(1) as f32).min(target_h as f32 / h.max(1) as f32).max(1e-6);
+    let scale = (target_w as f32 / w.max(1) as f32)
+        .min(target_h as f32 / h.max(1) as f32)
+        .max(1e-6);
     let new_w = (w as f32 * scale).round().max(1.0) as u32;
     let new_h = (h as f32 * scale).round().max(1.0) as u32;
     let resized = image::imageops::resize(img, new_w, new_h, image::imageops::FilterType::Triangle);
@@ -90,7 +92,14 @@ pub fn letterbox(img: &RgbImage, target_w: u32, target_h: u32) -> (RgbImage, Let
             canvas.put_pixel(pad_x as u32 + x, pad_y as u32 + y, *resized.get_pixel(x, y));
         }
     }
-    (canvas, LetterBox { scale, pad_x, pad_y })
+    (
+        canvas,
+        LetterBox {
+            scale,
+            pad_x,
+            pad_y,
+        },
+    )
 }
 
 /// RGB 图像 → NCHW 行主序 f32（C,H,W），除以 255 归一化到 [0,1]
@@ -122,7 +131,13 @@ fn rgb_to_nchw_retinaface(img: &RgbImage) -> Vec<f32> {
 /// RGB 图像 → NHWC 行主序 f32（H,W,C），除以 255 归一化到 [0,1]
 fn rgb_to_nhwc(img: &RgbImage) -> Vec<f32> {
     img.pixels()
-        .flat_map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
+        .flat_map(|p| {
+            [
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+            ]
+        })
         .collect()
 }
 
@@ -158,10 +173,21 @@ pub fn probability_map(
         let ch = (lb.scale * h as f32).round().max(1.0) as u32;
         let cx = lb.pad_x.max(0.0) as u32;
         let cy = lb.pad_y.max(0.0) as u32;
-        let sub = image::imageops::crop_imm(&prob, cx, cy, cw.min(out_w - cx), ch.min(out_h - cy)).to_image();
-        Ok(image::imageops::resize(&sub, w, h, image::imageops::FilterType::Triangle))
+        let sub = image::imageops::crop_imm(&prob, cx, cy, cw.min(out_w - cx), ch.min(out_h - cy))
+            .to_image();
+        Ok(image::imageops::resize(
+            &sub,
+            w,
+            h,
+            image::imageops::FilterType::Triangle,
+        ))
     } else if prob.dimensions() != (w, h) {
-        Ok(image::imageops::resize(&prob, w, h, image::imageops::FilterType::Triangle))
+        Ok(image::imageops::resize(
+            &prob,
+            w,
+            h,
+            image::imageops::FilterType::Triangle,
+        ))
     } else {
         Ok(prob)
     }
@@ -293,8 +319,16 @@ mod tests {
         }
         let mut canvas = GrayImage::from_pixel(100, 100, image::Luma([0u8]));
         image::imageops::replace(&mut canvas, &img, 0, 25);
-        let t = TensorData::new(vec![1, 1, 100, 100], canvas.pixels().map(|p| p[0] as f32 / 255.0).collect()).unwrap();
-        let lb = LetterBox { scale: 0.5, pad_x: 0.0, pad_y: 25.0 };
+        let t = TensorData::new(
+            vec![1, 1, 100, 100],
+            canvas.pixels().map(|p| p[0] as f32 / 255.0).collect(),
+        )
+        .unwrap();
+        let lb = LetterBox {
+            scale: 0.5,
+            pad_x: 0.0,
+            pad_y: 25.0,
+        };
         let m = probability_map(&t, 100, 50, Some(&lb)).unwrap();
         assert_eq!(m.dimensions(), (100, 50));
         // 逆变换后前景应铺满原图（内容区 50x50 还原到 100x50）

@@ -81,7 +81,11 @@ impl FakeEngine {
     }
 
     /// 构建一个「balanced 三件套」均已 stub 的引擎（便捷测试工具）
-    pub fn balanced_stub(face_out: Vec<TensorData>, keypoint_out: Vec<TensorData>, matting_out: Vec<TensorData>) -> Self {
+    pub fn balanced_stub(
+        face_out: Vec<TensorData>,
+        keypoint_out: Vec<TensorData>,
+        matting_out: Vec<TensorData>,
+    ) -> Self {
         Self::new()
             .stub("retinaface", face_out)
             .stub("movnet_light", keypoint_out)
@@ -119,7 +123,9 @@ pub struct OrtEngine {
 impl OrtEngine {
     /// 新建空引擎
     pub fn new() -> Self {
-        Self { sessions: RwLock::new(HashMap::new()) }
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+        }
     }
 
     fn model_path(cfg: &Config, model_id: &str) -> CoreResult<PathBuf> {
@@ -131,7 +137,12 @@ impl OrtEngine {
 #[cfg(feature = "ort")]
 impl InferenceEngine for OrtEngine {
     fn load(&mut self, cfg: &Config, model_id: &str) -> CoreResult<()> {
-        if self.sessions.read().map_err(lock_err)?.contains_key(model_id) {
+        if self
+            .sessions
+            .read()
+            .map_err(lock_err)?
+            .contains_key(model_id)
+        {
             return Ok(());
         }
         let path = Self::model_path(cfg, model_id)?;
@@ -141,15 +152,18 @@ impl InferenceEngine for OrtEngine {
             .map_err(|e| CoreError::Inference(format!("创建推理会话失败：{e}")))?
             .commit_from_file(&path)
             .map_err(|e| CoreError::Inference(format!("装载模型 {} 失败：{e}", path.display())))?;
-        self.sessions.write().map_err(lock_err)?.insert(model_id.to_string(), session);
+        self.sessions
+            .write()
+            .map_err(lock_err)?
+            .insert(model_id.to_string(), session);
         Ok(())
     }
 
     fn run(&self, model_id: &str, input: &TensorData) -> CoreResult<Vec<TensorData>> {
         let mut sessions = self.sessions.write().map_err(lock_err)?;
-        let session = sessions.get_mut(model_id).ok_or_else(|| {
-            CoreError::Inference(format!("模型“{model_id}”未装载"))
-        })?;
+        let session = sessions
+            .get_mut(model_id)
+            .ok_or_else(|| CoreError::Inference(format!("模型“{model_id}”未装载")))?;
         // 依据会话输入元素类型构造张量：int32（如 MoveNet 像素 0-255）时由 [0,1] 归一化还原
         let tensor = build_input_value(session, input)
             .map_err(|e| CoreError::Inference(format!("输入张量转换失败：{e}")))?;
@@ -179,9 +193,16 @@ fn build_input_value(
     let ty = session.inputs().first().map(|o| o.dtype());
     let shape = input.shape.clone();
     match ty {
-        Some(ValueType::Tensor { ty: TensorElementType::Int32, .. }) => {
+        Some(ValueType::Tensor {
+            ty: TensorElementType::Int32,
+            ..
+        }) => {
             // int32 输入（MoveNet 等）：语义为像素值 0-255，把 [0,1] 归一化数据还原为整数
-            let data: Vec<i32> = input.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as i32).collect();
+            let data: Vec<i32> = input
+                .data
+                .iter()
+                .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as i32)
+                .collect();
             Tensor::from_array((shape, data)).map(|t| t.into())
         }
         _ => {
@@ -210,7 +231,11 @@ pub fn default_engine() -> Box<dyn InferenceEngine> {
 }
 
 /// 便捷：校验某模式所需模型全部就绪（缺模型时报中文指引）
-pub fn ensure_models_ready(cfg: &Config, engine: &mut dyn InferenceEngine, mode_id: &str) -> CoreResult<()> {
+pub fn ensure_models_ready(
+    cfg: &Config,
+    engine: &mut dyn InferenceEngine,
+    mode_id: &str,
+) -> CoreResult<()> {
     let suite = cfg.mode(mode_id)?;
     for id in [&suite.face, &suite.keypoint, &suite.matting] {
         engine.load(cfg, id)?;
@@ -232,10 +257,20 @@ mod tests {
 
     #[test]
     fn fake引擎回放与缺模型错误() {
-        let engine = FakeEngine::new().stub("retinaface", vec![TensorData::new(vec![1, 2], vec![1.0, 2.0]).unwrap()]);
-        let out = engine.run("retinaface", &TensorData::new(vec![1], vec![0.0]).unwrap()).unwrap();
+        let engine = FakeEngine::new().stub(
+            "retinaface",
+            vec![TensorData::new(vec![1, 2], vec![1.0, 2.0]).unwrap()],
+        );
+        let out = engine
+            .run("retinaface", &TensorData::new(vec![1], vec![0.0]).unwrap())
+            .unwrap();
         assert_eq!(out[0].data, vec![1.0, 2.0]);
-        let err = engine.run("movnet_light", &TensorData::new(vec![1], vec![0.0]).unwrap()).unwrap_err();
+        let err = engine
+            .run(
+                "movnet_light",
+                &TensorData::new(vec![1], vec![0.0]).unwrap(),
+            )
+            .unwrap_err();
         assert!(err.to_string().contains("movnet_light"));
     }
 
@@ -244,7 +279,8 @@ mod tests {
         let mut engine = FakeEngine::new();
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
-        cfg.models.get_mut("mtcnn").unwrap().path = dir.path().join("mtcnn.onnx").display().to_string();
+        cfg.models.get_mut("mtcnn").unwrap().path =
+            dir.path().join("mtcnn.onnx").display().to_string();
         // 文件不存在 → 缺模型错误
         let err = engine.load(&cfg, "mtcnn").unwrap_err();
         assert!(err.to_string().contains("缺失"));

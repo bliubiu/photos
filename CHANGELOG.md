@@ -2,6 +2,20 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.4] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M2 排版】新增 `vision/layout` 排版引擎：相纸毫米→像素换算（按 DPI）、行列计算（边距+间距约束）、证件照居中铺版；6 寸 @300dpi 出一寸照 3×4、A4 @300dpi 出 7×7
+- 【M2 多底色】`run_pipeline` 支持底色列表 1..N：检测/抠图/纠偏只做一次，换底色（廉价 alpha 混合）按底色重复，一次请求出齐红白蓝多张证件照
+- 【M2 效果图】通用效果图出口：`--effect` 输出每底色各一张换底后全图尺寸效果图（抠图换底图）
+- 【M2 排版产物】`--layout 6inch|a4` 以首个底色证件照按相纸规格铺版输出整版相纸
+- 【M2 批处理】`photos process` 支持文件夹批量：递归收集 jpg/jpeg/png/webp/bmp，逐个落库 task_history，真实引擎复用一次装载
+- 【M2 命名规约】输出命名：`task_{id}_{size}_{bg}.jpg`（证件照）、`task_{id}_effect_{bg}.jpg`（效果图）、`task_{id}_layout_{相纸}.jpg`（排版）
+- 【M2 CLI】参数面补齐：`-b/--backgrounds` 多值逗号分隔、`--rotate`、`--effect`、`--layout`、`--beauty`（参数面预留，美颜算子属 M4）
+
+### 📈 Improvements 性能/体验优化
+- 【M2 批处理】批量处理结束汇总「成功/失败」统计，单文件失败不中断其余文件
+
 ## [2026.09.17.3] - 0.1.0
 
 ### 🐛 Bug Fixes  问题修复

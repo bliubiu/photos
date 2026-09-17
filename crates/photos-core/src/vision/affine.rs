@@ -15,7 +15,11 @@ pub fn rotation_affine(cx: f64, cy: f64, deg: f64) -> Projection {
 }
 
 /// 用同一矩阵同步变换原图（双线性）与 mask（最近邻），输出与原图同尺寸
-pub fn rotate_image_same(img: &RgbImage, mask: &GrayImage, deg: f64) -> CoreResult<(RgbImage, GrayImage)> {
+pub fn rotate_image_same(
+    img: &RgbImage,
+    mask: &GrayImage,
+    deg: f64,
+) -> CoreResult<(RgbImage, GrayImage)> {
     if img.dimensions() != mask.dimensions() {
         return Err(CoreError::Image(format!(
             "原图与 mask 尺寸不一致：{}x{} vs {}x{}",
@@ -30,18 +34,8 @@ pub fn rotate_image_same(img: &RgbImage, mask: &GrayImage, deg: f64) -> CoreResu
     }
     let (w, h) = img.dimensions();
     let m = rotation_affine(w as f64 / 2.0, h as f64 / 2.0, deg);
-    let rotated_img = warp(
-        img,
-        &m,
-        Interpolation::Bilinear,
-        Rgb([0, 0, 0]),
-    );
-    let rotated_mask = warp(
-        mask,
-        &m,
-        Interpolation::Nearest,
-        Luma([0u8]),
-    );
+    let rotated_img = warp(img, &m, Interpolation::Bilinear, Rgb([0, 0, 0]));
+    let rotated_mask = warp(mask, &m, Interpolation::Nearest, Luma([0u8]));
     Ok((rotated_img, rotated_mask))
 }
 

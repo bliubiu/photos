@@ -49,10 +49,16 @@ pub fn decode_movenet(tensor: &TensorData, img_w: u32, img_h: u32) -> CoreResult
     let rows = tensor.dim(n - 2);
     let cols = tensor.dim(n - 1);
     if rows != 17 {
-        return Err(CoreError::Image(format!("关键点行数应为 17，实际 {rows}（形状 {:?}）", tensor.shape)));
+        return Err(CoreError::Image(format!(
+            "关键点行数应为 17，实际 {rows}（形状 {:?}）",
+            tensor.shape
+        )));
     }
     if !(2..=3).contains(&cols) {
-        return Err(CoreError::Image(format!("关键点列数应为 2 或 3，实际 {cols}（形状 {:?}）", tensor.shape)));
+        return Err(CoreError::Image(format!(
+            "关键点列数应为 2 或 3，实际 {cols}（形状 {:?}）",
+            tensor.shape
+        )));
     }
     let row_len = cols as usize;
     let mut points = [None; 17];
@@ -60,7 +66,11 @@ pub fn decode_movenet(tensor: &TensorData, img_w: u32, img_h: u32) -> CoreResult
         let base = i * row_len;
         let y = tensor.data[base] as f64;
         let x = tensor.data[base + 1] as f64;
-        let score = if cols == 3 { tensor.data[base + 2] } else { 1.0 };
+        let score = if cols == 3 {
+            tensor.data[base + 2]
+        } else {
+            1.0
+        };
         points[i] = (score > 0.3).then(|| Point2::new(x * img_w as f64, y * img_h as f64));
     }
     Ok(KeypointSet { points })

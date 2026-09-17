@@ -16,7 +16,11 @@ pub fn composite(fg: &RgbImage, alpha: &GrayImage, bg: [u8; 3]) -> RgbImage {
         let r = px[0] as f32 * a + bg[0] as f32 * (1.0 - a);
         let g = px[1] as f32 * a + bg[1] as f32 * (1.0 - a);
         let b = px[2] as f32 * a + bg[2] as f32 * (1.0 - a);
-        out.put_pixel(x, y, Rgb([r.round() as u8, g.round() as u8, b.round() as u8]));
+        out.put_pixel(
+            x,
+            y,
+            Rgb([r.round() as u8, g.round() as u8, b.round() as u8]),
+        );
     }
     out
 }

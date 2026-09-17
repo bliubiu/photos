@@ -29,7 +29,10 @@ impl FaceBox {
     }
     /// 人脸框中心（旋转中心使用）
     pub fn center(&self) -> Point2 {
-        Point2::new(((self.x1 + self.x2) / 2.0) as f64, ((self.y1 + self.y2) / 2.0) as f64)
+        Point2::new(
+            ((self.x1 + self.x2) / 2.0) as f64,
+            ((self.y1 + self.y2) / 2.0) as f64,
+        )
     }
 }
 
@@ -46,17 +49,18 @@ pub fn iou(a: &FaceBox, b: &FaceBox) -> f32 {
     let inter_h = (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
     let inter = inter_w * inter_h;
     let union = a.area() + b.area() - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 /// 贪心 NMS：按分数降序，抑制与已选框 IoU 超过阈值的框，返回保留索引
 pub fn nms(boxes: &[FaceBox], iou_threshold: f32) -> Vec<usize> {
     let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_by(|&i, &j| boxes[j].score.partial_cmp(&boxes[i].score).unwrap_or(Ordering::Equal));
+    order.sort_by(|&i, &j| {
+        boxes[j]
+            .score
+            .partial_cmp(&boxes[i].score)
+            .unwrap_or(Ordering::Equal)
+    });
     let mut keep = Vec::new();
     let mut suppressed = vec![false; boxes.len()];
     for &i in &order {
@@ -93,7 +97,12 @@ fn retinaface_priors(image_h: u32, image_w: u32) -> Vec<[f32; 4]> {
                 for &min_size in &RF_MIN_SIZES[idx] {
                     let s_kx = min_size / image_w as f32;
                     let s_ky = min_size / image_h as f32;
-                    priors.push([(x as f32 + 0.5) / fw as f32, (y as f32 + 0.5) / fh as f32, s_kx, s_ky]);
+                    priors.push([
+                        (x as f32 + 0.5) / fw as f32,
+                        (y as f32 + 0.5) / fh as f32,
+                        s_kx,
+                        s_ky,
+                    ]);
                 }
             }
         }
@@ -187,7 +196,10 @@ pub fn decode_retinaface(
         let lm = decode_landm(&landmarks.data[i * 10..i * 10 + 10], &priors[i]);
         let mut points = [Point2::new(0.0, 0.0); 5];
         for (k, p) in points.iter_mut().enumerate() {
-            *p = Point2::new(lm[k * 2] as f64 * iw as f64, lm[k * 2 + 1] as f64 * ih as f64);
+            *p = Point2::new(
+                lm[k * 2] as f64 * iw as f64,
+                lm[k * 2 + 1] as f64 * ih as f64,
+            );
         }
         detections.push(FaceDetection {
             face: FaceBox {
@@ -201,7 +213,10 @@ pub fn decode_retinaface(
         });
     }
 
-    let keep = nms(&detections.iter().map(|d| d.face).collect::<Vec<_>>(), iou_threshold);
+    let keep = nms(
+        &detections.iter().map(|d| d.face).collect::<Vec<_>>(),
+        iou_threshold,
+    );
     let mut out = Vec::new();
     for &idx in &keep {
         let mut d = detections[idx].clone();
@@ -223,7 +238,13 @@ mod tests {
     use super::*;
 
     fn box_(x1: f32, y1: f32, x2: f32, y2: f32, s: f32) -> FaceBox {
-        FaceBox { x1, y1, x2, y2, score: s }
+        FaceBox {
+            x1,
+            y1,
+            x2,
+            y2,
+            score: s,
+        }
     }
 
     #[test]
@@ -240,9 +261,9 @@ mod tests {
     fn nms抑制重叠低分框() {
         let boxes = vec![
             box_(0.0, 0.0, 10.0, 10.0, 0.9),
-            box_(1.0, 1.0, 11.0, 11.0, 0.5), // 高 IoU 低分 → 抑制
+            box_(1.0, 1.0, 11.0, 11.0, 0.5),   // 高 IoU 低分 → 抑制
             box_(50.0, 50.0, 60.0, 60.0, 0.8), // 独立 → 保留
-            box_(0.0, 0.0, 10.0, 10.0, 0.95), // 高 IoU 更高分 → 覆盖第一个
+            box_(0.0, 0.0, 10.0, 10.0, 0.95),  // 高 IoU 更高分 → 覆盖第一个
         ];
         let keep = nms(&boxes, 0.5);
         assert_eq!(keep, vec![3, 2]);
@@ -326,8 +347,36 @@ mod tests {
         let s = TensorData::new(vec![2], vec![0.9, 0.8]).unwrap();
         let b = TensorData::new(vec![2, 4], vec![0.0; 8]).unwrap();
         let lm = TensorData::new(vec![2, 10], vec![0.0; 20]).unwrap();
-        assert!(decode_retinaface(&s, &TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(), &lm, 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
-        assert!(decode_retinaface(&s, &b, &TensorData::new(vec![1, 10], vec![0.0; 10]).unwrap(), 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
+        assert!(
+            decode_retinaface(
+                &s,
+                &TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(),
+                &lm,
+                0.5,
+                0.5,
+                (64, 64),
+                1.0,
+                1.0,
+                0.0,
+                0.0
+            )
+            .is_err()
+        );
+        assert!(
+            decode_retinaface(
+                &s,
+                &b,
+                &TensorData::new(vec![1, 10], vec![0.0; 10]).unwrap(),
+                0.5,
+                0.5,
+                (64, 64),
+                1.0,
+                1.0,
+                0.0,
+                0.0
+            )
+            .is_err()
+        );
     }
 
     #[test]

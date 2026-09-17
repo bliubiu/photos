@@ -11,13 +11,15 @@ use image::{GrayImage, RgbImage};
 use crate::config::Config;
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
-use crate::preprocess::{build_input, probability_map, LetterBox};
+use crate::preprocess::{LetterBox, build_input, probability_map};
 use crate::vision::affine::rotate_image_same;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
 use crate::vision::face::{decode_retinaface, retinaface_prior_count};
-use crate::vision::geometry::{decide_rotation, fused_angle, head_angle, shoulder_angle, RotationDecision};
-use crate::vision::keypoint::{decode_movenet, KeypointSet};
+use crate::vision::geometry::{
+    RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
+};
+use crate::vision::keypoint::{KeypointSet, decode_movenet};
 use crate::vision::matting::{morph_open, threshold_mask};
 
 /// 人脸检测分数阈值
@@ -35,7 +37,7 @@ const CROP_TOP_RATIO: f64 = 0.2;
 /// 下巴余量 = 0.1 × 脸高
 const CROP_BOTTOM_RATIO: f64 = 0.1;
 
-/// 处理请求（单图）
+/// 处理请求（单图，多产物）
 #[derive(Debug, Clone)]
 pub struct ProcessRequest {
     /// 输入图片路径
@@ -44,17 +46,36 @@ pub struct ProcessRequest {
     pub mode: String,
     /// 尺寸标准 id（如 one_inch）
     pub size: String,
-    /// 底色 id（如 white）
-    pub bg: String,
-    /// 手动纠偏角度（度，可选）
+    /// 底色 id 列表（1..N，每底色各出一张证件照）
+    pub bgs: Vec<String>,
+    /// 手动纠偏角度（度，可选，上限 ±45）
     pub rotate: Option<f64>,
+    /// 是否输出通用效果图（每底色各一张，保持旋转后全图尺寸）
+    pub effect: bool,
+    /// 排版相纸 id（如 6inch | a4，可选；以首个底色证件照铺版）
+    pub layout: Option<String>,
+    /// 美颜开关（M2 参数面预留，M4 实现算子）
+    pub beauty: bool,
 }
 
-/// 处理结果（最终证件照 + 元数据）
+/// 单底色产物（证件照或效果图）
+#[derive(Debug)]
+pub struct BgOutput {
+    /// 底色 id（与配置一致，用于命名）
+    pub bg: String,
+    /// 输出图像
+    pub image: RgbImage,
+}
+
+/// 处理结果（一次请求多产物）
 #[derive(Debug)]
 pub struct PipelineResult {
-    /// 最终证件照（RGB）
-    pub image: RgbImage,
+    /// 每底色证件照（1..N 张）
+    pub photos: Vec<BgOutput>,
+    /// 每底色效果图（可选，effect=true 时）
+    pub effects: Vec<BgOutput>,
+    /// 排版相纸（可选，layout 指定时）
+    pub layout: Option<RgbImage>,
     /// 纠偏决策（含校正角与告警）
     pub decision: RotationDecision,
     /// 处理告警（降级原因等）
@@ -67,10 +88,17 @@ pub fn run_pipeline(
     engine: &mut dyn InferenceEngine,
     req: &ProcessRequest,
 ) -> CoreResult<PipelineResult> {
-    // 1. 解析模式/尺寸/底色，并校验该模式模型就绪（缺失给出中文指引）
+    // 1. 解析模式/尺寸/底色列表，并校验该模式模型就绪（缺失给出中文指引）
     let suite = cfg.mode(&req.mode)?;
     let size = cfg.size(&req.size)?;
-    let bg = cfg.background(&req.bg)?;
+    if req.bgs.is_empty() {
+        return Err(CoreError::ConfigValidate("底色列表不能为空".into()));
+    }
+    let bgs = req
+        .bgs
+        .iter()
+        .map(|id| cfg.background(id).map(|b| (id.clone(), b)))
+        .collect::<CoreResult<Vec<_>>>()?;
     ensure_models_ready(cfg, engine, &req.mode)?;
 
     // 2. 读图（统一 RGB）
@@ -106,7 +134,10 @@ pub fn run_pipeline(
         &face_outs[2],
         FACE_SCORE_THRESHOLD,
         NMS_IOU_THRESHOLD,
-        (face_spec.input_dims[2] as u32, face_spec.input_dims[3] as u32),
+        (
+            face_spec.input_dims[2] as u32,
+            face_spec.input_dims[3] as u32,
+        ),
         scale_x,
         scale_y,
         pad_x,
@@ -129,10 +160,8 @@ pub fn run_pipeline(
     // 6. 同步几何纠偏（同一仿射矩阵变换原图与 mask）
     let (rot_img, rot_mask) = rotate_image_same(&img, &mask, decision.correction())?;
 
-    // 7. 换底色（mask 羽化后逐像素 alpha 混合）
-    let composed = composite_feathered(&rot_img, &rot_mask, bg.rgb, MASK_FEATHER_SIGMA);
-
-    // 8. 裁剪 + 缩放（人脸框在原图坐标；M1 小角度近似不随旋转变换）
+    // 7. 换底色（mask 羽化后逐像素 alpha 混合，按底色重复；廉价操作只做一次检测/抠图/纠偏）
+    // 7.1 裁剪框与底色无关，先算一次
     let crop = compute_crop(
         &face.face,
         w,
@@ -142,10 +171,47 @@ pub fn run_pipeline(
         CROP_TOP_RATIO,
         CROP_BOTTOM_RATIO,
     )?;
-    let final_img = crop_resize(&composed, &crop, size.width_px, size.height_px)?;
+    let mut photos = Vec::with_capacity(bgs.len());
+    let mut effects = Vec::new();
+    for (bg_id, bg) in &bgs {
+        // 效果图：换底后保持旋转全图尺寸
+        let composed = composite_feathered(&rot_img, &rot_mask, bg.rgb, MASK_FEATHER_SIGMA);
+        if req.effect {
+            effects.push(BgOutput {
+                bg: bg_id.clone(),
+                image: composed.clone(),
+            });
+        }
+        // 证件照：按人脸框裁切缩放
+        let final_img = crop_resize(&composed, &crop, size.width_px, size.height_px)?;
+        photos.push(BgOutput {
+            bg: bg_id.clone(),
+            image: final_img,
+        });
+    }
+
+    // 8. 排版相纸（可选）：以首个底色证件照按相纸规格铺版
+    let layout_img = match &req.layout {
+        Some(layout_id) => {
+            let spec = cfg.layout.get(layout_id).ok_or_else(|| {
+                CoreError::ConfigValidate(format!(
+                    "未知排版“{layout_id}”，可选：{}",
+                    cfg.layout.keys().cloned().collect::<Vec<_>>().join("、")
+                ))
+            })?;
+            Some(crate::vision::layout::compose(
+                &photos[0].image,
+                spec,
+                size.dpi,
+            )?)
+        }
+        None => None,
+    };
 
     Ok(PipelineResult {
-        image: final_img,
+        photos,
+        effects,
+        layout: layout_img,
         decision,
         warnings,
     })
@@ -212,7 +278,11 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
         .collect::<Vec<f32>>();
     let matting = TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap();
-    FakeEngine::balanced_stub(face_out, vec![TensorData::new(vec![1, 17, 3], kp).unwrap()], vec![matting])
+    FakeEngine::balanced_stub(
+        face_out,
+        vec![TensorData::new(vec![1, 17, 3], kp).unwrap()],
+        vec![matting],
+    )
 }
 
 /// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；缺失时降级并记录告警
@@ -253,12 +323,15 @@ mod tests {
             input,
             mode: "balanced".into(),
             size: "one_inch".into(),
-            bg: "white".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: false,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 一寸 295x413
-        assert_eq!(result.image.dimensions(), (295, 413));
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
         // 双眼/双肩水平 → 融合角 0 → Auto(0)，无告警
         assert_eq!(result.decision, RotationDecision::Auto(0.0));
         assert!(result.warnings.is_empty());
@@ -276,7 +349,10 @@ mod tests {
             input,
             mode: "balanced".into(),
             size: "one_inch".into(),
-            bg: "white".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: false,
             rotate: Some(10.0),
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -288,7 +364,9 @@ mod tests {
         let mut cfg = Config::default();
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
-        RgbImage::from_pixel(10, 10, Rgb([0, 0, 0])).save(&input).unwrap();
+        RgbImage::from_pixel(10, 10, Rgb([0, 0, 0]))
+            .save(&input)
+            .unwrap();
         // balanced 三件套指向不存在路径且无下载地址 → 自动下载失败给出中文指引（不触发真实网络）
         for id in ["retinaface", "movnet_light", "birefnet_lite"] {
             let spec = cfg.models.get_mut(id).unwrap();
@@ -300,7 +378,10 @@ mod tests {
             input,
             mode: "balanced".into(),
             size: "one_inch".into(),
-            bg: "white".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: false,
             rotate: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
@@ -336,12 +417,141 @@ mod tests {
             input,
             mode: "balanced".into(),
             size: "one_inch".into(),
-            bg: "white".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: false,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 对齐后正常出图；mask 全 0（全透明）→ 换底色为纯白
-        assert_eq!(result.image.dimensions(), (295, 413));
-        assert!(result.image.pixels().all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255));
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
+        assert!(
+            result.photos[0]
+                .image
+                .pixels()
+                .all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255)
+        );
+    }
+
+    #[test]
+    fn 多底色各出一张且颜色互不相同() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into(), "blue".into(), "red".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: false,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        assert_eq!(result.photos.len(), 3);
+        for p in &result.photos {
+            assert_eq!(p.image.dimensions(), (295, 413));
+        }
+        // 底色顺序与请求一致，画布外区域（左上角）为对应底色
+        assert_eq!(result.photos[0].bg, "white");
+        assert_eq!(result.photos[1].bg, "blue");
+        assert_eq!(result.photos[2].bg, "red");
+        assert_eq!(result.photos[0].image.get_pixel(0, 0)[0], 255);
+        assert_eq!(result.photos[1].image.get_pixel(0, 0), &Rgb([67, 142, 219]));
+        assert_eq!(result.photos[2].image.get_pixel(0, 0), &Rgb([184, 45, 50]));
+        // 未请求效果图/排版 → 无多余产物
+        assert!(result.effects.is_empty());
+        assert!(result.layout.is_none());
+    }
+
+    #[test]
+    fn 效果图保持全图尺寸并逐底色输出() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into(), "blue".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: false,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        // 效果图 = 旋转后全图尺寸（纠偏角 0 → 原图 100x140）
+        assert_eq!(result.effects.len(), 2);
+        assert_eq!(result.effects[0].bg, "white");
+        assert_eq!(result.effects[0].image.dimensions(), (100, 140));
+        assert_eq!(result.effects[1].bg, "blue");
+        assert_eq!(result.effects[1].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 排版相纸输出() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: Some("6inch".into()),
+            beauty: false,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        let canvas = result.layout.expect("应有排版相纸");
+        assert_eq!(canvas.dimensions(), (1205, 1795));
+    }
+
+    #[test]
+    fn 空底色列表与未知排版报错() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([0, 0, 0]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        // 空底色列表 → 中文报错
+        let req = ProcessRequest {
+            input: input.clone(),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec![],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: false,
+        };
+        let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
+        assert!(err.to_string().contains("底色"), "实际：{err}");
+        // 未知排版 id → 中文报错
+        let req2 = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: Some("b5".into()),
+            beauty: false,
+        };
+        let err2 = run_pipeline(&cfg, &mut engine, &req2).unwrap_err();
+        assert!(err2.to_string().contains("未知排版"), "实际：{err2}");
     }
 }

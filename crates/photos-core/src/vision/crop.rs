@@ -72,7 +72,12 @@ pub fn crop_resize(
     for (dx, dy, p) in cropped.enumerate_pixels_mut() {
         *p = *img.get_pixel(rect.x + dx, rect.y + dy);
     }
-    let resized = image::imageops::resize(&cropped, target_w, target_h, image::imageops::FilterType::Lanczos3);
+    let resized = image::imageops::resize(
+        &cropped,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Lanczos3,
+    );
     Ok(resized)
 }
 
@@ -83,7 +88,13 @@ mod tests {
     #[test]
     fn 无钳制时比例与位置正确() {
         // 100x140 图，脸 (30,40)-(70,90)（w=40,h=50）
-        let face = FaceBox { x1: 30.0, y1: 40.0, x2: 70.0, y2: 90.0, score: 0.99 };
+        let face = FaceBox {
+            x1: 30.0,
+            y1: 40.0,
+            x2: 70.0,
+            y2: 90.0,
+            score: 0.99,
+        };
         let r = compute_crop(&face, 100, 140, 295, 413, 0.2, 0.1).unwrap();
         let ratio = r.width as f64 / r.height as f64;
         assert!((ratio - 295.0 / 413.0).abs() < 0.01, "比例失真 {ratio}");
@@ -97,7 +108,13 @@ mod tests {
     #[test]
     fn 超宽钳制保持比例() {
         // 极宽图导致按高度算的宽度超限 → 钳制宽度，比例保持
-        let face = FaceBox { x1: 0.0, y1: 0.0, x2: 10.0, y2: 10.0, score: 0.9 };
+        let face = FaceBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+            score: 0.9,
+        };
         let r = compute_crop(&face, 50, 500, 1, 2, 0.0, 0.0).unwrap();
         let ratio = r.width as f64 / r.height as f64;
         assert!((ratio - 0.5).abs() < 0.01, "比例失真 {ratio}");
@@ -106,16 +123,34 @@ mod tests {
 
     #[test]
     fn 参数非法报错() {
-        let face = FaceBox { x1: 0.0, y1: 0.0, x2: 10.0, y2: 10.0, score: 0.9 };
+        let face = FaceBox {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+            score: 0.9,
+        };
         assert!(compute_crop(&face, 0, 100, 100, 100, 0.1, 0.1).is_err());
-        let bad = FaceBox { x1: 5.0, y1: 5.0, x2: 5.0, y2: 5.0, score: 0.9 };
+        let bad = FaceBox {
+            x1: 5.0,
+            y1: 5.0,
+            x2: 5.0,
+            y2: 5.0,
+            score: 0.9,
+        };
         assert!(compute_crop(&bad, 100, 100, 100, 100, 0.1, 0.1).is_err());
     }
 
     #[test]
     fn 裁剪缩放尺寸正确() {
         let img = image::RgbImage::from_pixel(100, 140, image::Rgb([5, 6, 7]));
-        let face = FaceBox { x1: 30.0, y1: 40.0, x2: 70.0, y2: 90.0, score: 0.99 };
+        let face = FaceBox {
+            x1: 30.0,
+            y1: 40.0,
+            x2: 70.0,
+            y2: 90.0,
+            score: 0.99,
+        };
         let r = compute_crop(&face, 100, 140, 295, 413, 0.2, 0.1).unwrap();
         let out = crop_resize(&img, &r, 295, 413).unwrap();
         assert_eq!(out.dimensions(), (295, 413));

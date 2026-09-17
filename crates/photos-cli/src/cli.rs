@@ -19,7 +19,7 @@ pub struct Cli {
 pub enum Commands {
     /// 查看模型注册表状态 / 一键下载模型
     Models(ModelsArgs),
-    /// 处理证件照（单图，M1 实现）
+    /// 处理证件照（单图或文件夹批量，一次出齐多底色/效果图/排版）
     Process(ProcessArgs),
     /// 启动本地 HTTP 服务（M3 实现）
     Serve,
@@ -48,11 +48,11 @@ pub enum ModelsCommand {
     },
 }
 
-/// 单图处理参数
+/// 单图 / 文件夹批量处理参数
 #[derive(Debug, clap::Args)]
 pub struct ProcessArgs {
-    /// 输入图片路径
-    #[arg(value_name = "输入图片")]
+    /// 输入图片路径或文件夹（文件夹递归处理其中图片）
+    #[arg(value_name = "输入图片/文件夹")]
     pub input: PathBuf,
     /// 运行模式：speed | balanced | quality
     #[arg(short, long, value_name = "模式")]
@@ -60,12 +60,21 @@ pub struct ProcessArgs {
     /// 尺寸标准 id（默认 one_inch）
     #[arg(long, value_name = "尺寸")]
     pub size: Option<String>,
-    /// 底色 id（默认 white）
-    #[arg(long, value_name = "底色")]
-    pub bg: Option<String>,
+    /// 底色 id 列表，逗号分隔（默认 white；如 red,blue,white）
+    #[arg(short = 'b', long, value_name = "底色")]
+    pub backgrounds: Option<String>,
     /// 手动纠偏角度（度，上限 ±45）
     #[arg(long, value_name = "角度")]
     pub rotate: Option<f64>,
+    /// 输出通用效果图（每底色各一张，保持全图尺寸）
+    #[arg(long)]
+    pub effect: bool,
+    /// 排版相纸 id（6inch | a4，以首个底色证件照铺版）
+    #[arg(long, value_name = "相纸")]
+    pub layout: Option<String>,
+    /// 美颜开关（参数面预留，M4 实现算子）
+    #[arg(long)]
+    pub beauty: bool,
     /// 演示模式：不依赖模型，用内置 mock 回放跑通全链路出图
     #[arg(long)]
     pub demo: bool,

@@ -7,4 +7,5 @@ pub mod crop;
 pub mod face;
 pub mod geometry;
 pub mod keypoint;
+pub mod layout;
 pub mod matting;
