@@ -150,7 +150,7 @@ fn check_one(
 
 /// 解析模型路径：绝对路径直接使用，相对路径以当前工作目录为基准
 /// （注册表 path 如 `models/mtcnn.onnx` 已相对项目根，勿与 models_dir 拼接造成重复）
-fn resolve_model_path(_cfg: &Config, spec_path: &Path) -> PathBuf {
+pub fn resolve_model_path(_cfg: &Config, spec_path: &Path) -> PathBuf {
     if spec_path.is_absolute() {
         spec_path.to_path_buf()
     } else {

@@ -94,7 +94,7 @@ impl InferenceEngine for FakeEngine {
         }
         // 未 stub：按磁盘校验（复用模型管理逻辑）
         let spec = cfg.model_spec(model_id)?;
-        let path = Path::new(&cfg.general.models_dir).join(&spec.path);
+        let path = crate::model::resolve_model_path(cfg, Path::new(&spec.path));
         if !path.exists() {
             return Err(CoreError::Model(format!(
                 "模型“{model_id}”缺失：{}。请按 docs/04-模型清单.md §6 放置模型或使用一键下载",
@@ -128,8 +128,7 @@ impl OrtEngine {
 
     fn model_path(cfg: &Config, model_id: &str) -> CoreResult<PathBuf> {
         let spec = cfg.model_spec(model_id)?;
-        let path = Path::new(&cfg.general.models_dir).join(&spec.path);
-        Ok(path)
+        Ok(crate::model::resolve_model_path(cfg, Path::new(&spec.path)))
     }
 }
 

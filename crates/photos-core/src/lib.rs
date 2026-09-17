@@ -8,5 +8,6 @@ pub mod error;
 pub mod inference;
 pub mod logging;
 pub mod model;
+pub mod pipeline;
 pub mod storage;
 pub mod vision;
