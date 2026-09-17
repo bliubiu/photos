@@ -182,6 +182,23 @@ impl InferenceEngine for OrtEngine {
                 );
             }
         }
+        // 资源限制（[inference]）：线程数 0 表示交由 ONNX Runtime 自动决定（通常吃满物理核）；
+        // 关闭内存复用池可降低峰值内存，代价是性能略降
+        if cfg.inference.intra_threads > 0 {
+            builder = builder
+                .with_intra_threads(cfg.inference.intra_threads)
+                .map_err(|e| CoreError::Inference(format!("设置推理线程数失败：{e}")))?;
+        }
+        if cfg.inference.inter_threads > 0 {
+            builder = builder
+                .with_inter_threads(cfg.inference.inter_threads)
+                .map_err(|e| CoreError::Inference(format!("设置算子间并行线程数失败：{e}")))?;
+        }
+        if !cfg.inference.memory_pattern {
+            builder = builder
+                .with_memory_pattern(false)
+                .map_err(|e| CoreError::Inference(format!("关闭内存复用池失败：{e}")))?;
+        }
         let session = builder
             .commit_from_file(&path)
             .map_err(|e| CoreError::Inference(format!("装载模型 {} 失败：{e}", path.display())))?;
@@ -204,7 +221,7 @@ impl InferenceEngine for OrtEngine {
             .run(ort::inputs![tensor])
             .map_err(|e| CoreError::Inference(format!("推理失败：{e}")))?;
         let mut result = Vec::new();
-        for (name, value) in outputs {
+        for (_name, value) in outputs {
             let arr = value
                 .try_extract_array::<f32>()
                 .map_err(|e| CoreError::Inference(format!("输出张量解析失败：{e}")))?;

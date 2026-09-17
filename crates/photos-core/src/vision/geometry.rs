@@ -32,14 +32,26 @@ pub fn line_angle(p1: &Point2, p2: &Point2) -> f64 {
     (p2.y - p1.y).atan2(p2.x - p1.x).to_degrees()
 }
 
-/// 头部角：双眼连线（左眼 → 右眼）
+/// 头部角：双眼连线倾角（按图像 x 递增方向规范化）
 pub fn head_angle(left_eye: &Point2, right_eye: &Point2) -> f64 {
-    line_angle(left_eye, right_eye)
+    horizontal_angle(left_eye, right_eye)
 }
 
-/// 肩线角：双肩连线（左肩 → 右肩）
+/// 肩线角：双肩连线倾角（按图像 x 递增方向规范化）
 pub fn shoulder_angle(left_shoulder: &Point2, right_shoulder: &Point2) -> f64 {
-    line_angle(left_shoulder, right_shoulder)
+    horizontal_angle(left_shoulder, right_shoulder)
+}
+
+/// 两点连线相对水平的倾角（逆时针为正，右端抬高为负）。
+/// 关键点命名沿用解剖学左右（MoveNet/COCO 约定：`left_*` 指人物自身左侧），
+/// 面对面拍摄时与图像左右相反，直接按传入顺序求角会得到 ≈±180° 的伪角，
+/// 故此处按图像 x 递增方向规范化，结果落在 ±90°。
+fn horizontal_angle(a: &Point2, b: &Point2) -> f64 {
+    if a.x <= b.x {
+        line_angle(a, b)
+    } else {
+        line_angle(b, a)
+    }
 }
 
 /// 融合角：0.6 × 头部角 + 0.4 × 肩线角
@@ -113,6 +125,24 @@ mod tests {
         let r = Point2::new(100.0, 10.0);
         let a = line_angle(&l, &r);
         assert!((a + 5.7106).abs() < 1e-3, "实际 {a}");
+    }
+
+    #[test]
+    fn 关键点左右与图像相反时角度为真实倾角() {
+        // MoveNet/COCO 约定：left_* 为人物自身左侧，面对面拍摄时位于图像右侧
+        let left_eye = Point2::new(370.0, 140.4);
+        let right_eye = Point2::new(330.0, 139.3);
+        let a = head_angle(&left_eye, &right_eye);
+        assert!(a.abs() < 10.0, "应为小倾角而非 ≈180° 伪角，实际 {a}");
+        assert!((a - 1.58).abs() < 0.1, "实际 {a}");
+        // 参数顺序颠倒不影响结果（方向已按图像 x 规范化）
+        assert!((head_angle(&right_eye, &left_eye) - a).abs() < 1e-9);
+        // 肩线同理：图像左肩 x 更小 → 不交换
+        let sl = Point2::new(225.0, 312.5);
+        let sr = Point2::new(461.4, 312.8);
+        let s = shoulder_angle(&sr, &sl);
+        assert!((s - 0.07).abs() < 0.1, "实际 {s}");
+        assert!((shoulder_angle(&sl, &sr) - s).abs() < 1e-9);
     }
 
     #[test]

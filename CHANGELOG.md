@@ -2,6 +2,20 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.12] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【资源限制】新增 `[inference]` 段约束 ONNX Runtime 资源：`intra_threads`（单算子内并行线程）、`inter_threads`（算子间并行线程）、`memory_pattern`（内存复用池开关，关闭可降峰值内存）；`0` 表示交由 ORT 自动决定
+- 【资源限制】新增 `[general] max_input_side`：输入图最大边长（px，`0` = 不限制），超限时等比预缩放后再进流水线，压降峰值内存与推理耗时；CLI/API 侧 demo 引擎构造同步按缩放后尺寸对齐
+- 【资源限制】新增 `[server] max_concurrent_tasks`：API 最大并发处理任务数由配置驱动（原先硬编码 2），超出部分排队；`validate()` 拦截 0 值
+
+### 🐛 Bug Fixes  问题修复
+- 【姿态纠偏】修复 MoveNet/COCO 关键点左右语义导致的伪角缺陷：`left_*` 指人物自身左侧，面对面拍摄时位于图像右侧，按传入顺序求角得到 ≈±180°，使任何真实照片都触发「角度超限」降级、自动纠偏实质失效；现按图像 x 递增方向规范化，测量角回归真实倾角
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`：配置骨架补 `[inference]`/`[server]` 段，新增「资源限制（CPU / 内存）」说明表
+- `docs/examples/application.toml`：补三处资源限制配置项与注释
+
 ## [2026.09.17.11]
 
 ### ✨ New Features 新增功能

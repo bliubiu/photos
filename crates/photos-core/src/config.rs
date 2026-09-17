@@ -38,6 +38,12 @@ pub struct Config {
     /// 美颜参数 `[beauty]`
     #[serde(default)]
     pub beauty: BeautyConfig,
+    /// 推理资源参数 `[inference]`
+    #[serde(default)]
+    pub inference: InferenceConfig,
+    /// 服务参数 `[server]`
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 /// 全局段
@@ -58,6 +64,9 @@ pub struct GeneralConfig {
     /// 模型根目录
     #[serde(default = "default_models_dir")]
     pub models_dir: String,
+    /// 输入图最大边长（px，0 = 不限制；超限时等比预缩放，降低峰值内存与耗时）
+    #[serde(default)]
+    pub max_input_side: u32,
 }
 
 /// 日志级别（DEBUG | INFO | ERROR）
@@ -202,6 +211,46 @@ pub struct BeautyConfig {
     pub whiten: f64,
 }
 
+/// 推理资源参数 `[inference]`：约束 ONNX Runtime 的线程与内存行为
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InferenceConfig {
+    /// 单算子内并行线程数（0 = 由 ONNX Runtime 自动决定，通常吃满物理核）
+    #[serde(default)]
+    pub intra_threads: usize,
+    /// 算子间并行线程数（0 = 自动）
+    #[serde(default)]
+    pub inter_threads: usize,
+    /// 是否启用内存复用池（关闭可降低峰值内存，代价是性能略降）
+    #[serde(default = "default_true")]
+    pub memory_pattern: bool,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            intra_threads: 0,
+            inter_threads: 0,
+            memory_pattern: default_true(),
+        }
+    }
+}
+
+/// 服务参数 `[server]`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// 最大并发处理任务数（超出后排队；必须 ≥1）
+    #[serde(default = "default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: default_max_concurrent_tasks(),
+        }
+    }
+}
+
 impl Config {
     /// 默认加载：优先读取当前目录 `application.toml`，再叠加环境变量
     pub fn load() -> CoreResult<Self> {
@@ -257,6 +306,11 @@ impl Config {
         if self.backgrounds.is_empty() {
             return Err(CoreError::ConfigValidate(
                 "底色集（[backgrounds]）不能为空".into(),
+            ));
+        }
+        if self.server.max_concurrent_tasks == 0 {
+            return Err(CoreError::ConfigValidate(
+                "[server] max_concurrent_tasks 必须 ≥ 1（设为 0 会导致所有任务永久排队）".into(),
             ));
         }
         for (suite_id, suite) in &self.modes {
@@ -332,6 +386,8 @@ impl Default for Config {
             backgrounds: default_backgrounds(),
             layout: default_layout(),
             beauty: BeautyConfig::default(),
+            inference: InferenceConfig::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -344,6 +400,7 @@ impl Default for GeneralConfig {
             log_level: LogLevel::Info,
             default_mode: default_mode(),
             models_dir: default_models_dir(),
+            max_input_side: 0,
         }
     }
 }
@@ -400,6 +457,9 @@ fn default_brighten() -> f64 {
 fn default_whiten() -> f64 {
     0.1
 }
+fn default_max_concurrent_tasks() -> usize {
+    2
+}
 
 fn default_models() -> BTreeMap<String, ModelSpec> {
     let mut m = BTreeMap::new();
@@ -454,20 +514,36 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
     m
 }
 
-/// 默认注册表下载地址（一键下载开箱即用；balanced 三件套已就绪，其余可自行补充）
+/// 默认注册表下载地址（一键下载开箱即用；优先 GitHub，HF 走 hf-mirror 以适配国内网络）
 fn default_download_url(id: &str) -> Option<ModelDownload> {
     let url = match id {
         "retinaface" => {
             "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/retinaface-resnet50.onnx"
         }
         "movnet_light" => {
-            "https://huggingface.co/Xenova/movenet-singlepose-lightning/resolve/main/onnx/model.onnx"
+            "https://hf-mirror.com/Xenova/movenet-singlepose-lightning/resolve/main/onnx/model.onnx"
+        }
+        "movnet_thunder" => {
+            "https://hf-mirror.com/Xenova/movenet-singlepose-thunder/resolve/main/onnx/model.onnx"
         }
         "birefnet_lite" => {
             "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx"
         }
+        "birefnet_full" => {
+            "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx"
+        }
+        "rmbg" => {
+            "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx"
+        }
+        "modnet" => {
+            "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/modnet_photographic_portrait_matting.onnx"
+        }
         "parsing_lip" => {
-            "https://huggingface.co/levihsu/OOTDiffusion/resolve/main/checkpoints/humanparsing/parsing_lip.onnx"
+            "https://hf-mirror.com/levihsu/OOTDiffusion/resolve/main/checkpoints/humanparsing/parsing_lip.onnx"
+        }
+        "mtcnn" => {
+            // 社区常见单文件 MTCNN ONNX（P-Net 风格）；若失效见 docs/04-模型清单.md §6 手动放置
+            "https://hf-mirror.com/onnx-community/mtcnn_onnx/resolve/main/mtcnn.onnx"
         }
         _ => return None,
     };
@@ -760,6 +836,53 @@ mod tests {
         assert!(!cfg.beauty.enabled);
         // 默认配置中不存在 "download" 注册条目
         assert!(!cfg.models.contains_key("download"));
+    }
+
+    #[test]
+    fn 资源限制默认值与并发零值校验() {
+        let cfg = Config::default();
+        assert_eq!(cfg.general.max_input_side, 0);
+        assert_eq!(cfg.inference.intra_threads, 0);
+        assert_eq!(cfg.inference.inter_threads, 0);
+        assert!(cfg.inference.memory_pattern);
+        assert_eq!(cfg.server.max_concurrent_tasks, 2);
+        // 并发上限为 0 会导致任务永久排队，视为非法配置
+        let mut bad = Config::default();
+        bad.server.max_concurrent_tasks = 0;
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("max_concurrent_tasks"), "实际 {err}");
+    }
+
+    #[test]
+    fn toml覆盖资源限制() {
+        // 与 env 测试串行，避免读到并行测试设置的临时环境变量
+        let _g = with_envs::<&str, &str>(&[], || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("application.toml");
+            std::fs::write(
+                &path,
+                r#"
+[general]
+max_input_side = 1600
+
+[inference]
+intra_threads = 4
+inter_threads = 1
+memory_pattern = false
+
+[server]
+max_concurrent_tasks = 1
+"#,
+            )
+            .unwrap();
+            let cfg = Config::load_from(Some(&path)).unwrap();
+            assert_eq!(cfg.general.max_input_side, 1600);
+            assert_eq!(cfg.inference.intra_threads, 4);
+            assert_eq!(cfg.inference.inter_threads, 1);
+            assert!(!cfg.inference.memory_pattern);
+            assert_eq!(cfg.server.max_concurrent_tasks, 1);
+            cfg.validate().unwrap();
+        });
     }
 
     #[test]

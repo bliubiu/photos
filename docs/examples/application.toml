@@ -8,6 +8,15 @@ log_dir = "logs"
 log_level = "INFO"          # DEBUG | INFO | ERROR
 default_mode = "balanced"   # speed | balanced | quality
 models_dir = "models"
+max_input_side = 0          # 输入图最大边长（px），0 = 不限制；超限等比预缩放，降低峰值内存与耗时
+
+[inference]
+intra_threads = 0           # 单算子内并行线程数，0 = ONNX Runtime 自动（通常吃满物理核）
+inter_threads = 0           # 算子间并行线程数，0 = 自动
+memory_pattern = true       # 内存复用池；关闭可降低峰值内存，性能略降
+
+[server]
+max_concurrent_tasks = 2    # 最大并发处理任务数（超出排队），必须 ≥ 1
 
 [models.download]
 enabled = true              # 一键下载为可选便利，处理链路本身零联网

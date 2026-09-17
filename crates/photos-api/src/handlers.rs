@@ -48,6 +48,8 @@ impl AppState {
         let upload_dir = PathBuf::from(&cfg.general.data_dir).join("tmp");
         std::fs::create_dir_all(&out_dir)?;
         std::fs::create_dir_all(&upload_dir)?;
+        // 推理并发上限来自 [server]（校验保证 ≥1）
+        let slots = Arc::new(tokio::sync::Semaphore::new(cfg.server.max_concurrent_tasks));
         Ok(Self {
             cfg: Arc::new(cfg),
             store: Mutex::new(store),
@@ -55,7 +57,7 @@ impl AppState {
             out_dir,
             upload_dir,
             model_precheck,
-            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            slots,
         })
     }
 }
@@ -490,6 +492,12 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         };
         let result = tokio::task::spawn_blocking(move || {
             let (w, h) = image::image_dimensions(&req.input).unwrap_or((640, 640));
+            // 与流水线内部预缩放对齐：引擎按缩放后尺寸构造
+            let (w, h) = photos_core::pipeline::limited_dimensions(
+                w,
+                h,
+                state2.cfg.general.max_input_side,
+            );
             let mut engine = (state2.engine_factory)(w, h);
             run_pipeline(&state2.cfg, engine.as_mut(), &req)
         })

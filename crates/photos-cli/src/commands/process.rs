@@ -59,6 +59,9 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
         let res = if args.demo {
             let (w, h) = image::image_dimensions(input)
                 .with_context(|| format!("读取图片尺寸失败：{}", input.display()))?;
+            // 与流水线内部预缩放对齐：demo 引擎按缩放后尺寸构造
+            let (w, h) =
+                photos_core::pipeline::limited_dimensions(w, h, cfg.general.max_input_side);
             let mut engine = demo_balanced_engine(w, h);
             process_one(cfg, args, &store, &out_dir, input, &mut engine)
         } else {

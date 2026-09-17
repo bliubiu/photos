@@ -123,6 +123,27 @@ pub struct PipelineResult {
     pub warnings: Vec<String>,
 }
 
+/// 按最大边长等比约束尺寸（`max_side = 0` 表示不限制）；供流水线缩放与调用方构造引擎时对齐
+pub fn limited_dimensions(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    if max_side == 0 || w.max(h) <= max_side {
+        return (w, h);
+    }
+    let scale = max_side as f64 / w.max(h) as f64;
+    let nw = ((w as f64 * scale).round() as u32).max(1);
+    let nh = ((h as f64 * scale).round() as u32).max(1);
+    (nw, nh)
+}
+
+/// 输入图等比预缩放（`max_side = 0` 或未超限时原样返回）
+fn limit_input_side(img: RgbImage, max_side: u32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    let (nw, nh) = limited_dimensions(w, h, max_side);
+    if (nw, nh) == (w, h) {
+        return img;
+    }
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// 执行单图最小闭环：读图 → 检测/抠图 → 角度决策 → 同步纠偏 → 换底色 → 裁切缩放
 pub fn run_pipeline(
     cfg: &Config,
@@ -142,10 +163,11 @@ pub fn run_pipeline(
         .collect::<CoreResult<Vec<_>>>()?;
     ensure_models_ready(cfg, engine, &req.mode)?;
 
-    // 2. 读图（统一 RGB）
+    // 2. 读图（统一 RGB）；超过最大边长时先等比预缩放，限制峰值内存与推理耗时
     let img = image::open(&req.input)
         .map_err(|e| CoreError::Image(format!("读取图片 {} 失败：{e}", req.input.display())))?
         .to_rgb8();
+    let img = limit_input_side(img, cfg.general.max_input_side);
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
         return Err(CoreError::Image("图片尺寸为零".into()));
@@ -755,6 +777,45 @@ mod tests {
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
         assert_eq!(result.effects[1].bg, "blue");
         assert_eq!(result.effects[1].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 尺寸约束按最大边长等比计算() {
+        // 0 或未超限：原样返回
+        assert_eq!(limited_dimensions(400, 600, 0), (400, 600));
+        assert_eq!(limited_dimensions(400, 600, 600), (400, 600));
+        assert_eq!(limited_dimensions(400, 600, 1000), (400, 600));
+        // 长边超限：等比缩到最大边长
+        assert_eq!(limited_dimensions(400, 600, 100), (67, 100));
+        assert_eq!(limited_dimensions(600, 400, 300), (300, 200));
+    }
+
+    #[test]
+    fn 输入图超过最大边长时预缩放后再处理() {
+        let mut cfg = Config::default();
+        cfg.general.max_input_side = 100;
+        let img = RgbImage::from_pixel(400, 600, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        // demo 引擎按缩放后尺寸构造（与流水线内部缩放保持一致）
+        let (w, h) = limited_dimensions(400, 600, cfg.general.max_input_side);
+        let mut engine = demo_balanced_engine(w, h);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: None,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        // 效果图与全链路均基于缩放后尺寸
+        assert_eq!(result.effects[0].image.dimensions(), (67, 100));
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
     }
 
     #[test]

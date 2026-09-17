@@ -22,15 +22,21 @@ struct TestApp {
 
 impl TestApp {
     fn new() -> Self {
+        Self::new_with(|_| {})
+    }
+
+    fn new_with(adjust: impl FnOnce(&mut Config)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.general.data_dir = dir.path().join("data").display().to_string();
+        adjust(&mut cfg);
         Self { cfg, dir }
     }
 
     fn app(&self) -> axum::Router {
-        let factory: EngineFactory =
-            Arc::new(|_, _| Box::new(demo_balanced_engine(100, 140)) as Box<dyn photos_core::inference::InferenceEngine>);
+        let factory: EngineFactory = Arc::new(|w, h| {
+            Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+        });
         router(self.cfg.clone(), factory, false)
     }
 
@@ -508,4 +514,54 @@ async fn 分页查询() {
     let req = Request::builder().uri("/tasks?limit=999").body(Body::empty()).unwrap();
     let (status, _) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[test]
+fn 并发上限取自配置() {
+    let t = TestApp::new_with(|cfg| cfg.server.max_concurrent_tasks = 3);
+    let factory: EngineFactory = Arc::new(|w, h| {
+        Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+    });
+    let state = photos_api::handlers::AppState::new(t.cfg.clone(), factory, false).unwrap();
+    assert_eq!(state.slots.available_permits(), 3);
+}
+
+#[tokio::test]
+async fn 输入图超限时按最大边长预缩放() {
+    let t = TestApp::new_with(|cfg| cfg.general.max_input_side = 80);
+    let app = t.app();
+    let (body, ctype) = multipart_body(&demo_jpeg(), r#"{"effect_image":true}"#);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "创建任务失败：{json}");
+    let id = json["id"].as_str().unwrap().to_string();
+
+    let detail = loop {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (_, d) = send(&app, req).await;
+        let st = d["status"].as_str().unwrap();
+        if st == "succeeded" || st == "failed" {
+            break d;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    // 100x140 长边缩到 80 → 57x80（与流水线内部预缩放一致）
+    let effect = detail["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["filename"].as_str().unwrap().contains("effect"))
+        .expect("应有效果图产物");
+    let path = t.out_dir().join(effect["filename"].as_str().unwrap());
+    assert_eq!(image::image_dimensions(path).unwrap(), (57, 80));
 }
