@@ -21,8 +21,9 @@ use photos_core::storage::{NewTask, Store};
 use crate::artifact;
 use crate::error::{ApiError, model_missing};
 
-/// 引擎工厂：构造推理引擎（真实 OrtEngine/FakeEngine；测试注入 stub/demo 引擎）
-pub type EngineFactory = Arc<dyn Fn() -> Box<dyn InferenceEngine> + Send + Sync>;
+/// 引擎工厂：按输入图片尺寸构造推理引擎（真实 OrtEngine / 演示 FakeEngine；测试注入 stub）。
+/// 尺寸参数用于演示引擎（demo_balanced_engine 需按图宽高回放），真实引擎忽略。
+pub type EngineFactory = Arc<dyn Fn(u32, u32) -> Box<dyn InferenceEngine> + Send + Sync>;
 
 /// 应用状态（Config 只读共享；Store 由 Mutex 串行化 sqlite 访问）
 pub struct AppState {
@@ -259,9 +260,10 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         let statuses = check_models(cfg, &store).map_err(ApiError::from)?;
         let suite = cfg.mode(&mode).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
         let suite_ids = [suite.face.as_str(), suite.keypoint.as_str(), suite.matting.as_str()];
+        // 仅“文件缺失”视为未就绪（503）；hash 占位/不一致不拦截，推理可继续
         if let Some(s) = statuses
             .iter()
-            .find(|s| suite_ids.contains(&s.id.as_str()) && !matches!(s.check_status, CheckStatus::Ready | CheckStatus::CachedOk))
+            .find(|s| suite_ids.contains(&s.id.as_str()) && s.check_status == CheckStatus::Missing)
         {
             return Err(model_missing(&s.id, &s.message));
         }
@@ -348,7 +350,8 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             beauty,
         };
         let result = tokio::task::spawn_blocking(move || {
-            let mut engine = (state2.engine_factory)();
+            let (w, h) = image::image_dimensions(&req.input).unwrap_or((640, 640));
+            let mut engine = (state2.engine_factory)(w, h);
             run_pipeline(&state2.cfg, engine.as_mut(), &req)
         })
         .await;

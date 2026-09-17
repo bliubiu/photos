@@ -218,6 +218,9 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> CoreError {
     CoreError::Inference("推理会话锁损坏".into())
 }
 
+/// 是否编译了 ONNX Runtime 推理后端（feature=ort）
+pub const ORT_BUILT: bool = cfg!(feature = "ort");
+
 /// 根据 feature 构建默认引擎（CLI 入口使用）
 pub fn default_engine() -> Box<dyn InferenceEngine> {
     #[cfg(feature = "ort")]

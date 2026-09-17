@@ -30,7 +30,7 @@ impl TestApp {
 
     fn app(&self) -> axum::Router {
         let factory: EngineFactory =
-            Arc::new(|| Box::new(demo_balanced_engine(100, 140)) as Box<dyn photos_core::inference::InferenceEngine>);
+            Arc::new(|_, _| Box::new(demo_balanced_engine(100, 140)) as Box<dyn photos_core::inference::InferenceEngine>);
         router(self.cfg.clone(), factory, false)
     }
 
