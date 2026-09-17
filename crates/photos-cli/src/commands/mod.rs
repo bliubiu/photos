@@ -1,5 +1,6 @@
 //! 子命令实现。
 
+pub mod gui;
 pub mod models;
 pub mod process;
 pub mod serve;

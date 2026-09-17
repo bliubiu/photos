@@ -21,7 +21,7 @@ fn main() -> Result<()> {
         Commands::Models(args) => commands::models::run(&cfg, args)?,
         Commands::Process(args) => commands::process::run(&cfg, args)?,
         Commands::Serve(args) => commands::serve::run(&cfg, args)?,
-        Commands::Gui => anyhow::bail!("gui 子命令将于 M3 阶段实现（Tauri 桌面壳）"),
+        Commands::Gui(args) => commands::gui::run(&cfg, args)?,
     }
     Ok(())
 }

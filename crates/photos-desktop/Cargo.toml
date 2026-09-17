@@ -1,12 +1,20 @@
-# photos-desktop：Tauri 壳（M3 实现），拉起内嵌 Axum + WebUI。唯一依赖 Tauri。
+# photos-desktop：Tauri 2 桌面壳（M3 实现），内嵌 Axum 服务 + WebView 加载前端。
 [package]
 name = "photos-desktop"
-description = "证件照处理桌面壳（Tauri，M3 阶段实现）"
+description = "证件照 Tauri 2 桌面版（内嵌本地 HTTP 服务 + WebView）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+photos-core = { path = "../photos-core" }
 photos-api = { path = "../photos-api" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net"] }
+anyhow.workspace = true
+tracing.workspace = true

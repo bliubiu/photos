@@ -14,10 +14,16 @@
 - 【M3 前端】React19 + Tailwind + Zustand 单页三区（上传/参数/预览）+ 历史任务列表 + 下载（单产物/zip bundle），UI 全中文；生产构建产物由 photos-api 同源静态托管，`http://127.0.0.1:端口/` 直接打开 WebUI
 - 【M3 批量】前端多选文件逐个提交任务；任务并发由后台队列执行（spawn_blocking，不阻塞请求）
 - 【M3 演示引擎】未编译 ort 的构建中 serve 自动使用内置 demo 引擎（按输入图尺寸回放），模型缺失时仍可演示全链路；`/models` 反映真实模型状态
+- 【M3 桌面壳】`photos-desktop` Tauri 2 壳：启动即内嵌 Axum 服务（127.0.0.1 随机端口）并托管前端，WebView 加载本地页面；`photos gui` 一键启动桌面版
+- 【M3 并发控制】推理队列信号量并发上限（默认 2），批量提交排队执行，避免挤爆 CPU
 - 【M3 存储】task_history 支持分页查询（`list_tasks_paged` + `count_tasks`）
 
 ### 📈 Improvements 性能/体验优化
 - 【M3 并发】推理任务放入 `spawn_blocking`，HTTP 请求不被 CPU 密集推理阻塞
+- 【M3 演示】未编译 ort 的构建下 serve/桌面壳自动降级 demo 引擎，无模型环境可完整演示 WebUI
+
+### 📚 Docs 文档更新
+- 更新 `docs/03-实施计划.md`：M3 落地说明与验证方式（serve/桌面壳/前端构建命令）
 
 ### 🔧 Dependencies 依赖更新
 - 新增 `axum`（multipart）、`tokio`、`tower-http`、`zip`、`mime`（workspace 统一管理）

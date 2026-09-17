@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "桌面壳默认权限：仅核心默认能力（窗口/WebView 基本交互）",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

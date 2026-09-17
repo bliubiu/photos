@@ -36,6 +36,8 @@ pub struct AppState {
     pub upload_dir: PathBuf,
     /// POST /tasks 时是否预检模型就绪（契约 503 MODEL_MISSING；测试可关闭）
     pub model_precheck: bool,
+    /// 推理并发上限（信号量；批量提交时排队执行，避免挤爆 CPU）
+    pub slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             out_dir,
             upload_dir,
             model_precheck,
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 }
@@ -321,6 +324,14 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
 /// 后台任务：running → 推理 → 产物落盘 → succeeded / failed
 fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: PathBuf) {
     tokio::spawn(async move {
+        // 等待并发许可（排队），获得后开始处理
+        let _permit = match state.slots.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::error!("信号量关闭，任务 {task_id} 无法执行");
+                return;
+            }
+        };
         {
             let store = state.store.lock().unwrap();
             if let Err(e) = store.update_task(task_id, "running", "开始处理", "[]", "[]", None) {

@@ -23,9 +23,13 @@ pub enum Commands {
     Process(ProcessArgs),
     /// 启动本地 HTTP 服务（WebUI，M3）
     Serve(ServeArgs),
-    /// 启动桌面版（M3）
-    Gui,
+    /// 启动桌面版（Tauri 2，内嵌服务 + WebView）
+    Gui(GuiArgs),
 }
+
+/// `photos gui` 参数
+#[derive(Debug, clap::Args)]
+pub struct GuiArgs {}
 
 /// `photos serve` 参数
 #[derive(Debug, clap::Args)]
