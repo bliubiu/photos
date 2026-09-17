@@ -97,7 +97,7 @@
 | `size` | string | 必须存在于 `[sizes.*]` |
 | `backgrounds` | string[] | 1..N，元素存在于 `[backgrounds.*]` |
 | `beauty` | object | 可选；`enabled` 默认 false；`skin_smooth`/`brighten`/`whiten` 可选，取值 `[0,1]`，缺省用全局配置 `[beauty]` 默认值（0.3/0.2/0.1）；越界返回 `400` |
-| `dress` | object | 可选；`enabled` 默认 false；`garment_path`（服务端服装图路径）与 `style`（`suit_navy`\|`suit_black`\|`shirt_white`）至少其一，`garment_path` 优先；两者皆缺或 `style` 非法返回 `400` |
+| `dress` | object | 可选；`enabled` 默认 false；`garment_path`（服务端服装图路径）与 `style`（`suit_navy`\|`suit_black`\|`shirt_white` 上半身，`suit_full_navy`\|`suit_full_black` 全身套装）至少其一，`garment_path` 优先；两者皆缺或 `style` 非法返回 `400` |
 | `rotate` | number\|null | 手动纠偏角（度），`[-45,45]`；null=自动 |
 | `layout` | string\|null | `6inch`\|`a4`\|null |
 | `effect_image` | bool | 是否输出通用效果图 |

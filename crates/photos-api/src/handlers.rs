@@ -128,10 +128,13 @@ fn validate_dress(dress: &Option<DressParams>) -> Result<(), ApiError> {
         }
         if d.garment_path.is_none() {
             match d.style.as_deref() {
-                Some("suit_navy" | "suit_black" | "shirt_white") => {}
+                Some(
+                    "suit_navy" | "suit_black" | "shirt_white" | "suit_full_navy"
+                    | "suit_full_black",
+                ) => {}
                 Some(other) => {
                     return Err(ApiError::InvalidParams(format!(
-                        "未知正装样式“{other}”，可选：suit_navy、suit_black、shirt_white"
+                        "未知正装样式“{other}”，可选：suit_navy、suit_black、shirt_white、suit_full_navy、suit_full_black"
                     )));
                 }
                 None => {

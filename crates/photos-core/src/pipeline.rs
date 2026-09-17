@@ -202,18 +202,26 @@ pub fn run_pipeline(
                 rot_img.height(),
                 p_in.letterbox.as_ref(),
             )?;
-            let clothes = dressing::clothes_mask(&parsing);
+            // 程序化全身套装样式（suit_full_*）用全身服装类集（含裤装/腿/鞋），
+            // 用户服装图与上半身样式沿用单件语义，避免误覆盖下半身
+            let style = d
+                .garment
+                .as_ref()
+                .map(|_| None)
+                .unwrap_or_else(|| Some(SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy"))))
+                .transpose()?;
+            let clothes = if style.is_some_and(SuitStyle::is_full) {
+                dressing::full_clothes_mask(&parsing)
+            } else {
+                dressing::clothes_mask(&parsing)
+            };
             let garment = match &d.garment {
                 Some(path) => image::open(path)
                     .map_err(|e| {
                         CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display()))
                     })?
                     .to_rgb8(),
-                None => dressing::formal_suit(
-                    SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy"))?,
-                    240,
-                    360,
-                ),
+                None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
             };
             dressing::fit_garment(&rot_img, &garment, &clothes)?
         }
@@ -352,7 +360,8 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
         .collect::<Vec<f32>>();
     let matting = TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap();
-    // 人像解析 stub：同一人形椭圆，上半（y < 中心）为 13 脸、下半为 5 上衣；
+    // 人像解析 stub：同一人形椭圆，自上而下 0..0.30h 脸(13)、0.30..0.60h 上衣(5)、
+    // 0.60..0.85h 裤子(8)、0.85h 以下鞋(19)，可演示上半身与全身套装两种换装；
     // letterbox 到 473x473 画布后转 one-hot logits（对应类 +10，其余 -10）
     let mut cls = GrayImage::from_pixel(w, h, Luma([0u8]));
     for y in 0..h {
@@ -360,7 +369,16 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
             let dx = x as f32 - fw / 2.0;
             let dy = y as f32 - fh / 2.0;
             if dx * dx / (a * a) + dy * dy / (b * b) <= 1.0 {
-                let c = if (y as f32) < fh / 2.0 { 13u8 } else { 5u8 };
+                let fy = y as f32;
+                let c = if fy < 0.30 * fh {
+                    13u8
+                } else if fy < 0.60 * fh {
+                    5u8
+                } else if fy < 0.85 * fh {
+                    8u8
+                } else {
+                    19u8
+                };
                 cls.put_pixel(x, y, Luma([c]));
             }
         }
@@ -763,11 +781,65 @@ mod tests {
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
-        // 衣服区（下半人形椭圆中心 (50,105)）：换装后为藏青 (31,56,100)，原图为 (10,20,30)
+        // 上衣区（人形 0.30h..0.60h 区间内 (50,60)）：换装后为藏青 (31,56,100)，原图为 (10,20,30)
+        let pb = *base.effects[0].image.get_pixel(50, 60);
+        let pa = *result.effects[0].image.get_pixel(50, 60);
+        assert!(pb[2] < 60, "基准上衣区不应为藏青：{pb:?}");
+        assert!(pa[2] > 60 && pa[0] < 80, "换装后上衣区应偏藏青，实际 {pa:?}");
+        // 效果图尺寸保持全图
+        assert_eq!(result.effects[0].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 全身套装覆盖裤装与鞋区() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+
+        // 基准：不换装
+        let mut engine = demo_balanced_engine(100, 140);
+        let base = ProcessRequest {
+            input: input.clone(),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: None,
+        };
+        let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
+
+        // 换装：程序化藏青全身套装
+        let mut engine2 = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: Some(DressParams {
+                enabled: true,
+                garment: None,
+                style: Some("suit_full_navy".into()),
+            }),
+        };
+        let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
+
+        // 裤区（人形 0.60h..0.85h 区间 (50,105)）：深藏青西裤，区别于原图灰
         let pb = *base.effects[0].image.get_pixel(50, 105);
         let pa = *result.effects[0].image.get_pixel(50, 105);
-        assert!(pb[2] < 60, "基准衣服区不应为藏青：{pb:?}");
-        assert!(pa[2] > 60 && pa[0] < 80, "换装后衣服区应偏藏青，实际 {pa:?}");
+        assert!(pa[2] >= 25 && pa[2] <= 60, "裤区应深藏青，实际 {pa:?}");
+        assert!(pa != pb, "裤区应被西裤覆盖：{pb:?} → {pa:?}");
+        // 鞋区（椭圆下缘 (50,121)）：黑皮鞋，接近全黑
+        let sa = *result.effects[0].image.get_pixel(50, 121);
+        assert!(sa[0] < 60 && sa[1] < 60 && sa[2] < 60, "鞋区应偏黑，实际 {sa:?}");
         // 效果图尺寸保持全图
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
     }

@@ -11,7 +11,12 @@ use crate::preprocess::LetterBox;
 pub const PARSING_MODEL_ID: &str = "parsing_lip";
 
 /// 服装语义类别（LIP 20 类）：5 上衣、6 连衣裙、7 外套、10 连体裤
+/// （单件贴合语义：上半身 / 连体，避免误覆盖裤装与鞋）
 pub const CLOTHING_CLASSES: [u8; 4] = [5, 6, 7, 10];
+
+/// 全身服装类别：上衣类 + 8 裤子、9 短裤、16 左腿、17 右腿、18 左鞋、19 右鞋
+/// （全身套装贴合：西装 + 西裤 + 皮鞋一次覆盖全身）
+pub const FULL_CLOTHING_CLASSES: [u8; 10] = [5, 6, 7, 8, 9, 10, 16, 17, 18, 19];
 
 /// 边缘羽化高斯 sigma（与换底色羽化一致）
 const GARMENT_FEATHER_SIGMA: f32 = 1.0;
@@ -19,25 +24,36 @@ const GARMENT_FEATHER_SIGMA: f32 = 1.0;
 /// 程序化正装样式（无外部素材即可生成）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuitStyle {
-    /// 藏青西装 + 白衬衫
+    /// 藏青西装 + 白衬衫（上半身）
     Navy,
-    /// 黑色西装 + 白衬衫
+    /// 黑色西装 + 白衬衫（上半身）
     Black,
     /// 白色衬衫
     White,
+    /// 藏青全身套装：西装 + 白衬衫 + 西裤 + 皮鞋
+    FullNavy,
+    /// 黑色全身套装：西装 + 白衬衫 + 西裤 + 皮鞋
+    FullBlack,
 }
 
 impl SuitStyle {
-    /// 解析样式 id（suit_navy | suit_black | shirt_white）
+    /// 解析样式 id（suit_navy | suit_black | shirt_white | suit_full_navy | suit_full_black）
     pub fn parse(s: &str) -> CoreResult<Self> {
         match s {
             "suit_navy" => Ok(Self::Navy),
             "suit_black" => Ok(Self::Black),
             "shirt_white" => Ok(Self::White),
+            "suit_full_navy" => Ok(Self::FullNavy),
+            "suit_full_black" => Ok(Self::FullBlack),
             other => Err(CoreError::ConfigValidate(format!(
-                "未知正装样式“{other}”，可选：suit_navy、suit_black、shirt_white"
+                "未知正装样式“{other}”，可选：suit_navy、suit_black、shirt_white、suit_full_navy、suit_full_black"
             ))),
         }
+    }
+
+    /// 是否为全身套装（决定贴合时使用全身服装类集）
+    pub fn is_full(self) -> bool {
+        matches!(self, Self::FullNavy | Self::FullBlack)
     }
 }
 
@@ -122,12 +138,22 @@ pub fn decode_parsing(
     }
 }
 
-/// 类别索引图 → 衣服二值 mask（服装类 255，其余 0）
-pub fn clothes_mask(parsing: &GrayImage) -> GrayImage {
+/// 类别索引图 → 衣服二值 mask（指定类 255，其余 0）
+fn mask_for(parsing: &GrayImage, classes: &[u8]) -> GrayImage {
     GrayImage::from_fn(parsing.width(), parsing.height(), |x, y| {
         let c = parsing.get_pixel(x, y)[0];
-        Luma([if CLOTHING_CLASSES.contains(&c) { 255 } else { 0 }])
+        Luma([if classes.contains(&c) { 255 } else { 0 }])
     })
+}
+
+/// 类别索引图 → 衣服二值 mask（服装类 5/6/7/10，255，其余 0；上半身/连体语义）
+pub fn clothes_mask(parsing: &GrayImage) -> GrayImage {
+    mask_for(parsing, &CLOTHING_CLASSES)
+}
+
+/// 类别索引图 → 全身衣服二值 mask（服装类含裤装/腿/鞋，255，其余 0；全身套装语义）
+pub fn full_clothes_mask(parsing: &GrayImage) -> GrayImage {
+    mask_for(parsing, &FULL_CLOTHING_CLASSES)
 }
 
 /// 服装贴合：按衣服 mask 包围盒将服装图等比缩放居中贴合，边缘按衣服 mask 羽化合成。
@@ -199,18 +225,21 @@ pub fn fit_garment(
 
 /// 程序化生成正装纹理图（无外部素材）：纯色西装外套 + 中央 V 领白衬衫。
 /// 藏青/黑为深色西装 + 白衬衫领口；白衬衫样式整件为白色。
+/// 全身套装（FullNavy/FullBlack）另绘制下半身西裤与底部黑皮鞋，一次覆盖全身。
 pub fn formal_suit(style: SuitStyle, w: u32, h: u32) -> RgbImage {
     let (suit_r, suit_g, suit_b) = match style {
         SuitStyle::Navy => (31u8, 56u8, 100u8),
         SuitStyle::Black => (34u8, 34u8, 34u8),
         SuitStyle::White => (245u8, 245u8, 245u8),
+        SuitStyle::FullNavy => (31u8, 56u8, 100u8),
+        SuitStyle::FullBlack => (34u8, 34u8, 34u8),
     };
     let mut img = RgbImage::from_pixel(w.max(1), h.max(1), Rgb([suit_r, suit_g, suit_b]));
     if w == 0 || h == 0 {
         return img;
     }
-    // 中央 V 领白衬衫：领口自顶部中心下延，随深度加宽（深度 0.30h，半宽 0.06w → 0.36w）
-    let depth = (0.30 * h as f64) as u32;
+    // 中央 V 领白衬衫：领口自顶部中心下延，随深度加宽（深度 0.28h，半宽 0.06w → 0.36w）
+    let depth = (0.28 * h as f64) as u32;
     let cx = w as f64 / 2.0;
     for y in 0..depth {
         let t = y as f64 / depth.max(1) as f64;
@@ -219,6 +248,26 @@ pub fn formal_suit(style: SuitStyle, w: u32, h: u32) -> RgbImage {
         let x1 = (cx + half).min(w as f64 - 1.0) as u32;
         for x in x0..=x1 {
             img.put_pixel(x, y, Rgb([245, 245, 245]));
+        }
+    }
+    // 全身套装：0.50h..0.92h 为西裤（深色略深于西装），0.92h 以下为黑皮鞋
+    if style.is_full() {
+        let (pant_r, pant_g, pant_b) = match style {
+            SuitStyle::FullNavy => (24u8, 26u8, 40u8),
+            SuitStyle::FullBlack => (18u8, 18u8, 18u8),
+            _ => unreachable!(),
+        };
+        let y0 = (0.50 * h as f64) as u32;
+        let y1 = (0.92 * h as f64).max((y0 + 1) as f64) as u32;
+        for y in y0..y1 {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([pant_r, pant_g, pant_b]));
+            }
+        }
+        for y in y1..h {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgb([12, 12, 12]));
+            }
         }
     }
     img
@@ -382,5 +431,61 @@ mod tests {
         assert!(p[0] < 100 && p[2] > 50, "藏青西装应偏蓝，实际 {p:?}");
         // 衣服区外保持灰底
         assert_eq!(*out.get_pixel(50, 10), Rgb([200, 200, 200]));
+    }
+
+    #[test]
+    fn 全身mask包含裤装与鞋() {
+        // 4 像素：5 上衣、8 裤子、18 左鞋、13 脸
+        let m = GrayImage::from_raw(4, 1, vec![5, 8, 18, 13]).unwrap();
+        let f = full_clothes_mask(&m);
+        let vals: Vec<u8> = f.pixels().map(|p| p[0]).collect();
+        assert_eq!(vals, vec![255, 255, 255, 0]);
+        // 单件语义不含裤/鞋（避免误覆盖下半身）
+        let c = clothes_mask(&m);
+        let vals_c: Vec<u8> = c.pixels().map(|p| p[0]).collect();
+        assert_eq!(vals_c, vec![255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn 全身正装样式解析() {
+        assert_eq!(SuitStyle::parse("suit_full_navy").unwrap(), SuitStyle::FullNavy);
+        assert_eq!(
+            SuitStyle::parse("suit_full_black").unwrap(),
+            SuitStyle::FullBlack
+        );
+        assert!(SuitStyle::FullNavy.is_full() && SuitStyle::FullBlack.is_full());
+        assert!(!SuitStyle::Navy.is_full());
+    }
+
+    #[test]
+    fn 全身正装生成裤装与鞋区() {
+        // 100x200：0..56 上身（V 领 0..28、西装 28..100）、100..184 西裤、184..200 黑皮鞋
+        let suit = formal_suit(SuitStyle::FullNavy, 100, 200);
+        assert_eq!(*suit.get_pixel(50, 0), Rgb([245, 245, 245]), "V 领白衬衫");
+        assert_eq!(*suit.get_pixel(50, 60), Rgb([31, 56, 100]), "西装色");
+        assert_eq!(*suit.get_pixel(50, 150), Rgb([24, 26, 40]), "西裤色");
+        assert_eq!(*suit.get_pixel(50, 192), Rgb([12, 12, 12]), "黑皮鞋");
+    }
+
+    #[test]
+    fn 全身正装贴合覆盖上下身() {
+        // 人像 100x200 灰底；全身 mask：上衣+裤子 20..80 x 0..180（脸区天然 0）
+        let portrait = RgbImage::from_pixel(100, 200, Rgb([200, 200, 200]));
+        let mut clothes = GrayImage::from_pixel(100, 200, Luma([0u8]));
+        for y in 0..180 {
+            for x in 20..80 {
+                clothes.put_pixel(x, y, Luma([255u8]));
+            }
+        }
+        let suit = formal_suit(SuitStyle::FullNavy, 100, 200);
+        let out = fit_garment(&portrait, &suit, &clothes).unwrap();
+        // 上身（贴合后对应服装图西装区，避开 V 领）：藏青偏蓝
+        let p = *out.get_pixel(50, 72);
+        assert!(p[0] < 100 && p[2] > 50, "上身应藏青，实际 {p:?}");
+        // 下半身（贴合后对应服装图裤区）：深藏青裤
+        let q = *out.get_pixel(50, 100);
+        assert!(q[2] > 30 && q[2] < 60, "裤子应深藏青，实际 {q:?}");
+        // 衣服区外保持灰底
+        assert_eq!(*out.get_pixel(0, 100), Rgb([200, 200, 200]));
     }
 }

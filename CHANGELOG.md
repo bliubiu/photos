@@ -2,6 +2,22 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.9] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【换装】新增全身套装样式 `suit_full_navy`/`suit_full_black`（西装 + 白衬衫 + 西裤 + 黑皮鞋一次覆盖全身）；新增 `full_clothes_mask` 全身服装类集（LIP 8/9/16/17/18/19 裤装/腿/鞋），`fit_garment` 复用于全身套装，上半身单件语义不变
+- 【换装】演示引擎人形升级为四段（脸/上衣/裤子/鞋），`--demo --dress-style suit_full_navy` 可演示全身换装效果
+
+### 📈 Improvements 性能/体验优化
+-
+
+### 📚 Docs 文档更新
+- `docs/03-实施计划.md`：M4 换装升级说明（全身类集/样式/验证数据）
+- `docs/05-API契约.md`：`params.dress.style` 枚举补充全身套装样式
+
+### 🔧 Dependencies 依赖更新
+-
+
 ## [2026.09.17.8]
 
 ### 🐛 Bug Fixes  问题修复

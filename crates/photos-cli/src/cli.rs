@@ -105,7 +105,7 @@ pub struct ProcessArgs {
     /// 用户服装图路径（智能换装：人像解析 + 服装贴合）
     #[arg(long, value_name = "服装图")]
     pub dress: Option<PathBuf>,
-    /// 程序化正装样式（suit_navy | suit_black | shirt_white；未提供 --dress 时生效）
+    /// 程序化正装样式（suit_navy | suit_black | shirt_white 上半身；suit_full_navy | suit_full_black 全身套装；未提供 --dress 时生效）
     #[arg(long, value_name = "样式")]
     pub dress_style: Option<String>,
     /// 输出目录（默认 data/out）
