@@ -17,7 +17,8 @@ use crate::vision::beauty::apply_beauty;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
 use crate::vision::dressing::{SuitStyle, self};
-use crate::vision::face::{decode_mtcnn, decode_retinaface, retinaface_prior_count};
+use crate::vision::face::{decode_retinaface, retinaface_prior_count};
+use crate::vision::mtcnn::{CASCADE_FACE_ID, detect_mtcnn_cascade};
 use crate::vision::geometry::{
     RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
 };
@@ -173,38 +174,25 @@ pub fn run_pipeline(
         return Err(CoreError::Image("图片尺寸为零".into()));
     }
 
-    // 3. 推理（按模型 input_dims 构造真实输入：letterbox/归一化/布局对齐）
-    // RetinaFace 官方预处理为 RGB 减均值 (104,117,123)；MTCNN 按常规 RGB 归一化
-    let face_spec = cfg.model_spec(&suite.face)?;
-    let face_in = build_input(&img, &face_spec.input_dims, suite.face != "mtcnn")?;
-    let face_outs = engine.run(&suite.face, &face_in.tensor)?;
+    // 3. 推理：RetinaFace 按套件单模型；MTCNN 为完整三级联（p/r/on）
+    use crate::vision::mtcnn::cascade_model_ids;
     let kp_spec = cfg.model_spec(&suite.keypoint)?;
     let kp_in = build_input(&img, &kp_spec.input_dims, false)?;
     let kp_outs = engine.run(&suite.keypoint, &kp_in.tensor)?;
     let mat_spec = cfg.model_spec(&suite.matting)?;
     let mat_in = build_input(&img, &mat_spec.input_dims, false)?;
     let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
-    // 4. 解码：人脸框 + 5 关键点、17 关键点、概率 mask（mask 输出尺寸与原图不一致时先 resize）
-    let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
-        Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
-        None => (1.0, 1.0, 0.0, 0.0),
-    };
-    // 人脸解码按套件分流：speed=MTCNN，balanced/quality=RetinaFace
-    let faces = if suite.face == "mtcnn" {
-        decode_mtcnn(
-            &face_outs,
-            FACE_SCORE_THRESHOLD,
-            NMS_IOU_THRESHOLD,
-            (
-                face_spec.input_dims[2] as u32,
-                face_spec.input_dims[3] as u32,
-            ),
-            scale_x,
-            scale_y,
-            pad_x,
-            pad_y,
-        )?
+
+    let faces = if suite.face == CASCADE_FACE_ID {
+        detect_mtcnn_cascade(engine, &img)?
     } else {
+        let face_spec = cfg.model_spec(&suite.face)?;
+        let face_in = build_input(&img, &face_spec.input_dims, true)?;
+        let face_outs = engine.run(&suite.face, &face_in.tensor)?;
+        let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
+            Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
+            None => (1.0, 1.0, 0.0, 0.0),
+        };
         // 真实 RetinaFace 输出顺序为 [bbox, confidence, landmark]（Hivision 官方模型），
         // decode_retinaface 期望 [scores, boxes, landmarks]，此处按位置重排
         decode_retinaface(
@@ -223,6 +211,12 @@ pub fn run_pipeline(
             pad_y,
         )?
     };
+    // 级联 id 校验（测试/配置完整性）
+    if suite.face == CASCADE_FACE_ID {
+        for id in cascade_model_ids() {
+            cfg.model_spec(id)?;
+        }
+    }
     let face = faces
         .first()
         .ok_or_else(|| CoreError::Image("未检测到人脸".into()))?;
@@ -549,9 +543,10 @@ mod tests {
 
     #[test]
     fn speed模式mtcnn解码闭环() {
-        // speed 套件 face=mtcnn：P-Net 式 heatmap + 回归 stub，验证按套件走 MTCNN 分支
+        // speed 套件 face=mtcnn（级联）：三级 P/R/O stub，验证按套件走 MTCNN 级联分支
         let cfg = Config::default();
-        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        // 30x30 短边 < 40 → 金字塔仅 1 层，P-Net 只调用一次，便于构造固定输出
+        let img = RgbImage::from_pixel(30, 30, Rgb([10, 20, 30]));
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         img.save(&input).unwrap();
@@ -560,27 +555,39 @@ mod tests {
         let fw = 54usize;
         let mut hm = vec![0.0f32; 2 * fh * fw];
         let reg = vec![0.0f32; 4 * fh * fw];
-        hm[1 * fh * fw + 27 * fw + 27] = 0.99;
-        let mtcnn_out = vec![
+        // 单个高置信 cell：解码得框 (9,9)-(20,20)，落在 30x30 图内
+        hm[1 * fh * fw + 4 * fw + 4] = 0.99;
+        let pnet_out = vec![
             TensorData::new(vec![1, 2, fh as i64, fw as i64], hm).unwrap(),
             TensorData::new(vec![1, 4, fh as i64, fw as i64], reg).unwrap(),
         ];
+        // R-Net 单框：score 过阈值，回归 0
+        let rnet_out = vec![
+            TensorData::new(vec![1], vec![0.9]).unwrap(),
+            TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(),
+        ];
+        // O-Net 单框：score + 回归 0 + 5 点 landmark（相对归一化）
+        let onet_out = vec![
+            TensorData::new(vec![1], vec![0.9]).unwrap(),
+            TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(),
+            TensorData::new(vec![1, 10], vec![0.5; 10]).unwrap(),
+        ];
         let mut kp_v = vec![0.0f32; 17 * 3];
         for (i, (x, y)) in [
-            (2usize, (40.0f32, 40.0)),
-            (3, (60.0, 40.0)),
-            (5, (30.0, 100.0)),
-            (6, (70.0, 100.0)),
+            (2usize, (12.0f32, 12.0)),
+            (3, (18.0, 12.0)),
+            (5, (9.0, 22.0)),
+            (6, (21.0, 22.0)),
         ] {
-            // MoveNet 布局 (y, x, score)，归一化 [0,1]
-            kp_v[i * 3] = y / 140.0;
-            kp_v[i * 3 + 1] = x / 100.0;
+            // MoveNet 布局 (y, x, score)，归一化 [0,1] 相对 30x30
+            kp_v[i * 3] = y / 30.0;
+            kp_v[i * 3 + 1] = x / 30.0;
             kp_v[i * 3 + 2] = 0.95;
         }
         // 与 demo 一致：先在原图画前景，再 letterbox 到 1024（rmbg input_dims）
-        let mut el = RgbImage::from_pixel(100, 140, Rgb([0, 0, 0]));
-        for y in 20..120 {
-            for x in 25..75 {
+        let mut el = RgbImage::from_pixel(30, 30, Rgb([0, 0, 0]));
+        for y in 5..25 {
+            for x in 5..25 {
                 el.put_pixel(x, y, Rgb([255, 255, 255]));
             }
         }
@@ -590,7 +597,9 @@ mod tests {
             .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
             .collect::<Vec<f32>>();
         let mut engine = FakeEngine::new()
-            .stub("mtcnn", mtcnn_out)
+            .stub("mtcnn_pnet", pnet_out)
+            .stub("mtcnn_rnet", rnet_out)
+            .stub("mtcnn_onet", onet_out)
             .stub(
                 "movnet_light",
                 vec![TensorData::new(vec![1, 17, 3], kp_v).unwrap()],

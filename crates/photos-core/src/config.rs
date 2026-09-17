@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::error::{CoreError, CoreResult};
+use crate::vision::mtcnn::{CASCADE_FACE_ID, cascade_model_ids};
 
 /// 全局配置
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,6 +320,17 @@ impl Config {
                 ("关键点 keypoint", &suite.keypoint),
                 ("抠图 matting", &suite.matting),
             ] {
+                // speed 套件 face 逻辑 id 为级联（MTCNN 三级联），需校验全部子模型已注册
+                if *model_id == CASCADE_FACE_ID {
+                    for sub in cascade_model_ids() {
+                        if !self.models.contains_key(sub) {
+                            return Err(CoreError::ConfigValidate(format!(
+                                "模式“{suite_id}”的{role}引用的级联“{model_id}”缺少子模型“{sub}”"
+                            )));
+                        }
+                    }
+                    continue;
+                }
                 if !self.models.contains_key(model_id) {
                     return Err(CoreError::ConfigValidate(format!(
                         "模式“{suite_id}”的{role}引用了未注册模型“{model_id}”"
@@ -464,7 +476,10 @@ fn default_max_concurrent_tasks() -> usize {
 fn default_models() -> BTreeMap<String, ModelSpec> {
     let mut m = BTreeMap::new();
     for (id, path, dims) in [
-        ("mtcnn", "models/mtcnn.onnx", vec![1, 3, 640, 640]),
+        // MTCNN 完整三级联（逻辑 speed 套件 face 仍叫 mtcnn）
+        ("mtcnn_pnet", "models/pnet.onnx", vec![1, 3, 12, 12]),
+        ("mtcnn_rnet", "models/rnet.onnx", vec![1, 3, 24, 24]),
+        ("mtcnn_onet", "models/onet.onnx", vec![1, 3, 48, 48]),
         (
             "retinaface",
             "models/retinaface_r50.onnx",
@@ -541,10 +556,9 @@ fn default_download_url(id: &str) -> Option<ModelDownload> {
         "parsing_lip" => {
             "https://hf-mirror.com/levihsu/OOTDiffusion/resolve/main/checkpoints/humanparsing/parsing_lip.onnx"
         }
-        "mtcnn" => {
-            // 社区常见单文件 MTCNN ONNX（P-Net 风格）；若失效见 docs/04-模型清单.md §6 手动放置
-            "https://hf-mirror.com/onnx-community/mtcnn_onnx/resolve/main/mtcnn.onnx"
-        }
+        "mtcnn_pnet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/pnet.onnx",
+        "mtcnn_rnet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/rnet.onnx",
+        "mtcnn_onet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/onet.onnx",
         _ => return None,
     };
     Some(ModelDownload {
@@ -988,6 +1002,30 @@ rgb = [10, 20, 30]
             .unwrap();
             let err = Config::load_from(Some(&path)).unwrap_err();
             assert!(err.to_string().contains("未注册模型"));
+        });
+    }
+
+    #[test]
+    fn speed级联逻辑id校验通过() {
+        // 默认配置：speed.face=mtcnn（级联逻辑 id），注册表含 mtcnn_pnet/rnet/onet 三子模型
+        let _g = with_envs::<&str, &str>(&[], || {
+            let cfg = Config::load_from(None).unwrap();
+            assert!(cfg.models.contains_key("mtcnn_pnet"));
+            assert!(cfg.models.contains_key("mtcnn_rnet"));
+            assert!(cfg.models.contains_key("mtcnn_onet"));
+            cfg.validate().unwrap();
+        });
+    }
+
+    #[test]
+    fn speed级联缺子模型校验失败() {
+        // 移除一个子模型后，级联逻辑 id 校验应报错
+        let _g = with_envs::<&str, &str>(&[], || {
+            let mut cfg = Config::default();
+            cfg.models.remove("mtcnn_onet");
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("级联"), "实际 {err}");
+            assert!(err.contains("mtcnn_onet"), "实际 {err}");
         });
     }
 }

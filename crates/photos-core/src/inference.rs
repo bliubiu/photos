@@ -291,7 +291,14 @@ pub fn ensure_models_ready(
 ) -> CoreResult<()> {
     let suite = cfg.mode(mode_id)?;
     let provider = suite.execution_provider;
-    for id in [&suite.face, &suite.keypoint, &suite.matting] {
+    // speed 的 face=mtcnn 表示完整三级联，需装载 p/r/on 三个子模型
+    let mut ids: Vec<&str> = vec![&suite.keypoint, &suite.matting];
+    if suite.face == crate::vision::mtcnn::CASCADE_FACE_ID {
+        ids.extend(crate::vision::mtcnn::cascade_model_ids());
+    } else {
+        ids.push(&suite.face);
+    }
+    for id in ids {
         engine.load(cfg, id, provider)?;
     }
     Ok(())
@@ -333,13 +340,19 @@ mod tests {
         let mut engine = FakeEngine::new();
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
-        cfg.models.get_mut("mtcnn").unwrap().path =
-            dir.path().join("mtcnn.onnx").display().to_string();
+        cfg.models.get_mut("mtcnn_pnet").unwrap().path =
+            dir.path().join("mtcnn_pnet.onnx").display().to_string();
+        // 未配置下载地址：缺失时自动下载必然失败，测试保持离线确定性
+        cfg.models.get_mut("mtcnn_pnet").unwrap().download = None;
         // 文件不存在 → 缺模型错误
-        let err = engine.load(&cfg, "mtcnn", ExecutionProvider::Cpu).unwrap_err();
+        let err = engine
+            .load(&cfg, "mtcnn_pnet", ExecutionProvider::Cpu)
+            .unwrap_err();
         assert!(err.to_string().contains("缺失"));
         // 放置文件 → 通过
-        std::fs::write(dir.path().join("mtcnn.onnx"), b"onnx").unwrap();
-        engine.load(&cfg, "mtcnn", ExecutionProvider::Cpu).unwrap();
+        std::fs::write(dir.path().join("mtcnn_pnet.onnx"), b"onnx").unwrap();
+        engine
+            .load(&cfg, "mtcnn_pnet", ExecutionProvider::Cpu)
+            .unwrap();
     }
 }

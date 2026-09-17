@@ -351,11 +351,25 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         let store = state.store.lock().unwrap();
         let statuses = check_models(cfg, &store).map_err(ApiError::from)?;
         let suite = cfg.mode(&mode).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
-        let suite_ids = [suite.face.as_str(), suite.keypoint.as_str(), suite.matting.as_str()];
+        let suite_ids = if suite.face == photos_core::vision::mtcnn::CASCADE_FACE_ID {
+            let mut ids: Vec<String> = photos_core::vision::mtcnn::cascade_model_ids()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            ids.push(suite.keypoint.clone());
+            ids.push(suite.matting.clone());
+            ids
+        } else {
+            vec![
+                suite.face.clone(),
+                suite.keypoint.clone(),
+                suite.matting.clone(),
+            ]
+        };
         // 仅“文件缺失”视为未就绪（503）；hash 占位/不一致不拦截，推理可继续
         if let Some(s) = statuses
             .iter()
-            .find(|s| suite_ids.contains(&s.id.as_str()) && s.check_status == CheckStatus::Missing)
+            .find(|s| suite_ids.contains(&s.id) && s.check_status == CheckStatus::Missing)
         {
             return Err(model_missing(&s.id, &s.message));
         }

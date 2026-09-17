@@ -109,7 +109,7 @@
 | 目标场景 | 低配机器 / 批量粗处理 | 日常本机、笔记本 CPU | N 卡离线精修、画质优先 |
 | 人脸检测 | MTCNN | RetinaFace | RetinaFace |
 | 人体关键点 | MoveNet-Lightning | MoveNet-Lightning | MoveNet-Thunder |
-| 人像分割 | RMBG-1.4/2.0 | BiRefNet-Lite | BiRefNet-Full |
+| 人像分割 | RMBG-1.4 | BiRefNet-Lite | BiRefNet-Full |
 | 推理后端 | ONNX Runtime CPU | ONNX Runtime CPU | ONNX Runtime CUDA |
 | 典型单张耗时 | 0.8~1.5s | 2~4s | 0.5~1s |
 | 发丝精度 | 一般 | 良好 | 极佳 |

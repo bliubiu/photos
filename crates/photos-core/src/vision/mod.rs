@@ -11,3 +11,4 @@ pub mod geometry;
 pub mod keypoint;
 pub mod layout;
 pub mod matting;
+pub mod mtcnn;
