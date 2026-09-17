@@ -1,8 +1,8 @@
 //! pipeline 编排器：`Photo → Request → Result` 最小闭环（架构文档 §3 九步链路）。
 //!
-//! M1 范围：单底色、无排版、无美颜；推理输出由引擎注入（默认 `FakeEngine` mock 回放，
-//! 集成测试用 `balanced_stub` 打通端到端）。真实前处理（letterbox/归一化）与输入形状
-//! 对齐、多底色/排版在 M2 实现，故 M1 推理输入为最小占位张量。
+//! M1 范围：单底色、无排版、无美颜；推理输入由 `preprocess::build_input` 按模型
+//! `input_dims` 真实构造（letterbox/归一化/布局对齐），引擎可为 `OrtEngine`（真实
+//! ONNX 推理）或 `FakeEngine`（mock 回放，测试与 `--demo` 演示用）。
 
 use std::path::PathBuf;
 
@@ -11,10 +11,11 @@ use image::{GrayImage, RgbImage};
 use crate::config::Config;
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
+use crate::preprocess::{build_input, probability_map};
 use crate::vision::affine::rotate_image_same;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
-use crate::vision::face::decode_retinaface;
+use crate::vision::face::{decode_retinaface, retinaface_prior_count};
 use crate::vision::geometry::{decide_rotation, fused_angle, head_angle, shoulder_angle, RotationDecision};
 use crate::vision::keypoint::{decode_movenet, KeypointSet};
 use crate::vision::matting::{morph_open, threshold_mask};
@@ -81,22 +82,36 @@ pub fn run_pipeline(
         return Err(CoreError::Image("图片尺寸为零".into()));
     }
 
-    // 3. 推理（M1 占位输入；mock 引擎忽略输入直接回放）
-    let face_outs = engine.run(&suite.face, &placeholder())?;
-    let kp_outs = engine.run(&suite.keypoint, &placeholder())?;
-    let mat_outs = engine.run(&suite.matting, &placeholder())?;
+    // 3. 推理（按模型 input_dims 构造真实输入：letterbox/归一化/布局对齐）
+    // RetinaFace 官方预处理为 RGB 减均值 (104,117,123)，其余模型为 RGB 归一化 [0,1]
+    let face_spec = cfg.model_spec(&suite.face)?;
+    let face_in = build_input(&img, &face_spec.input_dims, true)?;
+    let face_outs = engine.run(&suite.face, &face_in.tensor)?;
+    let kp_spec = cfg.model_spec(&suite.keypoint)?;
+    let kp_in = build_input(&img, &kp_spec.input_dims, false)?;
+    let kp_outs = engine.run(&suite.keypoint, &kp_in.tensor)?;
+    let mat_spec = cfg.model_spec(&suite.matting)?;
+    let mat_in = build_input(&img, &mat_spec.input_dims, false)?;
+    let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
 
-    // 4. 解码：人脸框 + 5 关键点、17 关键点、概率 mask
+    // 4. 解码：人脸框 + 5 关键点、17 关键点、概率 mask（mask 输出尺寸与原图不一致时先 resize）
+    let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
+        Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
+        None => (1.0, 1.0, 0.0, 0.0),
+    };
+    // 真实 RetinaFace 输出顺序为 [bbox, confidence, landmark]（Hivision 官方模型），
+    // decode_retinaface 期望 [scores, boxes, landmarks]，此处按位置重排
     let faces = decode_retinaface(
-        &face_outs[0],
         &face_outs[1],
+        &face_outs[0],
         &face_outs[2],
         FACE_SCORE_THRESHOLD,
         NMS_IOU_THRESHOLD,
-        1.0,
-        1.0,
-        0.0,
-        0.0,
+        (face_spec.input_dims[2] as u32, face_spec.input_dims[3] as u32),
+        scale_x,
+        scale_y,
+        pad_x,
+        pad_y,
     )?;
     let face = faces
         .first()
@@ -137,30 +152,28 @@ pub fn run_pipeline(
     })
 }
 
-/// M1 占位输入张量（最小形状；真实前处理在 M2 对齐模型 input_dims）
-fn placeholder() -> TensorData {
-    TensorData {
-        shape: vec![1],
-        data: vec![0.0],
-    }
+/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（resize 对齐 + 阈值化 + 形态学去噪）
+fn probability_mask(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage> {
+    let prob = probability_map(out, w, h)?;
+    let bin = threshold_mask(&prob, MASK_THRESHOLD);
+    Ok(morph_open(&bin, MASK_MORPH_RADIUS))
 }
 
 /// 演示引擎：balanced 三件套内置 mock 回放（`photos process --demo` 与测试共用）。
-/// 人脸框居中、双眼/双肩水平（融合角 0）、mask 为中心椭圆（可演示换底色）。
+/// 人脸框接近全图（候选 idx 16001 = stride32 cell(0,0) min512，loc 全 0 解码）、
+/// 双眼/双肩水平（融合角 0）、mask 为中心椭圆（可演示换底色）。
 pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
     let (fw, fh) = (w as f32, h as f32);
+    let n = retinaface_prior_count((640, 640));
+    let face_idx = 16001usize; // 解码后 bbox ≈ (0.1,0.1,0.9,0.9)*640 → 还原后接近全图
+    let mut conf = vec![0.0f32; n * 2];
+    conf[face_idx * 2] = 0.01;
+    conf[face_idx * 2 + 1] = 0.99;
+    // 与真实 RetinaFace 输出顺序一致：[bbox(loc), confidence, landmark]；loc/landmark 全 0
     let face_out = vec![
-        TensorData::new(vec![1, 1], vec![0.99]).unwrap(),
-        TensorData::new(vec![1, 1, 4], vec![0.3 * fw, 0.3 * fh, 0.7 * fw, 0.7 * fh]).unwrap(),
-        // 左眼、右眼、鼻尖、左嘴角、右嘴角
-        TensorData::new(
-            vec![1, 1, 10],
-            vec![
-                0.44 * fw, 0.40 * fh, 0.56 * fw, 0.40 * fh, 0.50 * fw, 0.45 * fh,
-                0.45 * fw, 0.52 * fh, 0.55 * fw, 0.52 * fh,
-            ],
-        )
-        .unwrap(),
+        TensorData::new(vec![1, n as i64, 4], vec![0.0; n * 4]).unwrap(),
+        TensorData::new(vec![1, n as i64, 2], conf).unwrap(),
+        TensorData::new(vec![1, n as i64, 10], vec![0.0; n * 10]).unwrap(),
     ];
     // 双眼 idx1/2、双肩 idx5/6 均高置信且水平（y 相同 → 角度 0）
     let mut kp = vec![0.0f32; 17 * 3];
@@ -212,25 +225,6 @@ fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
             0.0
         }
     }
-}
-
-/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 灰度图 [H,W]（×255 后阈值化 + 形态学去噪）
-fn probability_mask(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage> {
-    let n = out.shape.len();
-    let out_w = out.dim(n - 1);
-    let out_h = out.dim(n - 2);
-    if out_w != w as i64 || out_h != h as i64 {
-        return Err(CoreError::Image(format!(
-            "抠图输出尺寸 {out_w}x{out_h} 与原图 {w}x{h} 不一致"
-        )));
-    }
-    let mut mask = GrayImage::new(w, h);
-    for (i, p) in mask.pixels_mut().enumerate() {
-        let v = out.data.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-        p[0] = (v * 255.0).round() as u8;
-    }
-    let bin = threshold_mask(&mask, MASK_THRESHOLD);
-    Ok(morph_open(&bin, MASK_MORPH_RADIUS))
 }
 
 #[cfg(test)]
@@ -299,20 +293,28 @@ mod tests {
     }
 
     #[test]
-    fn 抠图尺寸不一致报错() {
+    fn 抠图输出尺寸不一致自动对齐() {
         let cfg = Config::default();
         let img = RgbImage::from_pixel(50, 60, Rgb([0, 0, 0]));
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         img.save(&input).unwrap();
         let mut engine = FakeEngine::balanced_stub(
-            vec![
-                TensorData::new(vec![1, 1], vec![0.99]).unwrap(),
-                TensorData::new(vec![1, 1, 4], vec![10.0, 10.0, 30.0, 40.0]).unwrap(),
-                TensorData::new(vec![1, 1, 10], vec![0.0; 10]).unwrap(),
-            ],
+            // 与真实 RetinaFace 输出顺序一致：[bbox(loc), confidence, landmark]；
+            // 完整 16800 候选，仅候选 16001 高分（解码后框接近全图）
+            {
+                let n = retinaface_prior_count((640, 640));
+                let mut conf = vec![0.0f32; n * 2];
+                conf[16001 * 2] = 0.01;
+                conf[16001 * 2 + 1] = 0.99;
+                vec![
+                    TensorData::new(vec![1, n as i64, 4], vec![0.0; n * 4]).unwrap(),
+                    TensorData::new(vec![1, n as i64, 2], conf).unwrap(),
+                    TensorData::new(vec![1, n as i64, 10], vec![0.0; n * 10]).unwrap(),
+                ]
+            },
             vec![TensorData::new(vec![1, 17, 3], vec![0.0; 17 * 3]).unwrap()],
-            // mask 尺寸与原图不符（60x50 vs 50x60）
+            // mask 尺寸与原图不符（60x50 vs 50x60，模拟 BiRefNet 输出 ≠ 原图）→ 自动 resize 对齐
             vec![TensorData::new(vec![1, 1, 50, 60], vec![0.0; 50 * 60]).unwrap()],
         );
         let req = ProcessRequest {
@@ -322,7 +324,9 @@ mod tests {
             bg: "white".into(),
             rotate: None,
         };
-        let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
-        assert!(err.to_string().contains("不一致"), "实际：{err}");
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        // 对齐后正常出图；mask 全 0（全透明）→ 换底色为纯白
+        assert_eq!(result.image.dimensions(), (295, 413));
+        assert!(result.image.pixels().all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255));
     }
 }

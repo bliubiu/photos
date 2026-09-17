@@ -2,6 +2,21 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.1] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M1 模型】`photos models download` 一键下载：ureq 纯 Rust 实现（不依赖外部 curl），按模型注册表下载至 `models/` 并 sha256 校验
+- 【M1 前处理】`preprocess::build_input` 按模型 `input_dims` 真实构造输入：letterbox 等比缩放灰边填充（NCHW）/ 直接 resize（NHWC）；RetinaFace 官方预处理 RGB 减均值 (104,117,123)；MoveNet int32 像素适配；BiRefNet 输出 logits 过 sigmoid 归一化（概率图羽化）
+- 【M1 人脸】`decode_retinaface` SSD prior 解码：对齐 Hivision 官方 retinaface_r50 输出（loc 偏移、`[1,N,2]` 双列分数取人脸分、landmark 偏移），prior 生成与解码公式（variance 0.1/0.2）、坐标还原与 NMS
+- 【M1 流水线】`run_pipeline` 接入真实推理输入：三模型真实输出布局对齐（RetinaFace [bbox, conf, landmark] 顺序重排）、letterbox 逆变换还原人脸框、mask resize 回原图
+
+### 📈 Improvements 性能/体验优化
+- 【M1 验证】balanced 三件套（RetinaFace R50 + MoveNet-Lightning + BiRefNet-Lite）真实 ONNX 推理打通端到端出图：一寸白底证件照，背景替换、裁切缩放正确
+- 【M1 降级】头像特写等无双肩/双眼场景自动降级：跳过自动纠偏并中文告警，继续出图
+
+### 🔧 Dependencies 依赖更新
+- 新增 `ureq`（workspace 统一管理，模型下载使用）
+
 ## [2026.09.17.0] - 0.1.0
 
 ### ✨ New Features 新增功能

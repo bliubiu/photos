@@ -1,13 +1,60 @@
-//! `photos models`：输出模型注册表状态报告。
+//! `photos models`：输出模型注册表状态报告 / 一键下载模型。
 
 use anyhow::Result;
 use photos_core::config::Config;
-use photos_core::model::{CheckStatus, ModelStatus, check_models, ready_count};
+use photos_core::model::{CheckStatus, ModelStatus, check_models, download_model, ready_count};
+
+use crate::cli::{ModelsArgs, ModelsCommand};
 
 use super::open_store;
 
-/// 模型状态报告（表格或 JSON）
-pub fn run(cfg: &Config, json: bool) -> Result<()> {
+/// 模型状态报告（表格或 JSON）；存在子命令时优先执行子命令
+pub fn run(cfg: &Config, args: &ModelsArgs) -> Result<()> {
+    if let Some(cmd) = &args.command {
+        match cmd {
+            ModelsCommand::Download { target } => download(cfg, target)?,
+        }
+        return Ok(());
+    }
+    report(cfg, args.json)
+}
+
+/// 一键下载：`all` 下载全部已启用模型，否则下载指定 id
+fn download(cfg: &Config, target: &str) -> Result<()> {
+    let ids: Vec<String> = if target == "all" {
+        cfg.models
+            .iter()
+            .filter(|(_, s)| s.enabled)
+            .map(|(id, _)| id.clone())
+            .collect()
+    } else {
+        vec![target.to_string()]
+    };
+    if ids.is_empty() {
+        anyhow::bail!("未找到可下载的模型（全部未启用？）");
+    }
+    for id in &ids {
+        let spec = cfg.model_spec(id)?;
+        let has_url = spec
+            .download
+            .as_ref()
+            .and_then(|d| d.url.as_deref())
+            .filter(|u| !u.is_empty())
+            .is_some();
+        if !has_url {
+            println!("模型“{id}”未配置下载地址（[models.{id}].download.url），跳过。");
+            continue;
+        }
+        println!("开始下载模型“{id}”...");
+        download_model(cfg, id)?;
+        println!("模型“{id}”下载完成。");
+    }
+    println!("全部下载完成。");
+    Ok(())
+}
+
+/// 模型状态报告
+fn report(cfg: &Config, json: bool) -> Result<()> {
     let store = open_store(cfg)?;
     let statuses = check_models(cfg, &store)?;
 

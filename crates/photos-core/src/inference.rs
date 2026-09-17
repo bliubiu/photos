@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+#[cfg(feature = "ort")]
+use std::sync::RwLock;
 
 #[cfg(feature = "ort")]
 use std::path::PathBuf;
@@ -116,14 +118,15 @@ impl InferenceEngine for FakeEngine {
 /// ONNX Runtime 真后端（feature = "ort" 时启用；API 以 ort 2.0 候选版为准，模型定版后校准）
 #[cfg(feature = "ort")]
 pub struct OrtEngine {
-    sessions: HashMap<String, ort::session::Session>,
+    /// Session 缓存；`Session::run` 需要 `&mut self`，用 RwLock 提供内部可变性且满足 Sync
+    sessions: RwLock<HashMap<String, ort::session::Session>>,
 }
 
 #[cfg(feature = "ort")]
 impl OrtEngine {
     /// 新建空引擎
     pub fn new() -> Self {
-        Self { sessions: HashMap::new() }
+        Self { sessions: RwLock::new(HashMap::new()) }
     }
 
     fn model_path(cfg: &Config, model_id: &str) -> CoreResult<PathBuf> {
@@ -135,7 +138,7 @@ impl OrtEngine {
 #[cfg(feature = "ort")]
 impl InferenceEngine for OrtEngine {
     fn load(&mut self, cfg: &Config, model_id: &str) -> CoreResult<()> {
-        if self.sessions.contains_key(model_id) {
+        if self.sessions.read().map_err(lock_err)?.contains_key(model_id) {
             return Ok(());
         }
         // 装载前先做磁盘存在性校验
@@ -149,31 +152,25 @@ impl InferenceEngine for OrtEngine {
         let session = ort::session::Session::builder()
             .map_err(|e| CoreError::Inference(format!("创建推理会话失败：{e}")))?
             .commit_from_file(&path)
-            .map_err(|e| CoreError::Inference(format!("装载模型 {} 失败：{e}", path.display())))?
-            .into_session();
-        self.sessions.insert(model_id.to_string(), session);
+            .map_err(|e| CoreError::Inference(format!("装载模型 {} 失败：{e}", path.display())))?;
+        self.sessions.write().map_err(lock_err)?.insert(model_id.to_string(), session);
         Ok(())
     }
 
     fn run(&self, model_id: &str, input: &TensorData) -> CoreResult<Vec<TensorData>> {
-        let session = self.sessions.get(model_id).ok_or_else(|| {
+        let mut sessions = self.sessions.write().map_err(lock_err)?;
+        let session = sessions.get_mut(model_id).ok_or_else(|| {
             CoreError::Inference(format!("模型“{model_id}”未装载"))
         })?;
-        let value = ort::value::Value::from_array(
-            input
-                .data
-                .iter()
-                .copied()
-                .collect::<Vec<f32>>()
-                .into_shape(input.shape.iter().map(|&d| d as usize).collect::<Vec<_>>()),
-        )
-        .map_err(|e| CoreError::Inference(format!("输入张量转换失败：{e}")))?;
+        // 依据会话输入元素类型构造张量：int32（如 MoveNet 像素 0-255）时由 [0,1] 归一化还原
+        let tensor = build_input_value(session, input)
+            .map_err(|e| CoreError::Inference(format!("输入张量转换失败：{e}")))?;
         let outputs = session
-            .run(ort::inputs![value].map_err(|e| CoreError::Inference(format!("构建推理输入失败：{e}")))?)
+            .run(ort::inputs![tensor])
             .map_err(|e| CoreError::Inference(format!("推理失败：{e}")))?;
         let mut result = Vec::new();
-        for output in outputs {
-            let arr = output
+        for (name, value) in outputs {
+            let arr = value
                 .try_extract_array::<f32>()
                 .map_err(|e| CoreError::Inference(format!("输出张量解析失败：{e}")))?;
             let shape: Vec<i64> = arr.shape().iter().map(|&d| d as i64).collect();
@@ -182,6 +179,34 @@ impl InferenceEngine for OrtEngine {
         }
         Ok(result)
     }
+}
+
+/// 按会话首个输入的元素类型构造 ONNX 张量
+#[cfg(feature = "ort")]
+fn build_input_value(
+    session: &ort::session::Session,
+    input: &TensorData,
+) -> Result<ort::value::Value, ort::Error> {
+    use ort::value::{Tensor, TensorElementType, ValueType};
+    let ty = session.inputs().first().map(|o| o.dtype());
+    let shape = input.shape.clone();
+    match ty {
+        Some(ValueType::Tensor { ty: TensorElementType::Int32, .. }) => {
+            // int32 输入（MoveNet 等）：语义为像素值 0-255，把 [0,1] 归一化数据还原为整数
+            let data: Vec<i32> = input.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as i32).collect();
+            Tensor::from_array((shape, data)).map(|t| t.into())
+        }
+        _ => {
+            // float32 等：直接使用归一化 [0,1] 数据
+            Tensor::from_array((shape, input.data.clone())).map(|t| t.into())
+        }
+    }
+}
+
+/// 会话锁损坏时的统一错误（RwLock 中毒，读写锁通用）
+#[cfg(feature = "ort")]
+fn lock_err<T>(_: std::sync::PoisonError<T>) -> CoreError {
+    CoreError::Inference("推理会话锁损坏".into())
 }
 
 /// 根据 feature 构建默认引擎（CLI 入口使用）

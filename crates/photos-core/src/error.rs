@@ -37,6 +37,10 @@ pub enum CoreError {
     #[error("推理失败：{0}")]
     Inference(String),
 
+    /// 模型下载失败（HTTP / 校验）
+    #[error("下载失败：{0}")]
+    Download(String),
+
     /// IO 错误
     #[error("IO 错误：{0}")]
     Io(#[from] std::io::Error),

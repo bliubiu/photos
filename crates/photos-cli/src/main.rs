@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     let _guard = init_logging(Path::new(&cfg.general.log_dir), cfg.general.log_level)?;
 
     match &cli.command {
-        Commands::Models { json } => commands::models::run(&cfg, *json)?,
+        Commands::Models(args) => commands::models::run(&cfg, args)?,
         Commands::Process(args) => commands::process::run(&cfg, args)?,
         Commands::Serve => anyhow::bail!("serve 子命令将于 M3 阶段实现（HTTP 服务 + WebUI）"),
         Commands::Gui => anyhow::bail!("gui 子命令将于 M3 阶段实现（Tauri 桌面壳）"),

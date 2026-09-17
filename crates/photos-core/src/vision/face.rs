@@ -76,27 +76,98 @@ pub fn nms(boxes: &[FaceBox], iou_threshold: f32) -> Vec<usize> {
     keep
 }
 
-/// RetinaFace 输出解码（通用布局约定）：
-/// - scores 张量 `[1, N]`（或 `[N]`）：各候选分数
-/// - boxes 张量 `[1, N, 4]`（或 `[N, 4]`）：`[x1, y1, x2, y2]`（模型坐标）
-/// - landmarks 张量 `[1, N, 10]`（或 `[N, 10]`）：5 点 `[x,y]` 对（左眼、右眼、鼻尖、左嘴角、右嘴角）
-/// 流程：低分过滤 → NMS → 坐标还原（scale_x/scale_y 与 pad 提供 letterbox 逆变换，缺省为 1/0）。
+/// RetinaFace R50 默认锚框配置（对齐 Hivision inference.py 的 cfg）
+const RF_MIN_SIZES: [[f32; 2]; 3] = [[16.0, 32.0], [64.0, 128.0], [256.0, 512.0]];
+const RF_STEPS: [f32; 3] = [8.0, 16.0, 32.0];
+const RF_VARIANCE: [f32; 2] = [0.1, 0.2];
+
+/// 生成 RetinaFace 归一化 prior（中心 x/y + 宽/高，均相对输入图像尺寸）
+fn retinaface_priors(image_h: u32, image_w: u32) -> Vec<[f32; 4]> {
+    let mut priors = Vec::new();
+    for (idx, step) in RF_STEPS.iter().enumerate() {
+        let fh = (image_h as f32 / step).ceil() as u32;
+        let fw = (image_w as f32 / step).ceil() as u32;
+        for y in 0..fh {
+            for x in 0..fw {
+                for &min_size in &RF_MIN_SIZES[idx] {
+                    let s_kx = min_size / image_w as f32;
+                    let s_ky = min_size / image_h as f32;
+                    priors.push([x as f32 + 0.5, y as f32 + 0.5, s_kx, s_ky]);
+                }
+            }
+        }
+    }
+    priors
+}
+
+/// RetinaFace prior 候选总数（供测试/演示引擎构造完整输出）
+pub fn retinaface_prior_count(image_size: (u32, u32)) -> usize {
+    retinaface_priors(image_size.0, image_size.1).len()
+}
+
+/// SSD 式解码：prior 中心 + loc 偏移 → 绝对归一化坐标 [x1, y1, x2, y2]
+fn decode_box(loc: &[f32], prior: &[f32; 4], variance: f32) -> [f32; 4] {
+    let cx = prior[0] + loc[0] * variance * prior[2];
+    let cy = prior[1] + loc[1] * variance * prior[3];
+    let w = prior[2] * (loc[2] * variance).exp();
+    let h = prior[3] * (loc[3] * variance).exp();
+    [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0]
+}
+
+/// 5 点关键点解码：前三点中心偏移，后两点按 prior 尺寸缩放
+fn decode_landm(lm: &[f32], prior: &[f32; 4], variance: f32) -> [f32; 10] {
+    let mut out = [0.0f32; 10];
+    for k in 0..5 {
+        let (px, py) = if k < 3 {
+            (
+                prior[0] + lm[2 * k] * variance * prior[2],
+                prior[1] + lm[2 * k + 1] * variance * prior[3],
+            )
+        } else {
+            (
+                prior[0] + prior[2] * lm[2 * k] * variance,
+                prior[1] + prior[3] * lm[2 * k + 1] * variance,
+            )
+        };
+        out[2 * k] = px;
+        out[2 * k + 1] = py;
+    }
+    out
+}
+
+/// RetinaFace 输出解码（Hivision 官方模型约定）：
+/// - scores 张量 `[1, N]`（或 `[N]`，或真实模型 `[1, N, 2]` 取人脸分数列）：各候选分数
+/// - boxes 张量 `[1, N, 4]`（或 `[N, 4]`）：prior 回归偏移（Hivision 官方模型的 loc）
+/// - landmarks 张量 `[1, N, 10]`（或 `[N, 10]`）：5 点偏移（左眼、右眼、鼻尖、左嘴角、右嘴角）
+/// 流程：prior 解码 → 低分过滤 → NMS → 坐标还原（scale_x/scale_y 与 pad 提供 letterbox 逆变换）。
 pub fn decode_retinaface(
     scores: &TensorData,
     boxes: &TensorData,
     landmarks: &TensorData,
     score_threshold: f32,
     iou_threshold: f32,
+    image_size: (u32, u32),
     scale_x: f32,
     scale_y: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> CoreResult<Vec<FaceDetection>> {
-    let n = scores.data.len();
-    if boxes.data.len() != n * 4 {
+    if boxes.data.len() % 4 != 0 {
         return Err(CoreError::Image(format!(
-            "检测框张量长度 {} 与候选数 {n} 不一致",
+            "检测框张量长度 {} 不是 4 的倍数",
             boxes.data.len()
+        )));
+    }
+    let n = boxes.data.len() / 4;
+    if n == 0 {
+        return Err(CoreError::Image("检测框张量为空".into()));
+    }
+    // scores 支持 [N] 或 [N, 2]（真实 RetinaFace 输出两列，人脸分数在最后一列）
+    let score_stride = scores.data.len() / n;
+    if scores.data.len() != n * score_stride || !(1..=2).contains(&score_stride) {
+        return Err(CoreError::Image(format!(
+            "分数张量长度 {} 与候选数 {n} 不一致（应为 1 或 2 倍）",
+            scores.data.len()
         )));
     }
     if landmarks.data.len() != n * 10 {
@@ -105,21 +176,36 @@ pub fn decode_retinaface(
             landmarks.data.len()
         )));
     }
+    // prior 数量必须与候选数一致，否则说明模型输出或配置不匹配
+    let priors = retinaface_priors(image_size.0, image_size.1);
+    if priors.len() != n {
+        return Err(CoreError::Image(format!(
+            "候选数 {n} 与锚框数 {} 不一致（模型或输入尺寸不匹配）",
+            priors.len()
+        )));
+    }
+    let (ih, iw) = (image_size.0 as f32, image_size.1 as f32);
 
     let mut detections: Vec<FaceDetection> = Vec::new();
     for i in 0..n {
-        let score = scores.data[i];
+        let score = scores.data[i * score_stride + score_stride - 1];
         if score < score_threshold {
             continue;
         }
-        let b = &boxes.data[i * 4..i * 4 + 4];
-        let lm = &landmarks.data[i * 10..i * 10 + 10];
+        let b = decode_box(&boxes.data[i * 4..i * 4 + 4], &priors[i], RF_VARIANCE[0]);
+        let lm = decode_landm(&landmarks.data[i * 10..i * 10 + 10], &priors[i], RF_VARIANCE[1]);
         let mut points = [Point2::new(0.0, 0.0); 5];
         for (k, p) in points.iter_mut().enumerate() {
-            *p = Point2::new(lm[k * 2] as f64, lm[k * 2 + 1] as f64);
+            *p = Point2::new(lm[k * 2] as f64 * iw as f64, lm[k * 2 + 1] as f64 * ih as f64);
         }
         detections.push(FaceDetection {
-            face: FaceBox { x1: b[0], y1: b[1], x2: b[2], y2: b[3], score },
+            face: FaceBox {
+                x1: b[0] * iw,
+                y1: b[1] * ih,
+                x2: b[2] * iw,
+                y2: b[3] * ih,
+                score,
+            },
             landmarks: points,
         });
     }
@@ -172,39 +258,76 @@ mod tests {
     }
 
     #[test]
+    fn prior生成数量与640输入一致() {
+        // 640 输入 → stride 8/16/32 特征图 80²/40²/20²，各 2 个 min_size
+        let p = retinaface_priors(640, 640);
+        assert_eq!(p.len(), 80 * 80 * 2 + 40 * 40 * 2 + 20 * 20 * 2);
+        assert_eq!(p.len(), 16800);
+        // 首个 prior：stride8 cell(0,0) min16 → 中心 (0.5, 0.5)，尺寸 16/640
+        assert_eq!(p[0], [0.5, 0.5, 16.0 / 640.0, 16.0 / 640.0]);
+        // 第二个：同 cell min32
+        assert_eq!(p[1], [0.5, 0.5, 32.0 / 640.0, 32.0 / 640.0]);
+    }
+
+    #[test]
+    fn prior解码公式() {
+        // loc 全 0 → bbox 为 prior 中心 ± 半尺寸；landmark 全 0 → 全部落在 prior 中心
+        let prior = [0.5, 0.5, 0.25, 0.25];
+        let b = decode_box(&[0.0; 4], &prior, RF_VARIANCE[0]);
+        assert!((b[0] - 0.375).abs() < 1e-6);
+        assert!((b[1] - 0.375).abs() < 1e-6);
+        assert!((b[2] - 0.625).abs() < 1e-6);
+        // loc 正向偏移 → 中心右移、尺寸增大
+        let b2 = decode_box(&[1.0, 1.0, 1.0, 1.0], &prior, RF_VARIANCE[0]);
+        assert!(b2[0] > b[0] && b2[2] > b[2]);
+        let lm = decode_landm(&[0.0; 10], &prior, RF_VARIANCE[1]);
+        for i in 0..5 {
+            assert!((lm[2 * i] - 0.5).abs() < 1e-6);
+            assert!((lm[2 * i + 1] - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn 解码过滤nms与坐标还原() {
-        // 4 个候选：高分 A、低分（过滤）、高分 C、与 A 重叠高分（NMS 抑制）
-        let scores = TensorData::new(vec![4], vec![0.9, 0.05, 0.8, 0.85]).unwrap();
-        let boxes = TensorData::new(
-            vec![4, 4],
-            vec![
-                10.0, 10.0, 40.0, 60.0, // A
-                0.0, 0.0, 10.0, 10.0, // 低分
-                100.0, 100.0, 140.0, 150.0, // C
-                12.0, 12.0, 42.0, 62.0, // 与 A 重叠
-            ],
+        // image_size 64x64 → 168 个 prior（候选），loc/landmark 全 0。
+        // prior 生成顺序：y 外层、x 内层，每 cell 两个 min_size。
+        // prior[0]（y=0,x=0,min16）→ bbox (24,24,40,40) 高分 A
+        // prior[2]（y=0,x=1,min16）→ (88,24,104,40) C；prior[3]（y=0,x=1,min32）→ (80,16,112,48) D（与 C IoU 0.25）
+        let n = 168usize;
+        let scores = {
+            let mut s = vec![0.0f32; n];
+            s[0] = 0.9; // A
+            s[1] = 0.05; // 低分过滤
+            s[2] = 0.8; // C
+            s[3] = 0.85; // D
+            s
+        };
+        let dets = decode_retinaface(
+            &TensorData::new(vec![n as i64], scores).unwrap(),
+            &TensorData::new(vec![n as i64, 4], vec![0.0; n * 4]).unwrap(),
+            &TensorData::new(vec![n as i64, 10], vec![0.0; n * 10]).unwrap(),
+            0.5,
+            0.5,
+            (64, 64),
+            2.0,
+            2.0,
+            10.0,
+            20.0,
         )
         .unwrap();
-        let landmarks = TensorData::new(
-            vec![4, 10],
-            vec![
-                15.0, 20.0, 35.0, 20.0, 25.0, 30.0, 20.0, 45.0, 30.0, 45.0, // A
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                110.0, 120.0, 130.0, 120.0, 120.0, 130.0, 115.0, 140.0, 125.0, 140.0, // C
-                17.0, 22.0, 37.0, 22.0, 27.0, 32.0, 22.0, 47.0, 32.0, 47.0,
-            ],
-        )
-        .unwrap();
-        let dets = decode_retinaface(&scores, &boxes, &landmarks, 0.5, 0.5, 2.0, 2.0, 10.0, 20.0).unwrap();
-        // 保留 A（去重叠）与 C
-        assert_eq!(dets.len(), 2);
-        // A 坐标还原：x = (10-10)/2 = 0
+        // A、D、C 均保留（D 与 C IoU 0.25 < 0.5）
+        assert_eq!(dets.len(), 3);
+        // A 坐标还原：x = (24-10)/2 = 7
         let a = &dets[0];
-        assert!((a.face.x1 - 0.0).abs() < 1e-3);
-        assert!((a.face.y1 - -5.0).abs() < 1e-3); // (10-20)/2
-        // 关键点还原
-        assert!((a.landmarks[0].x - 2.5).abs() < 1e-3); // (15-10)/2
-        assert!((a.landmarks[1].y - 0.0).abs() < 1e-3); // (20-20)/2
+        assert!((a.face.x1 - 7.0).abs() < 1e-3);
+        assert!((a.face.y1 - 2.0).abs() < 1e-3); // (24-20)/2
+        // C 还原：y1 = (24-20)/2 = 2，x1 = (88-10)/2 = 39
+        let c = &dets[2];
+        assert!((c.face.x1 - 39.0).abs() < 1e-3);
+        assert!((c.face.y1 - 2.0).abs() < 1e-3);
+        // 关键点还原：loc 全 0 → prior[0] 中心 (32,32) → (32-10)/2=11, (32-20)/2=6
+        assert!((a.landmarks[0].x - 11.0).abs() < 1e-3);
+        assert!((a.landmarks[0].y - 6.0).abs() < 1e-3);
     }
 
     #[test]
@@ -212,7 +335,42 @@ mod tests {
         let s = TensorData::new(vec![2], vec![0.9, 0.8]).unwrap();
         let b = TensorData::new(vec![2, 4], vec![0.0; 8]).unwrap();
         let lm = TensorData::new(vec![2, 10], vec![0.0; 20]).unwrap();
-        assert!(decode_retinaface(&s, &TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(), &lm, 0.5, 0.5, 1.0, 1.0, 0.0, 0.0).is_err());
-        assert!(decode_retinaface(&s, &b, &TensorData::new(vec![1, 10], vec![0.0; 10]).unwrap(), 0.5, 0.5, 1.0, 1.0, 0.0, 0.0).is_err());
+        assert!(decode_retinaface(&s, &TensorData::new(vec![1, 4], vec![0.0; 4]).unwrap(), &lm, 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
+        assert!(decode_retinaface(&s, &b, &TensorData::new(vec![1, 10], vec![0.0; 10]).unwrap(), 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn 锚框数量与候选不一致报错() {
+        // image_size=64 → prior 数 168 与候选 2 不匹配
+        let s = TensorData::new(vec![2], vec![0.9, 0.8]).unwrap();
+        let b = TensorData::new(vec![2, 4], vec![0.0; 8]).unwrap();
+        let lm = TensorData::new(vec![2, 10], vec![0.0; 20]).unwrap();
+        assert!(decode_retinaface(&s, &b, &lm, 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn 两列分数布局取人脸分数列() {
+        // 真实 RetinaFace 输出 scores [1, N, 2]：背景分在前、人脸分在后 → 取后一列
+        // 168 个候选，仅候选 1 高分 → prior[1]（min32 cell(0,0)）→ bbox (16,16,48,48)
+        let n = 168usize;
+        let mut scores = vec![0.0f32; n * 2];
+        scores[1 * 2 + 1] = 0.95; // 候选 1 人脸分
+        scores[1 * 2] = 0.05;
+        let dets = decode_retinaface(
+            &TensorData::new(vec![1, n as i64, 2], scores).unwrap(),
+            &TensorData::new(vec![1, n as i64, 4], vec![0.0; n * 4]).unwrap(),
+            &TensorData::new(vec![1, n as i64, 10], vec![0.0; n * 10]).unwrap(),
+            0.5,
+            0.5,
+            (64, 64),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(dets.len(), 1);
+        assert!((dets[0].face.x1 - 16.0).abs() < 1e-3);
+        assert!((dets[0].face.y1 - 16.0).abs() < 1e-3);
     }
 }

@@ -9,5 +9,6 @@ pub mod inference;
 pub mod logging;
 pub mod model;
 pub mod pipeline;
+pub mod preprocess;
 pub mod storage;
 pub mod vision;

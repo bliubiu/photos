@@ -36,3 +36,6 @@ tempfile = "3"
 
 # 推理：ONNX Runtime（CPU 版；CUDA 需额外配置，见 docs/04-模型清单.md）
 ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
+
+# 模型一键下载（纯 Rust HTTP 客户端，无外部 curl 依赖）
+ureq = "2"

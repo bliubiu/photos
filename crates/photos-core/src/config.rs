@@ -441,11 +441,22 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
                 sha256: "0".repeat(64),
                 input_dims: dims,
                 enabled: true,
-                download: None,
+                download: default_download_url(id),
             },
         );
     }
     m
+}
+
+/// 默认注册表下载地址（一键下载开箱即用；balanced 三件套已就绪，其余可自行补充）
+fn default_download_url(id: &str) -> Option<ModelDownload> {
+    let url = match id {
+        "retinaface" => "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/retinaface-resnet50.onnx",
+        "movnet_light" => "https://huggingface.co/Xenova/movenet-singlepose-lightning/resolve/main/onnx/model.onnx",
+        "birefnet_lite" => "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
+        _ => return None,
+    };
+    Some(ModelDownload { url: Some(url.into()) })
 }
 
 fn default_modes() -> BTreeMap<String, ModeSuite> {

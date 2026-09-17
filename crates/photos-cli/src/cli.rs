@@ -17,18 +17,35 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// 查看模型注册表状态
-    Models {
-        /// 以 JSON 输出
-        #[arg(long)]
-        json: bool,
-    },
+    /// 查看模型注册表状态 / 一键下载模型
+    Models(ModelsArgs),
     /// 处理证件照（单图，M1 实现）
     Process(ProcessArgs),
     /// 启动本地 HTTP 服务（M3 实现）
     Serve,
     /// 启动桌面版（M3 实现）
     Gui,
+}
+
+/// `photos models` 参数
+#[derive(Debug, clap::Args)]
+pub struct ModelsArgs {
+    /// 以 JSON 输出模型状态
+    #[arg(long)]
+    pub json: bool,
+    #[command(subcommand)]
+    pub command: Option<ModelsCommand>,
+}
+
+/// `photos models` 子命令
+#[derive(Debug, Subcommand)]
+pub enum ModelsCommand {
+    /// 一键下载模型（<id> 指定模型 id，all 下载全部已启用模型）
+    Download {
+        /// 模型 id 或 all
+        #[arg(value_name = "模型id")]
+        target: String,
+    },
 }
 
 /// 单图处理参数

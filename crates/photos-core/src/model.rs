@@ -193,9 +193,87 @@ pub fn ready_count(statuses: &[ModelStatus]) -> usize {
         .count()
 }
 
+/// 下载失败自动重试次数
+const DOWNLOAD_MAX_RETRIES: u32 = 3;
+
+/// 下载单个模型到注册表路径（`photos models download <id>`）。
+/// 流程：读下载地址 → 临时文件流式写入 → sha256 校验（非占位时）→ 原子替换。
+/// 依赖 `[models.<id>].download.url`；超时取 `[models_download].timeout_secs`。
+pub fn download_model(cfg: &Config, model_id: &str) -> CoreResult<()> {
+    let spec = cfg.model_spec(model_id)?;
+    let url = spec
+        .download
+        .as_ref()
+        .and_then(|d| d.url.as_deref())
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| {
+            CoreError::Download(format!(
+                "模型“{model_id}”未配置下载地址（请在配置 [models.{model_id}].download.url 填写）"
+            ))
+        })?;
+    let path = resolve_model_path(cfg, Path::new(&spec.path));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let timeout = std::time::Duration::from_secs(cfg.models_download.timeout_secs.max(1));
+    // 临时文件与目标同目录，保证 rename 原子替换
+    let tmp = path.with_extension("onnx.downloading");
+
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_MAX_RETRIES {
+        match download_to(url, &tmp, timeout) {
+            Ok(()) => {
+                last_err.clear();
+                break;
+            }
+            Err(e) => {
+                last_err = format!("{e}");
+                let _ = std::fs::remove_file(&tmp);
+                if attempt < DOWNLOAD_MAX_RETRIES {
+                    continue;
+                }
+                return Err(CoreError::Download(format!(
+                    "模型“{model_id}”下载失败（已重试 {DOWNLOAD_MAX_RETRIES} 次）：{last_err}"
+                )));
+            }
+        }
+    }
+
+    // sha256 校验：注册表为占位全 0（未定版）时跳过校验、仅下载
+    if !spec.sha256.chars().all(|c| c == '0') {
+        let actual = sha256_file(&tmp)?;
+        if actual != spec.sha256 {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CoreError::Download(format!(
+                "模型“{model_id}”sha256 校验失败：预期 {}，实际 {actual}",
+                spec.sha256
+            )));
+        }
+    }
+
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// 单次流式下载：HTTP GET 响应体写入临时文件（覆盖写入，保证重试幂等）
+fn download_to(url: &str, tmp: &Path, timeout: std::time::Duration) -> Result<(), String> {
+    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+    let resp = agent.get(url).call().map_err(|e| format!("请求失败：{e}"))?;
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP 状态码 {status}"));
+    }
+    let mut reader = resp.into_reader();
+    let mut out = File::create(tmp).map_err(|e| format!("创建临时文件失败：{e}"))?;
+    std::io::copy(&mut reader, &mut out).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use crate::storage::Store;
 
     fn setup() -> (tempfile::TempDir, Config, Store) {
@@ -305,5 +383,79 @@ mod tests {
         }
         let s = check_models(&cfg, &store).unwrap();
         assert_eq!(ready_count(&s), 2);
+    }
+
+    /// 起一个返回固定字节/状态码的 HTTP server（支持多次请求，覆盖下载重试），返回完整 URL
+    fn start_http_server(content: &'static [u8], status: u16) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    content.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(content);
+            }
+        });
+        format!("http://{addr}/model.onnx")
+    }
+
+    /// 构造下载场景：本地 server + 目标路径/url/sha256 写入 retinaface 注册表
+    fn download_cfg(dir: &Path, url: &str, expected: &str) -> Config {
+        let mut cfg = Config::default();
+        let spec = cfg.models.get_mut("retinaface").unwrap();
+        spec.path = dir.join("retinaface.onnx").display().to_string();
+        spec.sha256 = expected.to_string();
+        spec.download = Some(crate::config::ModelDownload { url: Some(url.into()), ..Default::default() });
+        cfg
+    }
+
+    #[test]
+    fn 下载成功并写入目标文件() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"model-bytes-download";
+        let url = start_http_server(content, 200);
+        let cfg = download_cfg(dir.path(), &url, &expected_of(content));
+        download_model(&cfg, "retinaface").unwrap();
+        let target = dir.path().join("retinaface.onnx");
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), content);
+        // 临时文件已清理
+        assert!(!dir.path().join("retinaface.onnx.downloading").exists());
+    }
+
+    #[test]
+    fn 下载校验sha256失败报错() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"model-bytes-download";
+        let url = start_http_server(content, 200);
+        let cfg = download_cfg(dir.path(), &url, &expected_of(b"other-content"));
+        let err = download_model(&cfg, "retinaface").unwrap_err();
+        assert!(err.to_string().contains("sha256 校验失败"), "实际：{err}");
+        // 校验失败不落盘
+        assert!(!dir.path().join("retinaface.onnx").exists());
+    }
+
+    #[test]
+    fn 未配置下载地址报错() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.models.get_mut("retinaface").unwrap().download = None;
+        let err = download_model(&cfg, "retinaface").unwrap_err();
+        assert!(err.to_string().contains("未配置下载地址"), "实际：{err}");
+    }
+
+    #[test]
+    fn 服务器非200报错() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = start_http_server(b"not-found", 404);
+        let cfg = download_cfg(dir.path(), &url, "");
+        let err = download_model(&cfg, "retinaface").unwrap_err();
+        assert!(err.to_string().contains("404"), "实际：{err}");
     }
 }
