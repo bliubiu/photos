@@ -5,7 +5,7 @@
     "title": "photos 智能证件照工具 · 本地离线架构",
     "locale": "zh-CN",
     "quality_profile": "showcase",
-    "viewBox": [1350, 756],
+    "viewBox": [1350, 660],
     "views": [
       { "id": "main-path", "label": "主路径：桌面出图", "focus": ["user", "desktop", "webui", "api", "pipeline", "vision", "inference", "models"], "note": "从桌面窗口到证件照产物的完整请求路径。" },
       { "id": "cli-batch", "label": "CLI 批量处理", "focus": ["user", "cli", "pipeline", "sqldb"], "note": "无 GUI 依赖的批量处理链路（服务器 / 自动化脚本）。" },
@@ -15,7 +15,7 @@
 "components": [
     { "id": "user", "type": "external", "label": "用户", "sublabel": "本地桌面 / 批量运维", "pos": [44, 360], "size": [110, 60] },
     { "id": "cli", "type": "backend", "label": "photos-cli", "sublabel": "命令行 · clap", "pos": [44, 100], "size": [140, 60], "tag": "process / serve / models" },
-    { "id": "desktop", "type": "backend", "label": "photos-desktop", "sublabel": "Tauri 2 桌面壳", "pos": [44, 620], "size": [150, 60], "tag": "WebView 内嵌" },
+    { "id": "desktop", "type": "backend", "label": "photos-desktop", "sublabel": "Tauri 2 桌面壳", "pos": [44, 524], "size": [150, 60], "tag": "WebView 内嵌" },
     { "id": "webui", "type": "frontend", "label": "React 19 WebUI", "sublabel": "Tailwind + Zustand", "pos": [214, 360], "size": [150, 60] },
     { "id": "api", "type": "backend", "label": "photos-api", "sublabel": "Axum 本地服务 · 7 端点", "pos": [424, 360], "size": [150, 60], "tag": "127.0.0.1 随机端口" },
     { "id": "pipeline", "type": "backend", "label": "photos-core", "sublabel": "流水线编排 · DDD 四层", "pos": [624, 360], "size": [170, 66], "tag": "九步链路" },
@@ -23,8 +23,8 @@
     { "id": "inference", "type": "backend", "label": "ONNX Runtime 推理", "sublabel": "ort · CPU / CUDA 自适应", "pos": [870, 360], "size": [170, 60], "tag": "人脸/关键点/分割" },
     { "id": "models", "type": "cloud", "label": "模型仓库", "sublabel": "三套件 · 9 模型", "pos": [1104, 360], "size": [180, 66], "tag": "models/" },
     { "id": "dl-src", "type": "external", "label": "模型源", "sublabel": "GitHub / hf-mirror", "pos": [1104, 100], "size": [170, 60] },
-    { "id": "sqldb", "type": "database", "label": "数据存储", "sublabel": "sqlite WAL + data/out", "pos": [424, 620], "size": [170, 60], "tag": "任务状态机" },
-    { "id": "infra", "type": "backend", "label": "photos-infra", "sublabel": "基础设施层占位", "pos": [624, 620], "size": [170, 60], "tag": "待拆分迁入" }
+    { "id": "sqldb", "type": "database", "label": "数据存储", "sublabel": "sqlite WAL + data/out", "pos": [424, 524], "size": [170, 60], "tag": "任务状态机" },
+    { "id": "infra", "type": "backend", "label": "photos-infra", "sublabel": "基础设施层占位", "pos": [624, 524], "size": [170, 60], "tag": "待拆分迁入" }
   ],
   "boundaries": [
     { "kind": "region", "label": "photos 工作区（本地离线）", "wraps": ["desktop", "webui", "api", "cli", "pipeline", "vision", "inference", "models", "sqldb", "infra"] },
@@ -41,13 +41,12 @@
     { "id": "inference-models", "from": "inference", "to": "models", "label": "加载 ONNX 模型", "labelAt": [1072, 356] },
     { "id": "models-dlsrc", "from": "models", "to": "dl-src", "label": "一键下载 · sha256 校验", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
     { "id": "cli-pipeline", "from": "cli", "to": "pipeline", "label": "process 批处理直连", "variant": "dashed" },
-    { "id": "pipeline-infra", "from": "pipeline", "to": "infra", "label": "基础设施预留", "variant": "dashed" },
+    { "id": "pipeline-infra", "from": "pipeline", "to": "infra", "label": "基础设施预留", "variant": "dashed", "labelAt": [709, 475] },
     { "id": "user-cli", "from": "user", "to": "cli", "label": "CLI 批量运维", "variant": "dashed", "fromSide": "top", "toSide": "bottom" }
   ],
   "cards": [
-    { "dot": "cyan", "title": "三种运行入口", "items": ["Tauri 2 桌面壳内嵌 WebView，同源托管 WebUI 与 API（仅本机回环）", "photos CLI：process 批量出图、models 下载校验、serve 起服务、gui 拉起桌面版", "photos-api：Axum 7 端点 + queued→running→succeeded|failed 任务状态机"] },
-    { "dot": "emerald", "title": "核心处理链路", "items": ["九步流水线：模型就绪校验 → 读图预缩放 → 检测/抠图推理 → 角度融合 → 同步纠偏 → 换装 → 美颜 → 羽化换底色 → 裁切排版", "头部姿态 0.6 + 双肩水平 0.4 加权融合，±22° 阈值保护，超限降级出图并告警", "纯 Rust 视觉算子栈（ADR-0001），禁止 OpenCV 等 C/C++ 图像库绑定"] },
-    { "dot": "violet", "title": "模型与三套件", "items": ["speed：MTCNN + MoveNet-Lightning + RMBG", "balanced（默认）：RetinaFace + MoveNet-Lightning + BiRefNet-Lite", "quality：RetinaFace + MoveNet-Thunder + BiRefNet-Full"] },
-    { "dot": "amber", "title": "工程与数据", "items": ["5 个 crate 单向依赖：photos-cli / photos-desktop / photos-api → photos-core；photos-infra 为预留基础设施层", "模型一键下载 + sha256 校验；缺失时给出中文指引，禁止静默降级为演示结果", "sqlite WAL 持久化任务历史，产物输出 data/out，日志按日轮转保留 32 天"] }
+    { "dot": "cyan", "title": "运行入口与依赖", "items": ["cli / desktop / api → photos-core 单向依赖；photos-infra 为预留层", "Tauri 2 桌面壳内嵌 WebView，同源托管 WebUI 与 API（本机回环）", "CLI：process 出图、models 下载、serve 起服务；API：Axum 7 端点"] },
+    { "dot": "emerald", "title": "核心处理链路", "items": ["九步：预缩放 → 检测/抠图推理 → 角度融合 → 纠偏 → 换装 → 美颜 → 换底 → 排版", "头部 0.6 + 双肩 0.4 加权融合，±22° 阈值保护，超限降级出图并告警", "纯 Rust 视觉算子栈（ADR-0001），禁用 OpenCV 等 C/C++ 绑定"] },
+    { "dot": "violet", "title": "模型三套件", "items": ["speed：MTCNN + MoveNet-Lightning + RMBG-1.4", "balanced（默认）：RetinaFace + MoveNet-Lightning + BiRefNet-Lite", "quality：RetinaFace + MoveNet-Thunder + BiRefNet-Full"] }
   ]
 }

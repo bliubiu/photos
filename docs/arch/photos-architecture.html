@@ -5004,7 +5004,7 @@
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
-      <svg viewBox="0 0 1350 756" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <svg viewBox="0 0 1350 660" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">photos 智能证件照工具 · 本地离线架构</title>
         <desc id="archify-diagram-description">由 Archify 生成的架构图。</desc>
         <!-- Definitions -->
@@ -5030,22 +5030,23 @@
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="photos 本地应用" x="14" y="70" width="1300" height="630" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="photos 工作区（本地离线）" x="14" y="70" width="1300" height="534" rx="12" class="c-region" stroke-width="1"/>
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-composition-frame-label="photos-core 核心域（DDD 四层）" x="594" y="70" width="476" height="376" rx="12" class="c-region" stroke-width="1"/>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="user" data-edge-to="desktop" data-edge-label="桌面交互" data-edge-key="0" data-edge-id="user-desktop" data-composition-points="99,420;99,520;119,520;119,620" d="M 99 420 L 99 512 Q 99 520 107 520 L 111 520 Q 119 520 119 528 L 119 620" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="desktop" data-edge-to="webui" data-edge-label="内嵌 WebView 加载" data-edge-key="1" data-edge-id="desktop-webui" data-composition-points="194,650;204,650;204,390;214,390" d="M 194 650 L 199 650 Q 204 650 204 645 L 204 395 Q 204 390 209 390 L 214 390" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="user" data-edge-to="desktop" data-edge-label="桌面交互" data-edge-key="0" data-edge-id="user-desktop" data-composition-points="99,420;99,472;119,472;119,524" d="M 99 420 L 99 464 Q 99 472 107 472 L 111 472 Q 119 472 119 480 L 119 524" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="desktop" data-edge-to="webui" data-edge-label="内嵌 WebView 加载" data-edge-key="1" data-edge-id="desktop-webui" data-composition-points="194,554;204,554;204,390;214,390" d="M 194 554 L 199 554 Q 204 554 204 549 L 204 395 Q 204 390 209 390 L 214 390" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="webui" data-edge-to="api" data-edge-label="HTTP /tasks /models /config /ping" data-edge-key="2" data-edge-id="webui-api" data-composition-points="364,390;424,390" d="M 364 390 L 424 390" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="api" data-edge-to="pipeline" data-edge-label="run_pipeline 调度" data-edge-key="3" data-edge-id="api-pipeline" data-composition-points="574,400;624,400" d="M 574 400 L 624 400" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="pipeline" data-edge-to="vision" data-edge-label="纠偏 · 抠图 · 美颜 · 排版" data-edge-key="4" data-edge-id="pipeline-vision" data-composition-points="709,360;709,160" d="M 709 360 L 709 160" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="pipeline" data-edge-to="inference" data-edge-label="人脸 / 关键点 / 分割推理" data-edge-key="5" data-edge-id="pipeline-inference" data-composition-points="794,393;818,393;818,409;846,409;846,390;870,390" d="M 794 393 L 810 393 Q 818 393 818 401 L 818 401 Q 818 409 826 409 L 838 409 Q 846 409 846 401 L 846 398 Q 846 390 854 390 L 870 390" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="api" data-edge-to="sqldb" data-edge-label="任务持久化" data-edge-key="6" data-edge-id="api-sqldb" data-composition-points="499,420;499,444;525,444;525,596;509,596;509,620" d="M 499 420 L 499 436 Q 499 444 507 444 L 517 444 Q 525 444 525 452 L 525 588 Q 525 596 517 596 L 517 596 Q 509 596 509 604 L 509 620" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="api" data-edge-to="sqldb" data-edge-label="任务持久化" data-edge-key="6" data-edge-id="api-sqldb" data-composition-points="499,420;499,444;525,444;525,500;509,500;509,524" d="M 499 420 L 499 436 Q 499 444 507 444 L 517 444 Q 525 444 525 452 L 525 492 Q 525 500 517 500 L 517 500 Q 509 500 509 508 L 509 524" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="inference" data-edge-to="models" data-edge-label="加载 ONNX 模型" data-edge-key="7" data-edge-id="inference-models" data-composition-points="1040,390;1064,390;1064,409;1080,409;1080,393;1104,393" d="M 1040 390 L 1056 390 Q 1064 390 1064 398 L 1064 401 Q 1064 409 1072 409 L 1072 409 Q 1080 409 1080 401 L 1080 401 Q 1080 393 1088 393 L 1104 393" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="models" data-edge-to="dl-src" data-edge-label="一键下载 · sha256 校验" data-edge-key="8" data-edge-id="models-dlsrc" data-composition-points="1194,360;1194,336;1210,336;1210,184;1189,184;1189,160" d="M 1194 360 L 1194 344 Q 1194 336 1202 336 L 1202 336 Q 1210 336 1210 328 L 1210 192 Q 1210 184 1202 184 L 1197 184 Q 1189 184 1189 176 L 1189 160" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="cli" data-edge-to="pipeline" data-edge-label="process 批处理直连" data-edge-key="9" data-edge-id="cli-pipeline" data-composition-points="184,130;600,130;600,386;624,386" d="M 184 130 L 592 130 Q 600 130 600 138 L 600 378 Q 600 386 608 386 L 624 386" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="user" data-edge-to="cli" data-edge-label="CLI 批量运维" data-edge-key="10" data-edge-id="user-cli" data-composition-points="99,360;99,336;130,336;130,184;114,184;114,160" d="M 99 360 L 99 344 Q 99 336 107 336 L 122 336 Q 130 336 130 328 L 130 192 Q 130 184 122 184 L 122 184 Q 114 184 114 176 L 114 160" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="pipeline" data-edge-to="infra" data-edge-label="基础设施预留" data-edge-key="10" data-edge-id="pipeline-infra" data-composition-points="709,426;709,524" d="M 709 426 L 709 524" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="user" data-edge-to="cli" data-edge-label="CLI 批量运维" data-edge-key="11" data-edge-id="user-cli" data-composition-points="99,360;99,336;130,336;130,184;114,184;114,160" d="M 99 360 L 99 344 Q 99 336 107 336 L 122 336 Q 130 336 130 328 L 130 192 Q 130 184 122 184 L 122 184 Q 114 184 114 176 L 114 160" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Components -->
         <g id="node-user" data-node-id="user" data-node-label="用户" tabindex="0" role="button" aria-label="聚焦用户，本地桌面 / 批量运维, 架构组件" aria-pressed="false" data-node-kind="external" data-node-sublabel="本地桌面 / 批量运维" data-node-context="架构组件">
@@ -5060,8 +5061,8 @@
         <text data-detail="context" x="99" y="404" class="t-muted" font-size="8.9" text-anchor="middle">本地桌面 / 批量运维</text>
         </g>
 
-        <g id="node-cli" data-node-id="cli" data-node-label="photos-cli" tabindex="0" role="button" aria-label="聚焦photos-cli，命令行 · clap, photos 本地应用" aria-pressed="false" data-node-kind="backend" data-node-sublabel="命令行 · clap" data-node-tag="process / serve / models" data-node-context="photos 本地应用">
-          <title>photos-cli · 命令行 · clap · photos 本地应用 · process / serve / models</title>
+        <g id="node-cli" data-node-id="cli" data-node-label="photos-cli" tabindex="0" role="button" aria-label="聚焦photos-cli，命令行 · clap, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="命令行 · clap" data-node-tag="process / serve / models" data-node-context="photos 工作区（本地离线）">
+          <title>photos-cli · 命令行 · clap · photos 工作区（本地离线） · process / serve / models</title>
           <rect x="44" y="100" width="140" height="60" rx="6" class="c-mask"/>
           <rect x="44" y="100" width="140" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(50 106) scale(0.6875)">
@@ -5072,20 +5073,20 @@
         <text data-detail="fine" x="114" y="152" class="t-backend" font-size="7" text-anchor="middle">process / serve / models</text>
         </g>
 
-        <g id="node-desktop" data-node-id="desktop" data-node-label="photos-desktop" tabindex="0" role="button" aria-label="聚焦photos-desktop，Tauri 2 桌面壳, photos 本地应用" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Tauri 2 桌面壳" data-node-tag="WebView 内嵌" data-node-context="photos 本地应用">
-          <title>photos-desktop · Tauri 2 桌面壳 · photos 本地应用 · WebView 内嵌</title>
-          <rect x="44" y="620" width="150" height="60" rx="6" class="c-mask"/>
-          <rect x="44" y="620" width="150" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(50 626) scale(0.6875)">
+        <g id="node-desktop" data-node-id="desktop" data-node-label="photos-desktop" tabindex="0" role="button" aria-label="聚焦photos-desktop，Tauri 2 桌面壳, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Tauri 2 桌面壳" data-node-tag="WebView 内嵌" data-node-context="photos 工作区（本地离线）">
+          <title>photos-desktop · Tauri 2 桌面壳 · photos 工作区（本地离线） · WebView 内嵌</title>
+          <rect x="44" y="524" width="150" height="60" rx="6" class="c-mask"/>
+          <rect x="44" y="524" width="150" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(50 530) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="119" y="648" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">photos-desktop</text>
-        <text data-detail="context" x="119" y="664" class="t-muted" font-size="9" text-anchor="middle">Tauri 2 桌面壳</text>
-        <text data-detail="fine" x="119" y="672" class="t-backend" font-size="7" text-anchor="middle">WebView 内嵌</text>
+          <text data-node-label="" data-detail-anchor="" x="119" y="552" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">photos-desktop</text>
+        <text data-detail="context" x="119" y="568" class="t-muted" font-size="9" text-anchor="middle">Tauri 2 桌面壳</text>
+        <text data-detail="fine" x="119" y="576" class="t-backend" font-size="7" text-anchor="middle">WebView 内嵌</text>
         </g>
 
-        <g id="node-webui" data-node-id="webui" data-node-label="React 19 WebUI" tabindex="0" role="button" aria-label="聚焦React 19 WebUI，Tailwind + Zustand, photos 本地应用" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Tailwind + Zustand" data-node-context="photos 本地应用">
-          <title>React 19 WebUI · Tailwind + Zustand · photos 本地应用</title>
+        <g id="node-webui" data-node-id="webui" data-node-label="React 19 WebUI" tabindex="0" role="button" aria-label="聚焦React 19 WebUI，Tailwind + Zustand, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Tailwind + Zustand" data-node-context="photos 工作区（本地离线）">
+          <title>React 19 WebUI · Tailwind + Zustand · photos 工作区（本地离线）</title>
           <rect x="214" y="360" width="150" height="60" rx="6" class="c-mask"/>
           <rect x="214" y="360" width="150" height="60" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(220 366) scale(0.6875)">
@@ -5098,8 +5099,8 @@
         <text data-detail="context" x="289" y="404" class="t-muted" font-size="9" text-anchor="middle">Tailwind + Zustand</text>
         </g>
 
-        <g id="node-api" data-node-id="api" data-node-label="photos-api" tabindex="0" role="button" aria-label="聚焦photos-api，Axum 本地服务 · 7 端点, photos 本地应用" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Axum 本地服务 · 7 端点" data-node-tag="127.0.0.1 随机端口" data-node-context="photos 本地应用">
-          <title>photos-api · Axum 本地服务 · 7 端点 · photos 本地应用 · 127.0.0.1 随机端口</title>
+        <g id="node-api" data-node-id="api" data-node-label="photos-api" tabindex="0" role="button" aria-label="聚焦photos-api，Axum 本地服务 · 7 端点, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Axum 本地服务 · 7 端点" data-node-tag="127.0.0.1 随机端口" data-node-context="photos 工作区（本地离线）">
+          <title>photos-api · Axum 本地服务 · 7 端点 · photos 工作区（本地离线） · 127.0.0.1 随机端口</title>
           <rect x="424" y="360" width="150" height="60" rx="6" class="c-mask"/>
           <rect x="424" y="360" width="150" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(430 366) scale(0.6875)">
@@ -5110,8 +5111,8 @@
         <text data-detail="fine" x="499" y="412" class="t-backend" font-size="7" text-anchor="middle">127.0.0.1 随机端口</text>
         </g>
 
-        <g id="node-pipeline" data-node-id="pipeline" data-node-label="photos-core" tabindex="0" role="button" aria-label="聚焦photos-core，流水线编排 · DDD 四层, photos 本地应用 › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="流水线编排 · DDD 四层" data-node-tag="九步链路" data-node-context="photos 本地应用 › photos-core 核心域（DDD 四层）">
-          <title>photos-core · 流水线编排 · DDD 四层 · photos 本地应用 › photos-core 核心域（DDD 四层） · 九步链路</title>
+        <g id="node-pipeline" data-node-id="pipeline" data-node-label="photos-core" tabindex="0" role="button" aria-label="聚焦photos-core，流水线编排 · DDD 四层, photos 工作区（本地离线） › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="流水线编排 · DDD 四层" data-node-tag="九步链路" data-node-context="photos 工作区（本地离线） › photos-core 核心域（DDD 四层）">
+          <title>photos-core · 流水线编排 · DDD 四层 · photos 工作区（本地离线） › photos-core 核心域（DDD 四层） · 九步链路</title>
           <rect x="624" y="360" width="170" height="66" rx="6" class="c-mask"/>
           <rect x="624" y="360" width="170" height="66" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(630 366) scale(0.6875)">
@@ -5122,8 +5123,8 @@
         <text data-detail="fine" x="709" y="418" class="t-backend" font-size="7" text-anchor="middle">九步链路</text>
         </g>
 
-        <g id="node-vision" data-node-id="vision" data-node-label="vision 视觉算法栈" tabindex="0" role="button" aria-label="聚焦vision 视觉算法栈，纯 Rust 自研算子, photos 本地应用 › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="纯 Rust 自研算子" data-node-tag="纠偏/抠图/美颜/排版" data-node-context="photos 本地应用 › photos-core 核心域（DDD 四层）">
-          <title>vision 视觉算法栈 · 纯 Rust 自研算子 · photos 本地应用 › photos-core 核心域（DDD 四层） · 纠偏/抠图/美颜/排版</title>
+        <g id="node-vision" data-node-id="vision" data-node-label="vision 视觉算法栈" tabindex="0" role="button" aria-label="聚焦vision 视觉算法栈，纯 Rust 自研算子, photos 工作区（本地离线） › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="纯 Rust 自研算子" data-node-tag="纠偏/抠图/美颜/排版" data-node-context="photos 工作区（本地离线） › photos-core 核心域（DDD 四层）">
+          <title>vision 视觉算法栈 · 纯 Rust 自研算子 · photos 工作区（本地离线） › photos-core 核心域（DDD 四层） · 纠偏/抠图/美颜/排版</title>
           <rect x="624" y="100" width="170" height="60" rx="6" class="c-mask"/>
           <rect x="624" y="100" width="170" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(630 106) scale(0.6875)">
@@ -5134,8 +5135,8 @@
         <text data-detail="fine" x="709" y="152" class="t-backend" font-size="7" text-anchor="middle">纠偏/抠图/美颜/排版</text>
         </g>
 
-        <g id="node-inference" data-node-id="inference" data-node-label="ONNX Runtime 推理" tabindex="0" role="button" aria-label="聚焦ONNX Runtime 推理，ort · CPU / CUDA 自适应, photos 本地应用 › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="ort · CPU / CUDA 自适应" data-node-tag="人脸/关键点/分割" data-node-context="photos 本地应用 › photos-core 核心域（DDD 四层）">
-          <title>ONNX Runtime 推理 · ort · CPU / CUDA 自适应 · photos 本地应用 › photos-core 核心域（DDD 四层） · 人脸/关键点/分割</title>
+        <g id="node-inference" data-node-id="inference" data-node-label="ONNX Runtime 推理" tabindex="0" role="button" aria-label="聚焦ONNX Runtime 推理，ort · CPU / CUDA 自适应, photos 工作区（本地离线） › photos-core 核心域（DDD 四层）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="ort · CPU / CUDA 自适应" data-node-tag="人脸/关键点/分割" data-node-context="photos 工作区（本地离线） › photos-core 核心域（DDD 四层）">
+          <title>ONNX Runtime 推理 · ort · CPU / CUDA 自适应 · photos 工作区（本地离线） › photos-core 核心域（DDD 四层） · 人脸/关键点/分割</title>
           <rect x="870" y="360" width="170" height="60" rx="6" class="c-mask"/>
           <rect x="870" y="360" width="170" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(876 366) scale(0.6875)">
@@ -5146,8 +5147,8 @@
         <text data-detail="fine" x="955" y="412" class="t-backend" font-size="7" text-anchor="middle">人脸/关键点/分割</text>
         </g>
 
-        <g id="node-models" data-node-id="models" data-node-label="模型仓库" tabindex="0" role="button" aria-label="聚焦模型仓库，三套件 · 9 模型, photos 本地应用" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="三套件 · 9 模型" data-node-tag="models/" data-node-context="photos 本地应用">
-          <title>模型仓库 · 三套件 · 9 模型 · photos 本地应用 · models/</title>
+        <g id="node-models" data-node-id="models" data-node-label="模型仓库" tabindex="0" role="button" aria-label="聚焦模型仓库，三套件 · 9 模型, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="三套件 · 9 模型" data-node-tag="models/" data-node-context="photos 工作区（本地离线）">
+          <title>模型仓库 · 三套件 · 9 模型 · photos 工作区（本地离线） · models/</title>
           <rect x="1104" y="360" width="180" height="66" rx="6" class="c-mask"/>
           <rect x="1104" y="360" width="180" height="66" rx="6" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(1110 366) scale(0.6875)">
@@ -5170,27 +5171,39 @@
         <text data-detail="context" x="1189" y="144" class="t-muted" font-size="9" text-anchor="middle">GitHub / hf-mirror</text>
         </g>
 
-        <g id="node-sqldb" data-node-id="sqldb" data-node-label="数据存储" tabindex="0" role="button" aria-label="聚焦数据存储，sqlite WAL + data/out, photos 本地应用" aria-pressed="false" data-node-kind="database" data-node-sublabel="sqlite WAL + data/out" data-node-tag="任务状态机" data-node-context="photos 本地应用">
-          <title>数据存储 · sqlite WAL + data/out · photos 本地应用 · 任务状态机</title>
-          <rect x="424" y="620" width="170" height="60" rx="6" class="c-mask"/>
-          <rect x="424" y="620" width="170" height="60" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(430 626) scale(0.6875)">
+        <g id="node-sqldb" data-node-id="sqldb" data-node-label="数据存储" tabindex="0" role="button" aria-label="聚焦数据存储，sqlite WAL + data/out, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="database" data-node-sublabel="sqlite WAL + data/out" data-node-tag="任务状态机" data-node-context="photos 工作区（本地离线）">
+          <title>数据存储 · sqlite WAL + data/out · photos 工作区（本地离线） · 任务状态机</title>
+          <rect x="424" y="524" width="170" height="60" rx="6" class="c-mask"/>
+          <rect x="424" y="524" width="170" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(430 530) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="509" y="648" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">数据存储</text>
-        <text data-detail="context" x="509" y="664" class="t-muted" font-size="9" text-anchor="middle">sqlite WAL + data/out</text>
-        <text data-detail="fine" x="509" y="672" class="t-database" font-size="7" text-anchor="middle">任务状态机</text>
+          <text data-node-label="" data-detail-anchor="" x="509" y="552" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">数据存储</text>
+        <text data-detail="context" x="509" y="568" class="t-muted" font-size="9" text-anchor="middle">sqlite WAL + data/out</text>
+        <text data-detail="fine" x="509" y="576" class="t-database" font-size="7" text-anchor="middle">任务状态机</text>
+        </g>
+
+        <g id="node-infra" data-node-id="infra" data-node-label="photos-infra" tabindex="0" role="button" aria-label="聚焦photos-infra，基础设施层占位, photos 工作区（本地离线）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="基础设施层占位" data-node-tag="待拆分迁入" data-node-context="photos 工作区（本地离线）">
+          <title>photos-infra · 基础设施层占位 · photos 工作区（本地离线） · 待拆分迁入</title>
+          <rect x="624" y="524" width="170" height="60" rx="6" class="c-mask"/>
+          <rect x="624" y="524" width="170" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(630 530) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="709" y="552" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">photos-infra</text>
+        <text data-detail="context" x="709" y="568" class="t-muted" font-size="9" text-anchor="middle">基础设施层占位</text>
+        <text data-detail="fine" x="709" y="576" class="t-backend" font-size="7" text-anchor="middle">待拆分迁入</text>
         </g>
 
         <!-- Connection labels -->
         <g data-detail="context" data-edge-from="user" data-edge-to="desktop" data-edge-label="桌面交互" data-edge-key="0" data-edge-id="user-desktop">
-          <rect x="84.8" y="500" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="109" y="510" class="t-backend" font-size="8" text-anchor="middle">桌面交互</text>
+          <rect x="84.8" y="452" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="109" y="462" class="t-backend" font-size="8" text-anchor="middle">桌面交互</text>
         </g>
         <g data-detail="context" data-edge-from="desktop" data-edge-to="webui" data-edge-label="内嵌 WebView 加载" data-edge-key="1" data-edge-id="desktop-webui">
-          <rect x="158.2" y="500" width="91.6" height="14" rx="3" class="c-mask"/>
-          <text x="204" y="510" class="t-muted" font-size="8" text-anchor="middle">内嵌 WebView 加载</text>
+          <rect x="158.2" y="452" width="91.6" height="14" rx="3" class="c-mask"/>
+          <text x="204" y="462" class="t-muted" font-size="8" text-anchor="middle">内嵌 WebView 加载</text>
         </g>
         <g data-detail="context" data-edge-from="webui" data-edge-to="api" data-edge-label="HTTP /tasks /models /config /ping" data-edge-key="2" data-edge-id="webui-api">
           <rect x="265.8" y="440" width="168.4" height="14" rx="3" class="c-mask"/>
@@ -5224,15 +5237,19 @@
           <rect x="551.8" y="238" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
           <text x="600" y="248" class="t-messagebus" font-size="8" text-anchor="middle">process 批处理直连</text>
         </g>
-        <g data-detail="context" data-edge-from="user" data-edge-to="cli" data-edge-label="CLI 批量运维" data-edge-key="10" data-edge-id="user-cli">
+        <g data-detail="context" data-edge-from="pipeline" data-edge-to="infra" data-edge-label="基础设施预留" data-edge-key="10" data-edge-id="pipeline-infra">
+          <rect x="675.2" y="465" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="709" y="475" class="t-messagebus" font-size="8" text-anchor="middle">基础设施预留</text>
+        </g>
+        <g data-detail="context" data-edge-from="user" data-edge-to="cli" data-edge-label="CLI 批量运维" data-edge-key="11" data-edge-id="user-cli">
           <rect x="80.7" y="316" width="67.6" height="14" rx="3" class="c-mask"/>
           <text x="114.5" y="326" class="t-messagebus" font-size="8" text-anchor="middle">CLI 批量运维</text>
         </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="photos 本地应用">
-          <rect data-graph-role="structural-frame-label-mask" x="18" y="80" width="91" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="22" y="93" class="t-cloud" font-size="9" font-weight="600">photos 本地应用</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="photos 工作区（本地离线）">
+          <rect data-graph-role="structural-frame-label-mask" x="18" y="80" width="145" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="22" y="93" class="t-cloud" font-size="9" font-weight="600">photos 工作区（本地离线）</text>
         </g>
 
         <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="region" data-composition-frame-label="photos-core 核心域（DDD 四层）">
@@ -5242,26 +5259,26 @@
 
         <!-- Legend -->
         <g data-legend="" data-legend-bridge="">
-          <text x="40" y="720" class="t-primary" font-size="12" font-weight="650">图例</text>
-          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="前端" data-legend-x="40" data-legend-baseline="740" data-legend-width="63">
-            <rect x="40" y="731" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
-            <text x="62" y="740" class="t-muted" font-size="10" font-weight="500">前端</text>
+          <text x="40" y="624" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="前端" data-legend-x="40" data-legend-baseline="644" data-legend-width="63">
+            <rect x="40" y="635" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="644" class="t-muted" font-size="10" font-weight="500">前端</text>
           </g>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="后端" data-legend-x="125" data-legend-baseline="740" data-legend-width="63">
-            <rect x="125" y="731" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
-            <text x="147" y="740" class="t-muted" font-size="10" font-weight="500">后端</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="后端" data-legend-x="125" data-legend-baseline="644" data-legend-width="63">
+            <rect x="125" y="635" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="147" y="644" class="t-muted" font-size="10" font-weight="500">后端</text>
           </g>
-          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="数据库" data-legend-x="210" data-legend-baseline="740" data-legend-width="73">
-            <rect x="210" y="731" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
-            <text x="232" y="740" class="t-muted" font-size="10" font-weight="500">数据库</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="数据库" data-legend-x="210" data-legend-baseline="644" data-legend-width="73">
+            <rect x="210" y="635" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="232" y="644" class="t-muted" font-size="10" font-weight="500">数据库</text>
           </g>
-          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="云服务" data-legend-x="305" data-legend-baseline="740" data-legend-width="73">
-            <rect x="305" y="731" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
-            <text x="327" y="740" class="t-muted" font-size="10" font-weight="500">云服务</text>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="云服务" data-legend-x="305" data-legend-baseline="644" data-legend-width="73">
+            <rect x="305" y="635" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="327" y="644" class="t-muted" font-size="10" font-weight="500">云服务</text>
           </g>
-          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="外部系统" data-legend-x="400" data-legend-baseline="740" data-legend-width="83">
-            <rect x="400" y="731" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
-            <text x="422" y="740" class="t-muted" font-size="10" font-weight="500">外部系统</text>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="外部系统" data-legend-x="400" data-legend-baseline="644" data-legend-width="83">
+            <rect x="400" y="635" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="422" y="644" class="t-muted" font-size="10" font-weight="500">外部系统</text>
           </g>
         </g>
       </svg>
@@ -5453,11 +5470,12 @@
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>入口与体验</h3>
+          <h3>运行入口与依赖</h3>
         </div>
         <ul>
-          <li>&bull; Tauri 2 桌面壳内嵌 WebView，同源托管 WebUI 与 API</li>
-          <li>&bull; CLI 无 GUI 依赖，适配服务器、自动化脚本、批量运维</li>
+          <li>&bull; cli / desktop / api → photos-core 单向依赖；photos-infra 为预留层</li>
+          <li>&bull; Tauri 2 桌面壳内嵌 WebView，同源托管 WebUI 与 API（本机回环）</li>
+          <li>&bull; CLI：process 出图、models 下载、serve 起服务；API：Axum 7 端点</li>
         </ul>
       </div>
 
@@ -5467,21 +5485,21 @@
           <h3>核心处理链路</h3>
         </div>
         <ul>
-          <li>&bull; photos-core 按 DDD 四层组织，九步流水线编排</li>
-          <li>&bull; 头部姿态 + 双肩水平加权融合的智能纠偏（±22° 阈值保护）</li>
-          <li>&bull; BiRefNet 发丝级抠图 + 纯 Rust 视觉算子（纠偏/美颜/排版）</li>
+          <li>&bull; 九步：预缩放 → 检测/抠图推理 → 角度融合 → 纠偏 → 换装 → 美颜 → 换底 → 排版</li>
+          <li>&bull; 头部 0.6 + 双肩 0.4 加权融合，±22° 阈值保护，超限降级出图并告警</li>
+          <li>&bull; 纯 Rust 视觉算子栈（ADR-0001），禁用 OpenCV 等 C/C++ 绑定</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot violet"></div>
-          <h3>模型与数据</h3>
+          <h3>模型三套件</h3>
         </div>
         <ul>
-          <li>&bull; speed / balanced / quality 三套预设，模型自动匹配</li>
-          <li>&bull; 模型一键下载 + sha256 校验，缺失自动兜底</li>
-          <li>&bull; sqlite WAL 持久化任务，产物输出 data/out</li>
+          <li>&bull; speed：MTCNN + MoveNet-Lightning + RMBG-1.4</li>
+          <li>&bull; balanced（默认）：RetinaFace + MoveNet-Lightning + BiRefNet-Lite</li>
+          <li>&bull; quality：RetinaFace + MoveNet-Thunder + BiRefNet-Full</li>
         </ul>
       </div>
     </div>
