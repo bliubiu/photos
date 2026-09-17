@@ -2,6 +2,15 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.8]
+
+### 🐛 Bug Fixes  问题修复
+- 【模型路径】`resolve_model_path` 真正使用 `general.models_dir`：相对路径剥离注册表历史 `models/` 前缀后与 `models_dir` 拼接，避免 `models/models/…`，自定义 `models_dir` 生效
+- 【模型路径】删除误放在 `crates/photos-core/models/` 的 balanced 三件套副本（与根目录 `models/` SHA256 相同，约 327MB）；模型仅保留项目根 `models/`（或 `models_dir` 配置目录）
+
+### 📚 Docs 文档更新
+- `docs/04-模型清单.md`：放置路径改为以 `models_dir` 为准，说明剥离前缀规则，禁止 crate 内重复 models 目录
+
 ## [2026.09.17.7] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -344,11 +344,10 @@ mod tests {
             resolve_model_path(&cfg, Path::new("retinaface_r50.onnx")),
             PathBuf::from("models/retinaface_r50.onnx")
         );
-        // 绝对路径原样
-        assert_eq!(
-            resolve_model_path(&cfg, Path::new("/abs/m.onnx")),
-            PathBuf::from("/abs/m.onnx")
-        );
+        // 绝对路径原样（用平台真实绝对路径，避免 Windows 下 /abs 不是绝对路径）
+        let abs = std::env::temp_dir().join("photos_abs_model.onnx");
+        assert!(abs.is_absolute());
+        assert_eq!(resolve_model_path(&cfg, &abs), abs);
 
         // 自定义 models_dir：剥离历史 models/ 前缀后接到 mymodels
         cfg.general.models_dir = "mymodels".into();
