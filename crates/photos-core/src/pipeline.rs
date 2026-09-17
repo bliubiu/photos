@@ -8,11 +8,12 @@ use std::path::PathBuf;
 
 use image::{GrayImage, RgbImage};
 
-use crate::config::Config;
+use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
 use crate::preprocess::{LetterBox, build_input, probability_map};
 use crate::vision::affine::rotate_image_same;
+use crate::vision::beauty::apply_beauty;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
 use crate::vision::face::{decode_retinaface, retinaface_prior_count};
@@ -54,8 +55,21 @@ pub struct ProcessRequest {
     pub effect: bool,
     /// 排版相纸 id（如 6inch | a4，可选；以首个底色证件照铺版）
     pub layout: Option<String>,
-    /// 美颜开关（M2 参数面预留，M4 实现算子）
-    pub beauty: bool,
+    /// 美颜参数（None 不美颜；Some 时未指定的强度取全局配置 `[beauty]` 默认值）
+    pub beauty: Option<BeautyParams>,
+}
+
+/// 美颜请求参数（M4 实现算子）
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeautyParams {
+    /// 是否启用美颜
+    pub enabled: bool,
+    /// 磨皮强度（可选，默认取全局配置）
+    pub skin_smooth: Option<f64>,
+    /// 提亮强度（可选，默认取全局配置）
+    pub brighten: Option<f64>,
+    /// 美白强度（可选，默认取全局配置）
+    pub whiten: Option<f64>,
 }
 
 /// 单底色产物（证件照或效果图）
@@ -160,6 +174,20 @@ pub fn run_pipeline(
     // 6. 同步几何纠偏（同一仿射矩阵变换原图与 mask）
     let (rot_img, rot_mask) = rotate_image_same(&img, &mask, decision.correction())?;
 
+    // 6.5 美颜（可选）：换底色前对旋转后原图做磨皮/提亮/美白（美颜不改变 mask 与裁剪框）
+    let beautified = match &req.beauty {
+        Some(p) if p.enabled => apply_beauty(
+            &rot_img,
+            &BeautyConfig {
+                enabled: true,
+                skin_smooth: p.skin_smooth.unwrap_or(cfg.beauty.skin_smooth),
+                brighten: p.brighten.unwrap_or(cfg.beauty.brighten),
+                whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
+            },
+        ),
+        _ => rot_img.clone(),
+    };
+
     // 7. 换底色（mask 羽化后逐像素 alpha 混合，按底色重复；廉价操作只做一次检测/抠图/纠偏）
     // 7.1 裁剪框与底色无关，先算一次
     let crop = compute_crop(
@@ -175,7 +203,7 @@ pub fn run_pipeline(
     let mut effects = Vec::new();
     for (bg_id, bg) in &bgs {
         // 效果图：换底后保持旋转全图尺寸
-        let composed = composite_feathered(&rot_img, &rot_mask, bg.rgb, MASK_FEATHER_SIGMA);
+        let composed = composite_feathered(&beautified, &rot_mask, bg.rgb, MASK_FEATHER_SIGMA);
         if req.effect {
             effects.push(BgOutput {
                 bg: bg_id.clone(),
@@ -326,7 +354,7 @@ mod tests {
             bgs: vec!["white".into()],
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -352,7 +380,7 @@ mod tests {
             bgs: vec!["white".into()],
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
             rotate: Some(10.0),
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -381,7 +409,7 @@ mod tests {
             bgs: vec!["white".into()],
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
             rotate: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
@@ -420,7 +448,7 @@ mod tests {
             bgs: vec!["white".into()],
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -450,7 +478,7 @@ mod tests {
             rotate: None,
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         assert_eq!(result.photos.len(), 3);
@@ -485,7 +513,7 @@ mod tests {
             rotate: None,
             effect: true,
             layout: None,
-            beauty: false,
+            beauty: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图 = 旋转后全图尺寸（纠偏角 0 → 原图 100x140）
@@ -512,7 +540,7 @@ mod tests {
             rotate: None,
             effect: false,
             layout: Some("6inch".into()),
-            beauty: false,
+            beauty: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         let canvas = result.layout.expect("应有排版相纸");
@@ -536,7 +564,7 @@ mod tests {
             rotate: None,
             effect: false,
             layout: None,
-            beauty: false,
+            beauty: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
         assert!(err.to_string().contains("底色"), "实际：{err}");
@@ -549,9 +577,62 @@ mod tests {
             rotate: None,
             effect: false,
             layout: Some("b5".into()),
-            beauty: false,
+            beauty: None,
         };
         let err2 = run_pipeline(&cfg, &mut engine, &req2).unwrap_err();
         assert!(err2.to_string().contains("未知排版"), "实际：{err2}");
+    }
+
+    #[test]
+    fn 美颜开启时证件照与效果图均提亮() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+
+        // 基准：不美颜
+        let mut engine = demo_balanced_engine(100, 140);
+        let base = ProcessRequest {
+            input: input.clone(),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+        };
+        let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
+
+        // 美颜：强磨皮 + 提亮 0.3（全局默认 0.2 被覆盖）
+        let mut engine2 = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: Some(BeautyParams {
+                enabled: true,
+                skin_smooth: Some(1.0),
+                brighten: Some(0.3),
+                whiten: None, // 未指定 → 取全局配置 0.1
+            }),
+        };
+        let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
+
+        // 人像区（椭圆内非纯白背景）像素提亮后更亮：R 10 → 10+76.5 ≈ 86
+        let (bx, by) = (150u32, 200u32);
+        let b = base.photos[0].image.get_pixel(bx, by);
+        let a = result.photos[0].image.get_pixel(bx, by);
+        assert!(a[0] > b[0], "证件照人像区美颜后 {a:?} 应亮于基准 {b:?}");
+        assert!(a[0] < 255, "人像区不应被提白成背景色：{a:?}");
+        // 效果图同样美颜（磨皮/提亮作用于全图换底色前）；效果图为全图尺寸 100x140
+        let eb = base.effects[0].image.get_pixel(50, 70);
+        let ea = result.effects[0].image.get_pixel(50, 70);
+        assert!(ea[0] > eb[0], "效果图人像区美颜后 {ea:?} 应亮于基准 {eb:?}");
     }
 }

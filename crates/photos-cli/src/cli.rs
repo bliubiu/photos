@@ -87,9 +87,18 @@ pub struct ProcessArgs {
     /// 排版相纸 id（6inch | a4，以首个底色证件照铺版）
     #[arg(long, value_name = "相纸")]
     pub layout: Option<String>,
-    /// 美颜开关（参数面预留，M4 实现算子）
+    /// 美颜开关（磨皮/提亮/美白，M4 实现）
     #[arg(long)]
     pub beauty: bool,
+    /// 磨皮强度 0..1（默认取配置 [beauty].skin_smooth）
+    #[arg(long, value_name = "强度")]
+    pub beauty_smooth: Option<f64>,
+    /// 提亮强度 0..1（默认取配置 [beauty].brighten）
+    #[arg(long, value_name = "强度")]
+    pub beauty_brighten: Option<f64>,
+    /// 美白强度 0..1（默认取配置 [beauty].whiten）
+    #[arg(long, value_name = "强度")]
+    pub beauty_whiten: Option<f64>,
     /// 演示模式：不依赖模型，用内置 mock 回放跑通全链路出图
     #[arg(long)]
     pub demo: bool,

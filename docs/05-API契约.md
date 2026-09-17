@@ -95,7 +95,7 @@
 | `mode` | string | `speed`\|`balanced`\|`quality`；缺省用 `general.default_mode` |
 | `size` | string | 必须存在于 `[sizes.*]` |
 | `backgrounds` | string[] | 1..N，元素存在于 `[backgrounds.*]` |
-| `beauty` | object | 可选；`enabled` 默认 false |
+| `beauty` | object | 可选；`enabled` 默认 false；`skin_smooth`/`brighten`/`whiten` 可选，取值 `[0,1]`，缺省用全局配置 `[beauty]` 默认值（0.3/0.2/0.1）；越界返回 `400` |
 | `rotate` | number\|null | 手动纠偏角（度），`[-45,45]`；null=自动 |
 | `layout` | string\|null | `6inch`\|`a4`\|null |
 | `effect_image` | bool | 是否输出通用效果图 |
@@ -121,6 +121,7 @@
   "status": "succeeded",
   "message": null,
   "warnings": ["角度超限，本次未自动纠偏（测量角 25.3°）"],
+  "beauty": "{ \"enabled\": true, \"skin_smooth\": 0.8, \"brighten\": 0.2, \"whiten\": null }",
   "elapsed_ms": 2345,
   "created_at": "2026-09-16 12:00:00.000",
   "artifacts": [

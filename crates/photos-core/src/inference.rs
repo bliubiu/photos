@@ -2,14 +2,13 @@
 //! `OrtEngine`（feature = "ort"）为 ONNX Runtime 真后端（模型定版后就位）。
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 #[cfg(feature = "ort")]
 use std::sync::RwLock;
 
 #[cfg(feature = "ort")]
 use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{Config, ExecutionProvider};
 use crate::error::{CoreError, CoreResult};
 
 /// 浮点张量（f32，按行主序连续存储）
@@ -52,8 +51,14 @@ impl TensorData {
 
 /// 推理引擎抽象
 pub trait InferenceEngine: Send + Sync {
-    /// 装载模型（惰性；模型缺失/校验失败返回中文错误）
-    fn load(&mut self, cfg: &Config, model_id: &str) -> CoreResult<()>;
+    /// 装载模型（惰性；模型缺失/校验失败返回中文错误）。
+    /// `provider` 指定执行提供方（cpu | cuda），cuda 未编译时降级 cpu 并在日志告警。
+    fn load(
+        &mut self,
+        cfg: &Config,
+        model_id: &str,
+        provider: ExecutionProvider,
+    ) -> CoreResult<()>;
     /// 执行推理，返回输出张量列表
     fn run(&self, model_id: &str, input: &TensorData) -> CoreResult<Vec<TensorData>>;
 }
@@ -94,7 +99,12 @@ impl FakeEngine {
 }
 
 impl InferenceEngine for FakeEngine {
-    fn load(&mut self, cfg: &Config, model_id: &str) -> CoreResult<()> {
+    fn load(
+        &mut self,
+        cfg: &Config,
+        model_id: &str,
+        _provider: ExecutionProvider,
+    ) -> CoreResult<()> {
         if self.stubbed.contains(model_id) {
             return Ok(());
         }
@@ -130,13 +140,18 @@ impl OrtEngine {
 
     fn model_path(cfg: &Config, model_id: &str) -> CoreResult<PathBuf> {
         let spec = cfg.model_spec(model_id)?;
-        Ok(crate::model::resolve_model_path(cfg, Path::new(&spec.path)))
+        Ok(crate::model::resolve_model_path(cfg, std::path::Path::new(&spec.path)))
     }
 }
 
 #[cfg(feature = "ort")]
 impl InferenceEngine for OrtEngine {
-    fn load(&mut self, cfg: &Config, model_id: &str) -> CoreResult<()> {
+    fn load(
+        &mut self,
+        cfg: &Config,
+        model_id: &str,
+        provider: ExecutionProvider,
+    ) -> CoreResult<()> {
         if self
             .sessions
             .read()
@@ -148,8 +163,26 @@ impl InferenceEngine for OrtEngine {
         let path = Self::model_path(cfg, model_id)?;
         // 缺模型自动下载（不依赖手动执行命令）；无下载地址或下载失败时给出中文指引
         crate::model::ensure_model_downloaded(cfg, model_id)?;
-        let session = ort::session::Session::builder()
-            .map_err(|e| CoreError::Inference(format!("创建推理会话失败：{e}")))?
+        let mut builder = ort::session::Session::builder()
+            .map_err(|e| CoreError::Inference(format!("创建推理会话失败：{e}")))?;
+        // CUDA provider 开关：配置请求 cuda 时优先 CUDA EP；未编译 ort-cuda 降级 CPU 并告警
+        if provider == ExecutionProvider::Cuda {
+            #[cfg(feature = "ort-cuda")]
+            {
+                builder = builder
+                    .with_execution_providers([
+                        ort::execution_providers::CUDAExecutionProvider::default(),
+                    ])
+                    .map_err(|e| CoreError::Inference(format!("启用 CUDA 推理失败：{e}")))?;
+            }
+            #[cfg(not(feature = "ort-cuda"))]
+            {
+                tracing::warn!(
+                    "模型“{model_id}”配置了 CUDA，但当前构建未启用 ort-cuda，已自动降级 CPU"
+                );
+            }
+        }
+        let session = builder
             .commit_from_file(&path)
             .map_err(|e| CoreError::Inference(format!("装载模型 {} 失败：{e}", path.display())))?;
         self.sessions
@@ -233,15 +266,16 @@ pub fn default_engine() -> Box<dyn InferenceEngine> {
     }
 }
 
-/// 便捷：校验某模式所需模型全部就绪（缺模型时报中文指引）
+/// 便捷：校验某模式所需模型全部就绪（缺模型时报中文指引），并按模式配置的执行提供方装载
 pub fn ensure_models_ready(
     cfg: &Config,
     engine: &mut dyn InferenceEngine,
     mode_id: &str,
 ) -> CoreResult<()> {
     let suite = cfg.mode(mode_id)?;
+    let provider = suite.execution_provider;
     for id in [&suite.face, &suite.keypoint, &suite.matting] {
-        engine.load(cfg, id)?;
+        engine.load(cfg, id, provider)?;
     }
     Ok(())
 }
@@ -285,10 +319,10 @@ mod tests {
         cfg.models.get_mut("mtcnn").unwrap().path =
             dir.path().join("mtcnn.onnx").display().to_string();
         // 文件不存在 → 缺模型错误
-        let err = engine.load(&cfg, "mtcnn").unwrap_err();
+        let err = engine.load(&cfg, "mtcnn", ExecutionProvider::Cpu).unwrap_err();
         assert!(err.to_string().contains("缺失"));
         // 放置文件 → 通过
         std::fs::write(dir.path().join("mtcnn.onnx"), b"onnx").unwrap();
-        engine.load(&cfg, "mtcnn").unwrap();
+        engine.load(&cfg, "mtcnn", ExecutionProvider::Cpu).unwrap();
     }
 }

@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn 三张表存在且WAL启用() {
+    fn 三张表存在且wal启用() {
         let (_d, store) = open_temp();
         let mut stmt = store
             .conn

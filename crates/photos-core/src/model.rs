@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn 未配置下载地址报错() {
-        let dir = tempfile::tempdir().unwrap();
+        let _dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.models.get_mut("retinaface").unwrap().download = None;
         let err = download_model(&cfg, "retinaface").unwrap_err();

@@ -46,3 +46,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tower-http = { version = "0.6", features = ["fs"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 mime = "0.3"
+
+# 体积与内存优化：发布构建启用 LTO + 精简符号 + panic=abort，从源头减小二进制体积
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3

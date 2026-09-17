@@ -75,11 +75,37 @@ pub struct TaskParams {
     pub effect_image: Option<bool>,
 }
 
-/// 美颜参数（M4 实现算子；本阶段仅透传 enabled）
+/// 美颜参数（enabled 开关；强度缺省取全局配置 `[beauty]` 默认值）
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BeautyParams {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub skin_smooth: Option<f64>,
+    #[serde(default)]
+    pub brighten: Option<f64>,
+    #[serde(default)]
+    pub whiten: Option<f64>,
+}
+
+/// 校验美颜强度取值（0..=1，越界返回中文错误）
+fn validate_beauty(beauty: &Option<BeautyParams>) -> Result<(), ApiError> {
+    if let Some(b) = beauty {
+        for (name, v) in [
+            ("磨皮强度", b.skin_smooth),
+            ("提亮强度", b.brighten),
+            ("美白强度", b.whiten),
+        ] {
+            if let Some(x) = v {
+                if !(0.0..=1.0).contains(&x) {
+                    return Err(ApiError::InvalidParams(format!(
+                        "{name}需在 0..=1 内，收到 {x}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------- 工具 ----------
@@ -255,7 +281,7 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         }
     }
     let effect = params.effect_image.unwrap_or(false);
-    let beauty_enabled = params.beauty.as_ref().map(|b| b.enabled).unwrap_or(false);
+    validate_beauty(&params.beauty)?;
 
     // 4. 模型预检（就绪才受理；缺失返回 503，不自动下载以免阻塞）
     if state.model_precheck {
@@ -277,7 +303,16 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     let input_path = state.upload_dir.join(upload_name);
     std::fs::write(&input_path, &file_bytes).map_err(|e| ApiError::Internal(format!("保存上传文件失败：{e}")))?;
 
-    let beauty_json = if beauty_enabled { "{\"enabled\":true}" } else { "{}" }.to_string();
+    let beauty_json = match &params.beauty {
+        Some(b) if b.enabled => serde_json::json!({
+            "enabled": true,
+            "skin_smooth": b.skin_smooth,
+            "brighten": b.brighten,
+            "whiten": b.whiten,
+        })
+        .to_string(),
+        _ => "{}".to_string(),
+    };
     let (task_id, created_at) = {
         let store = state.store.lock().unwrap();
         let id = store
@@ -346,7 +381,12 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         let effect = params.effect_image.unwrap_or(false);
         let layout = params.layout.clone();
         let rotate = params.rotate;
-        let beauty = params.beauty.as_ref().map(|b| b.enabled).unwrap_or(false);
+        let beauty = params.beauty.clone().map(|b| photos_core::pipeline::BeautyParams {
+            enabled: b.enabled,
+            skin_smooth: b.skin_smooth,
+            brighten: b.brighten,
+            whiten: b.whiten,
+        });
 
         let started = std::time::Instant::now();
         let state2 = state.clone();
@@ -510,6 +550,7 @@ pub async fn get_task(
         "status": record.status,
         "message": if record.message.is_empty() { serde_json::Value::Null } else { json!(record.message) },
         "warnings": serde_json::from_str::<Vec<String>>(&record.warnings).unwrap_or_default(),
+        "beauty": record.beauty,
         "elapsed_ms": record.elapsed_ms,
         "created_at": record.created_at,
         "artifacts": artifacts,

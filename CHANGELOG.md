@@ -2,6 +2,26 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.6] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M4 美颜算子】新增 `vision/beauty.rs`：逐通道双边滤波磨皮（保细节混合）、提亮、肤色检测美白（经典 RGB 肤色规则，防误判背景）；`[beauty]` 配置 `skin_smooth`/`brighten`/`whiten`（0..1），`enabled=false` 原样返回
+- 【M4 链路接入】`ProcessRequest.beauty` 升级为 `Option<BeautyParams>`（enabled + 三项可选强度，缺省取全局配置）；pipeline 换底色前对旋转后原图应用美颜，证件照与效果图同步生效
+- 【M4 CLI】`--beauty` 开关 + `--beauty-smooth`/`--beauty-brighten`/`--beauty-whiten` 强度参数（缺省用配置默认值）
+- 【M4 API】`params.beauty` 完整透传（enabled + 强度，越界返回 400）；`GET /tasks/{id}` 响应新增 `beauty` 字段；任务记录完整保存美颜参数
+- 【M4 CUDA】`InferenceEngine::load` 增加 `ExecutionProvider` 参数：模式套件 `execution_provider=cuda` 时优先 CUDA EP，新增可选 feature `ort-cuda`，未编译时自动降级 CPU 并中文告警（PRD 降级策略）
+- 【M4 批量报告】CLI 批量处理结束汇总「成功率 + 总耗时 + 平均耗时/张」
+
+### 📈 Improvements 性能/体验优化
+- 【M4 体积】workspace `[profile.release]` 启用 `lto=thin` + `codegen-units=1` + `strip=symbols` + `panic=abort`，从源头减小发布体积
+
+### 📚 Docs 文档更新
+- `docs/03-实施计划.md`：M4 落地说明与验证数据
+- `docs/05-API契约.md`：`beauty` 参数完整约束（0..1 越界 400）+ 任务详情 `beauty` 字段
+
+### 🔧 Dependencies 依赖更新
+- `photos-core` 新增可选 feature `ort-cuda`（= `ort/cuda`，需配合 `ort` 使用）
+
 ## [2026.09.17.5] - 0.1.0
 
 ### ✨ New Features 新增功能

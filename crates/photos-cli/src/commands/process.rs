@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
-use photos_core::pipeline::{ProcessRequest, demo_balanced_engine, run_pipeline};
+use photos_core::pipeline::{BeautyParams, ProcessRequest, demo_balanced_engine, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
 use crate::cli::ProcessArgs;
@@ -45,7 +45,9 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
 
     let mut ok_count = 0usize;
     let mut errors: Vec<String> = Vec::new();
+    let mut costs: Vec<u128> = Vec::new();
     for input in &files {
+        let t0 = std::time::Instant::now();
         let res = if args.demo {
             let (w, h) = image::image_dimensions(input)
                 .with_context(|| format!("读取图片尺寸失败：{}", input.display()))?;
@@ -62,7 +64,10 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
             )
         };
         match res {
-            Ok(()) => ok_count += 1,
+            Ok(()) => {
+                ok_count += 1;
+                costs.push(t0.elapsed().as_millis());
+            }
             Err(e) => errors.push(format!("{}：{e:#}", input.display())),
         }
     }
@@ -70,8 +75,16 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
     for e in &errors {
         eprintln!("处理失败：{e}");
     }
+    let total_ms: u128 = costs.iter().sum();
+    let avg_ms = if costs.is_empty() { 0 } else { total_ms / costs.len() as u128 };
+    let rate = files.len() as f64;
+    let success_rate = if rate > 0.0 {
+        ok_count as f64 / rate * 100.0
+    } else {
+        0.0
+    };
     println!(
-        "批量处理完成：成功 {ok_count} / {}，失败 {}",
+        "批量处理完成：成功 {ok_count} / {}（成功率 {success_rate:.1}%），失败 {}，总耗时 {total_ms}ms，平均 {avg_ms}ms/张",
         files.len(),
         errors.len()
     );
@@ -178,7 +191,16 @@ fn process_one(
         rotate: args.rotate,
         effect: args.effect,
         layout: args.layout.clone(),
-        beauty: args.beauty,
+        beauty: if args.beauty {
+            Some(BeautyParams {
+                enabled: true,
+                skin_smooth: args.beauty_smooth,
+                brighten: args.beauty_brighten,
+                whiten: args.beauty_whiten,
+            })
+        } else {
+            None
+        },
     };
     match run_pipeline(cfg, engine, &req) {
         Ok(r) => {

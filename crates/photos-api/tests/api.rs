@@ -186,6 +186,64 @@ async fn 参数非法返回400() {
 }
 
 #[tokio::test]
+async fn 美颜强度越界返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"beauty":{"enabled":true,"brighten":1.5}}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "INVALID_PARAMS");
+    assert!(json["message"].as_str().unwrap().contains("提亮强度"));
+}
+
+#[tokio::test]
+async fn 美颜开启任务成功且记录参数() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"beauty":{"enabled":true,"skin_smooth":0.8,"brighten":0.2}}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = json["id"].as_str().unwrap();
+    // 轮询直至完成
+    let mut detail = json.clone();
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (s, j) = send(&app, req).await;
+        assert_eq!(s, StatusCode::OK);
+        detail = j;
+        if detail["status"] != "queued" && detail["status"] != "running" {
+            break;
+        }
+    }
+    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    // 任务记录含美颜参数（磨皮/提亮非缺省）
+    assert!(detail["beauty"].as_str().unwrap().contains("0.8"));
+}
+
+#[tokio::test]
 async fn 不支持媒体返回415() {
     let t = TestApp::new();
     let app = t.app();

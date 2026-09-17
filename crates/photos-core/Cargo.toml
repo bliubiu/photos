@@ -13,6 +13,9 @@ default = []
 # ort：启用 ONNX Runtime 推理后端（OrtEngine）；关闭时仅提供模拟推理层（FakeEngine）。
 # 注：ort 2.0 候选版构建脚本存在文件锁问题，模型就位前默认关闭，避免阻塞构建。
 ort = ["dep:ort"]
+# ort-cuda：启用 CUDA 执行提供方（需 N 卡驱动与 CUDA 运行时；未启用时 quality 模式自动降级 CPU 并告警）。
+# 需同时开启 ort：`--features ort,ort-cuda`。
+ort-cuda = ["ort", "ort/cuda"]
 
 [dependencies]
 anyhow.workspace = true
