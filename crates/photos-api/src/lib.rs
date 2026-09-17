@@ -63,16 +63,36 @@ pub fn router_with_frontend(
     }
 }
 
-/// 默认引擎工厂：真实推理后端（feature=ort 时为 OrtEngine）；
-/// 未编译 ort 的演示构建自动用内置 demo 引擎（按图尺寸回放），保证 serve/WebUI 全链路可演示。
-pub fn default_engine_factory() -> EngineFactory {
-    Arc::new(|w, h| {
-        if photos_core::inference::ORT_BUILT {
-            photos_core::inference::default_engine()
-        } else {
-            Box::new(photos_core::pipeline::demo_balanced_engine(w, h))
-        }
-    })
+/// 生产引擎工厂：仅返回真实 OrtEngine（feature=ort）。
+/// **无 ort 时返回 Err**，禁止静默降级 demo（演示请显式使用 [`demo_engine_factory`]）。
+pub fn production_engine_factory() -> anyhow::Result<EngineFactory> {
+    if !photos_core::inference::ORT_BUILT {
+        anyhow::bail!(
+            "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法以真实模式启动 serve/桌面版。\n\
+             请使用：cargo run -p photos-cli --features photos-core/ort -- serve\n\
+             或显式演示模式：photos serve --demo（输出为模拟数据，非真实证件照）"
+        );
+    }
+    Ok(Arc::new(|_, _| photos_core::inference::default_engine()))
+}
+
+/// 演示引擎工厂：内置 mock 回放（椭圆人形），**仅限显式 `--demo` 或 PHOTOS_DEMO=1**。
+pub fn demo_engine_factory() -> EngineFactory {
+    Arc::new(|w, h| Box::new(photos_core::pipeline::demo_balanced_engine(w, h)))
+}
+
+/// 根据 `PHOTOS_DEMO` 环境变量选择工厂：`1`/`true`/`yes` → demo，否则要求 ort。
+/// 桌面壳等无法传 `--demo` 的入口使用。
+pub fn engine_factory_from_env() -> anyhow::Result<EngineFactory> {
+    let demo = std::env::var("PHOTOS_DEMO")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if demo {
+        tracing::warn!("PHOTOS_DEMO 已启用：使用演示引擎，输出非真实 AI 推理结果");
+        eprintln!("警告：演示模式已启用（PHOTOS_DEMO），输出为模拟数据，非真实证件照");
+        return Ok(demo_engine_factory());
+    }
+    production_engine_factory()
 }
 
 /// 绑定回环地址（端口 0 = 随机），返回监听器与地址（供 serve / 桌面壳使用）
@@ -88,18 +108,35 @@ pub async fn run_server(app: Router, listener: tokio::net::TcpListener) -> anyho
     Ok(())
 }
 
-/// `photos serve` 入口（同步）：启动本地 HTTP 服务并打印地址，直至 Ctrl+C
+/// `photos serve` 入口（同步）：生产模式启动本地 HTTP 服务（需 ort），直至 Ctrl+C
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
-    serve_with(cfg, "127.0.0.1", 0)
+    serve_with_factory(cfg, "127.0.0.1", 0, production_engine_factory()?)
 }
 
-/// 指定主机与端口启动服务（端口 0 = 随机）；打印实际监听地址后阻塞
+/// 指定主机与端口启动生产服务（端口 0 = 随机）；**无 ort 直接失败，不静默 demo**
 pub fn serve_with(cfg: Config, host: &str, port: u16) -> anyhow::Result<()> {
+    serve_with_factory(cfg, host, port, production_engine_factory()?)
+}
+
+/// 显式演示模式：内置 mock 引擎（`--demo`）
+pub fn serve_demo_with(cfg: Config, host: &str, port: u16) -> anyhow::Result<()> {
+    eprintln!("警告：serve 处于演示模式（--demo），输出为模拟数据，非真实证件照");
+    tracing::warn!("serve 演示模式：使用内置 mock 引擎");
+    serve_with_factory(cfg, host, port, demo_engine_factory())
+}
+
+/// 用给定引擎工厂启动服务
+pub fn serve_with_factory(
+    cfg: Config,
+    host: &str,
+    port: u16,
+    engine_factory: EngineFactory,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let app = router(cfg, default_engine_factory(), true);
+        let app = router(cfg, engine_factory, true);
         let listener = tokio::net::TcpListener::bind((host, port)).await?;
         let addr = listener.local_addr()?;
         tracing::info!("证件照本地服务已启动：http://{addr}");

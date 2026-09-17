@@ -40,6 +40,9 @@ pub struct ServeArgs {
     /// 监听端口（默认 0 = 系统随机端口）
     #[arg(long, value_name = "端口")]
     pub port: Option<u16>,
+    /// 演示模式：内置 mock 引擎（非真实 AI；需显式指定，禁止静默降级）
+    #[arg(long)]
+    pub demo: bool,
 }
 
 /// `photos models` 参数

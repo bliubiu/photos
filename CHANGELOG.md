@@ -2,6 +2,15 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.11]
+
+### ✨ New Features 新增功能
+- 【人脸检测】新增 `decode_mtcnn`：支持 P-Net heatmap+bbox 映射解码与融合终态 [boxes,scores,landmarks] 布局；pipeline 按 `suite.face==mtcnn` 分流，speed 模式走 MTCNN 解码（此前误用 RetinaFace）
+
+### 🐛 Bug Fixes  问题修复
+- 【推理后端】禁止无 `ort` 时静默 demo：`photos process` 无 `--demo` 且未编译 ort 时直接报错；`photos serve` 默认生产模式（无 ort 启动失败），演示需显式 `--demo`；桌面壳默认要求 ort，可用 `PHOTOS_DEMO=1` 显式演示并告警
+- 【API】新增 `production_engine_factory` / `demo_engine_factory` / `engine_factory_from_env`，移除隐式 demo 回退
+
 ## [2026.09.17.10] - 0.1.0
 
 ### ✨ New Features 新增功能

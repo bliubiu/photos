@@ -29,6 +29,14 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
     // 真实引擎一次装载复用；demo 引擎按图尺寸构造（FakeEngine 无装载成本）
     let mut real_engine: Option<Box<dyn InferenceEngine>> = None;
     if !args.demo {
+        // 禁止静默 demo：无 ort 时直接失败（--demo 才走 mock 回放）
+        if !photos_core::inference::ORT_BUILT {
+            anyhow::bail!(
+                "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法真实处理图片。\n\
+                 启用真实推理：cargo build -p photos-cli --features photos-core/ort\n\
+                 或显式演示：photos process --demo"
+            );
+        }
         let mut engine = photos_core::inference::default_engine();
         photos_core::inference::ensure_models_ready(cfg, engine.as_mut(), &mode).context(
             "模型检查未通过：请按 docs/04-模型清单.md §6 放置模型文件到 models/ 目录，或启用一键下载",

@@ -233,6 +233,295 @@ pub fn decode_retinaface(
     Ok(out)
 }
 
+/// 生成 P-Net 锚框级提议并解码（stride=12，cell=12，对齐经典 Caffe MTCNN）。
+/// `heatmap` 为 `[2,H,W]` 或 `[1,2,H,W]`（索引 1 为前景分）；`bbox_reg` 为 `[4,H,W]` 或 `[1,4,H,W]`。
+fn pnet_proposals(
+    heatmap: &TensorData,
+    bbox_reg: &TensorData,
+    score_threshold: f32,
+) -> CoreResult<Vec<FaceDetection>> {
+    let (hm, h, w) = split_hw_channels(heatmap, 2, "MTCNN heatmap")?;
+    let (reg, rh, rw) = split_hw_channels(bbox_reg, 4, "MTCNN bbox 回归")?;
+    if rh != h || rw != w {
+        return Err(CoreError::Image(format!(
+            "MTCNN heatmap 与 bbox 回归特征图尺寸不一致：{h}x{w} vs {rh}x{rw}"
+        )));
+    }
+    const STRIDE: f32 = 12.0;
+    const CELL: f32 = 12.0;
+    let mut dets = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let score = hm[1 * h * w + y * w + x];
+            if score < score_threshold {
+                continue;
+            }
+            let r0 = reg[0 * h * w + y * w + x];
+            let r1 = reg[1 * h * w + y * w + x];
+            let r2 = reg[2 * h * w + y * w + x];
+            let r3 = reg[3 * h * w + y * w + x];
+            // 对齐常见 P-Net 解码：左上 = stride*x - cell*r，右下 = stride*(x+1) + cell*r
+            // （零回归时框尺寸约为 stride，避免空框）
+            let x1 = STRIDE * x as f32 - CELL * r0;
+            let y1 = STRIDE * y as f32 - CELL * r1;
+            let x2 = STRIDE * (x as f32 + 1.0) + CELL * r2;
+            let y2 = STRIDE * (y as f32 + 1.0) + CELL * r3;
+            if x2 <= x1 || y2 <= y1 {
+                continue;
+            }
+            // 关键点用框中心近似（P-Net 无 5 点；完整 MTCNN 若提供 landmarks 张量则优先）
+            let cx = (x1 + x2) * 0.5;
+            let cy = (y1 + y2) * 0.5;
+            let points = [
+                Point2::new(cx as f64, cy as f64),
+                Point2::new(cx as f64, cy as f64),
+                Point2::new(cx as f64, cy as f64),
+                Point2::new(cx as f64, cy as f64),
+                Point2::new(cx as f64, cy as f64),
+            ];
+            dets.push(FaceDetection {
+                face: FaceBox {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    score,
+                },
+                landmarks: points,
+            });
+        }
+    }
+    Ok(dets)
+}
+
+/// 从张量取出 `[C,H,W]` 通道布局（兼容丢掉 batch 维）。
+fn split_hw_channels(t: &TensorData, channels: usize, name: &str) -> CoreResult<(Vec<f32>, usize, usize)> {
+    let data = &t.data;
+    let shape = &t.shape;
+    // [1,C,H,W] 或 [C,H,W]
+    let (c, h, w) = if shape.len() == 4 {
+        (shape[1] as usize, shape[2] as usize, shape[3] as usize)
+    } else if shape.len() == 3 {
+        (shape[0] as usize, shape[1] as usize, shape[2] as usize)
+    } else {
+        return Err(CoreError::Image(format!(
+            "{name} 张量布局应为 [C,H,W] 或 [1,C,H,W]，收到 {shape:?}"
+        )));
+    };
+    if c != channels || h == 0 || w == 0 {
+        return Err(CoreError::Image(format!(
+            "{name} 通道数或尺寸非法：C={c} H={h} W={w}（期望 C={channels}）"
+        )));
+    }
+    if data.len() != c * h * w {
+        return Err(CoreError::Image(format!(
+            "{name} 元素数 {} 与 C*H*W={} 不一致",
+            data.len(),
+            c * h * w
+        )));
+    }
+    Ok((data.clone(), h, w))
+}
+
+/// 判断是否「融合终态」布局：三元组 [boxes N×4, scores N, landmarks N×10]（任意 batch 维）。
+fn try_fused_mtcnn_outputs(outputs: &[TensorData]) -> Option<(&TensorData, &TensorData, &TensorData)> {
+    if outputs.len() < 3 {
+        return None;
+    }
+    let mut lm_idx = None;
+    for (i, t) in outputs.iter().enumerate() {
+        if t.data.len() >= 10 && t.data.len() % 10 == 0 {
+            let n = t.data.len() / 10;
+            if outputs.iter().enumerate().any(|(j, u)| j != i && u.data.len() == n * 4)
+                && outputs.iter().enumerate().any(|(j, u)| {
+                    j != i && (u.data.len() == n || u.data.len() == n * 2)
+                })
+            {
+                lm_idx = Some(i);
+                break;
+            }
+        }
+    }
+    let li = lm_idx?;
+    let n = outputs[li].data.len() / 10;
+    let bi = (0..outputs.len())
+        .find(|&i| i != li && outputs[i].data.len() == n * 4)?;
+    let si = (0..outputs.len())
+        .find(|&i| i != li && i != bi && (outputs[i].data.len() == n || outputs[i].data.len() == n * 2))?;
+    Some((&outputs[bi], &outputs[si], &outputs[li]))
+}
+
+/// 融合终态解码：boxes 已为像素坐标（输入图尺度）或归一化 [0,1]，scores 为前景分，landmarks 同尺度。
+fn decode_fused_mtcnn(
+    boxes: &TensorData,
+    scores: &TensorData,
+    landmarks: &TensorData,
+    score_threshold: f32,
+    iou_threshold: f32,
+    image_size: (u32, u32),
+    scale_x: f32,
+    scale_y: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> CoreResult<Vec<FaceDetection>> {
+    let n = boxes.data.len() / 4;
+    if n == 0 {
+        return Err(CoreError::Image("MTCNN 融合输出无检测框".into()));
+    }
+    if landmarks.data.len() != n * 10 {
+        return Err(CoreError::Image(format!(
+            "MTCNN 融合 landmarks 长度 {} 与候选数 {n} 不一致",
+            landmarks.data.len()
+        )));
+    }
+    let (ih, iw) = (image_size.0 as f32, image_size.1 as f32);
+    let score_stride = scores.data.len() / n;
+    if score_stride != 1 && score_stride != 2 {
+        return Err(CoreError::Image(format!(
+            "MTCNN 融合 scores 布局异常：长度 {} / 候选 {n}",
+            scores.data.len()
+        )));
+    }
+    // 坐标是否为归一化：最大边长 < 2 视为 [0,1]
+    let mut max_coord = 0.0f32;
+    for i in 0..n {
+        for k in 0..4 {
+            max_coord = max_coord.max(boxes.data[i * 4 + k].abs());
+        }
+    }
+    let norm = max_coord <= 2.0;
+
+    let mut detections = Vec::with_capacity(n);
+    for i in 0..n {
+        let score = scores.data[i * score_stride + score_stride - 1];
+        if score < score_threshold {
+            continue;
+        }
+        let (mut x1, mut y1, mut x2, mut y2) = (
+            boxes.data[i * 4],
+            boxes.data[i * 4 + 1],
+            boxes.data[i * 4 + 2],
+            boxes.data[i * 4 + 3],
+        );
+        let mut lm = [0.0f32; 10];
+        for k in 0..10 {
+            lm[k] = landmarks.data[i * 10 + k];
+        }
+        if norm {
+            x1 *= iw;
+            x2 *= iw;
+            y1 *= ih;
+            y2 *= ih;
+            for k in 0..5 {
+                lm[k * 2] *= iw;
+                lm[k * 2 + 1] *= ih;
+            }
+        }
+        let mut points = [Point2::new(0.0, 0.0); 5];
+        for (k, p) in points.iter_mut().enumerate() {
+            *p = Point2::new(lm[k * 2] as f64, lm[k * 2 + 1] as f64);
+        }
+        detections.push(FaceDetection {
+            face: FaceBox {
+                x1,
+                y1,
+                x2,
+                y2,
+                score,
+            },
+            landmarks: points,
+        });
+    }
+    finish_mtcnn_nms(detections, iou_threshold, scale_x, scale_y, pad_x, pad_y)
+}
+
+/// NMS + letterbox 逆变换
+fn finish_mtcnn_nms(
+    detections: Vec<FaceDetection>,
+    iou_threshold: f32,
+    scale_x: f32,
+    scale_y: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> CoreResult<Vec<FaceDetection>> {
+    let keep = nms(
+        &detections.iter().map(|d| d.face).collect::<Vec<_>>(),
+        iou_threshold,
+    );
+    let mut out = Vec::with_capacity(keep.len());
+    for &idx in &keep {
+        let mut d = detections[idx].clone();
+        d.face.x1 = (d.face.x1 - pad_x) / scale_x;
+        d.face.y1 = (d.face.y1 - pad_y) / scale_y;
+        d.face.x2 = (d.face.x2 - pad_x) / scale_x;
+        d.face.y2 = (d.face.y2 - pad_y) / scale_y;
+        for p in &mut d.landmarks {
+            p.x = (p.x - pad_x as f64) / scale_x as f64;
+            p.y = (p.y - pad_y as f64) / scale_y as f64;
+        }
+        // 裁剪到非负半平面（原图坐标）
+        d.face.x1 = d.face.x1.max(0.0);
+        d.face.y1 = d.face.y1.max(0.0);
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// MTCNN 输出解码。
+///
+/// 支持两类 ONNX 导出：
+/// 1. **融合终态**：输出含 boxes `[N,4]`、scores `[N]`、landmarks `[N,10]`（常见于整网导出）
+/// 2. **P-Net 映射**：`heatmap [1,2,H,W]` + `bbox [1,4,H,W]`（经典 det1/P-Net 风格）
+///
+/// 流程：解码 → 过滤 → NMS → letterbox 逆变换（`scale_*` / `pad_*`）。
+pub fn decode_mtcnn(
+    outputs: &[TensorData],
+    score_threshold: f32,
+    iou_threshold: f32,
+    input_size: (u32, u32),
+    scale_x: f32,
+    scale_y: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> CoreResult<Vec<FaceDetection>> {
+    if outputs.is_empty() {
+        return Err(CoreError::Image("MTCNN 输出为空".into()));
+    }
+    // 优先融合终态
+    if let Some((boxes, scores, lm)) = try_fused_mtcnn_outputs(outputs) {
+        return decode_fused_mtcnn(
+            boxes,
+            scores,
+            lm,
+            score_threshold,
+            iou_threshold,
+            input_size,
+            scale_x,
+            scale_y,
+            pad_x,
+            pad_y,
+        );
+    }
+    // 否则按 P-Net：找 2 通道 heatmap 与 4 通道回归
+    let heatmap = outputs.iter().find(|t| {
+        let c = if t.shape.len() == 4 { t.shape[1] } else if t.shape.len() == 3 { t.shape[0] } else { 0 };
+        c == 2
+    });
+    let bbox = outputs.iter().find(|t| {
+        let c = if t.shape.len() == 4 { t.shape[1] } else if t.shape.len() == 3 { t.shape[0] } else { 0 };
+        c == 4
+    });
+    match (heatmap, bbox) {
+        (Some(hm), Some(bb)) => {
+            let dets = pnet_proposals(hm, bb, score_threshold)?;
+            finish_mtcnn_nms(dets, iou_threshold, scale_x, scale_y, pad_x, pad_y)
+        }
+        _ => Err(CoreError::Image(
+            "无法识别 MTCNN 输出布局：期望融合三元组 [boxes,scores,landmarks] 或 P-Net [heatmap,bbox]".into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +701,83 @@ mod tests {
         assert_eq!(dets.len(), 1);
         assert!((dets[0].face.x1 - 20.0).abs() < 1e-3);
         assert!((dets[0].face.y1 - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mtcnn_pnet解码过滤与逆变换() {
+        // 12x12 特征图（输入约 128），stride=12
+        // 位置 (2,3)：前景分 0.95，回归全 0 → 框 [24,36,36,48]
+        let h = 12usize;
+        let w = 12usize;
+        let mut hm = vec![0.0f32; 2 * h * w];
+        let reg = vec![0.0f32; 4 * h * w];
+        hm[1 * h * w + 3 * w + 2] = 0.95;
+        hm[1 * h * w + 0 * w + 0] = 0.2; // 低分过滤
+        let dets = decode_mtcnn(
+            &[
+                TensorData::new(vec![1, 2, h as i64, w as i64], hm).unwrap(),
+                TensorData::new(vec![1, 4, h as i64, w as i64], reg).unwrap(),
+            ],
+            0.5,
+            0.4,
+            (128, 128),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(dets.len(), 1);
+        let f = &dets[0].face;
+        assert!((f.x1 - 24.0).abs() < 1e-3, "x1={}", f.x1);
+        assert!((f.y1 - 36.0).abs() < 1e-3, "y1={}", f.y1);
+        assert!((f.x2 - 36.0).abs() < 1e-3, "x2={}", f.x2);
+        assert!((f.y2 - 48.0).abs() < 1e-3, "y2={}", f.y2);
+    }
+
+    #[test]
+    fn mtcnn融合输出解码() {
+        // 两候选：高分框 + 低分过滤；框为像素坐标
+        let boxes = vec![10.0, 20.0, 50.0, 70.0, 15.0, 25.0, 55.0, 75.0];
+        let scores = vec![0.92, 0.1];
+        let mut lm = vec![0.0f32; 20];
+        for k in 0..5 {
+            lm[k * 2] = 20.0 + k as f32;
+            lm[k * 2 + 1] = 30.0 + k as f32;
+        }
+        let dets = decode_mtcnn(
+            &[
+                TensorData::new(vec![2, 4], boxes).unwrap(),
+                TensorData::new(vec![2], scores).unwrap(),
+                TensorData::new(vec![2, 10], lm).unwrap(),
+            ],
+            0.5,
+            0.4,
+            (100, 100),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(dets.len(), 1);
+        assert!((dets[0].face.x1 - 10.0).abs() < 1e-3);
+        assert!((dets[0].landmarks[0].x - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mtcnn未知布局报错() {
+        let err = decode_mtcnn(
+            &[TensorData::new(vec![1, 3, 4, 4], vec![0.0; 48]).unwrap()],
+            0.5,
+            0.4,
+            (32, 32),
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("MTCNN"));
     }
 }

@@ -52,12 +52,9 @@ fn spawn_server(cfg: Config) -> Result<String, Box<dyn std::error::Error>> {
     } else {
         photos_api::frontend_dir()
     };
-    let app = photos_api::router_with_frontend(
-        cfg,
-        photos_api::default_engine_factory(),
-        true,
-        frontend,
-    );
+    // 禁止静默 demo：默认要求 ort；PHOTOS_DEMO=1 时显式演示并告警
+    let engine_factory = photos_api::engine_factory_from_env()?;
+    let app = photos_api::router_with_frontend(cfg, engine_factory, true, frontend);
     let _handle: Arc<_> = Arc::new(rt.spawn(async move {
         if let Err(e) = photos_api::run_server(app, listener).await {
             tracing::error!("本地服务异常退出：{e}");

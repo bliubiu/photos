@@ -17,7 +17,7 @@ use crate::vision::beauty::apply_beauty;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
 use crate::vision::dressing::{SuitStyle, self};
-use crate::vision::face::{decode_retinaface, retinaface_prior_count};
+use crate::vision::face::{decode_mtcnn, decode_retinaface, retinaface_prior_count};
 use crate::vision::geometry::{
     RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
 };
@@ -152,9 +152,9 @@ pub fn run_pipeline(
     }
 
     // 3. 推理（按模型 input_dims 构造真实输入：letterbox/归一化/布局对齐）
-    // RetinaFace 官方预处理为 RGB 减均值 (104,117,123)，其余模型为 RGB 归一化 [0,1]
+    // RetinaFace 官方预处理为 RGB 减均值 (104,117,123)；MTCNN 按常规 RGB 归一化
     let face_spec = cfg.model_spec(&suite.face)?;
-    let face_in = build_input(&img, &face_spec.input_dims, true)?;
+    let face_in = build_input(&img, &face_spec.input_dims, suite.face != "mtcnn")?;
     let face_outs = engine.run(&suite.face, &face_in.tensor)?;
     let kp_spec = cfg.model_spec(&suite.keypoint)?;
     let kp_in = build_input(&img, &kp_spec.input_dims, false)?;
@@ -167,23 +167,40 @@ pub fn run_pipeline(
         Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
         None => (1.0, 1.0, 0.0, 0.0),
     };
-    // 真实 RetinaFace 输出顺序为 [bbox, confidence, landmark]（Hivision 官方模型），
-    // decode_retinaface 期望 [scores, boxes, landmarks]，此处按位置重排
-    let faces = decode_retinaface(
-        &face_outs[1],
-        &face_outs[0],
-        &face_outs[2],
-        FACE_SCORE_THRESHOLD,
-        NMS_IOU_THRESHOLD,
-        (
-            face_spec.input_dims[2] as u32,
-            face_spec.input_dims[3] as u32,
-        ),
-        scale_x,
-        scale_y,
-        pad_x,
-        pad_y,
-    )?;
+    // 人脸解码按套件分流：speed=MTCNN，balanced/quality=RetinaFace
+    let faces = if suite.face == "mtcnn" {
+        decode_mtcnn(
+            &face_outs,
+            FACE_SCORE_THRESHOLD,
+            NMS_IOU_THRESHOLD,
+            (
+                face_spec.input_dims[2] as u32,
+                face_spec.input_dims[3] as u32,
+            ),
+            scale_x,
+            scale_y,
+            pad_x,
+            pad_y,
+        )?
+    } else {
+        // 真实 RetinaFace 输出顺序为 [bbox, confidence, landmark]（Hivision 官方模型），
+        // decode_retinaface 期望 [scores, boxes, landmarks]，此处按位置重排
+        decode_retinaface(
+            &face_outs[1],
+            &face_outs[0],
+            &face_outs[2],
+            FACE_SCORE_THRESHOLD,
+            NMS_IOU_THRESHOLD,
+            (
+                face_spec.input_dims[2] as u32,
+                face_spec.input_dims[3] as u32,
+            ),
+            scale_x,
+            scale_y,
+            pad_x,
+            pad_y,
+        )?
+    };
     let face = faces
         .first()
         .ok_or_else(|| CoreError::Image("未检测到人脸".into()))?;
@@ -506,6 +523,74 @@ mod tests {
         // 双眼/双肩水平 → 融合角 0 → Auto(0)，无告警
         assert_eq!(result.decision, RotationDecision::Auto(0.0));
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn speed模式mtcnn解码闭环() {
+        // speed 套件 face=mtcnn：P-Net 式 heatmap + 回归 stub，验证按套件走 MTCNN 分支
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+
+        let fh = 54usize;
+        let fw = 54usize;
+        let mut hm = vec![0.0f32; 2 * fh * fw];
+        let reg = vec![0.0f32; 4 * fh * fw];
+        hm[1 * fh * fw + 27 * fw + 27] = 0.99;
+        let mtcnn_out = vec![
+            TensorData::new(vec![1, 2, fh as i64, fw as i64], hm).unwrap(),
+            TensorData::new(vec![1, 4, fh as i64, fw as i64], reg).unwrap(),
+        ];
+        let mut kp_v = vec![0.0f32; 17 * 3];
+        for (i, (x, y)) in [
+            (2usize, (40.0f32, 40.0)),
+            (3, (60.0, 40.0)),
+            (5, (30.0, 100.0)),
+            (6, (70.0, 100.0)),
+        ] {
+            // MoveNet 布局 (y, x, score)，归一化 [0,1]
+            kp_v[i * 3] = y / 140.0;
+            kp_v[i * 3 + 1] = x / 100.0;
+            kp_v[i * 3 + 2] = 0.95;
+        }
+        // 与 demo 一致：先在原图画前景，再 letterbox 到 1024（rmbg input_dims）
+        let mut el = RgbImage::from_pixel(100, 140, Rgb([0, 0, 0]));
+        for y in 20..120 {
+            for x in 25..75 {
+                el.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+        let (canvas, _) = crate::preprocess::letterbox(&el, 1024, 1024);
+        let matting = canvas
+            .pixels()
+            .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
+            .collect::<Vec<f32>>();
+        let mut engine = FakeEngine::new()
+            .stub("mtcnn", mtcnn_out)
+            .stub(
+                "movnet_light",
+                vec![TensorData::new(vec![1, 17, 3], kp_v).unwrap()],
+            )
+            .stub(
+                "rmbg",
+                vec![TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap()],
+            );
+
+        let req = ProcessRequest {
+            input,
+            mode: "speed".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            rotate: None,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
     }
 
     #[test]

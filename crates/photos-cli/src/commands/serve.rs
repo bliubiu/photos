@@ -5,10 +5,14 @@ use photos_core::config::Config;
 
 use crate::cli::ServeArgs;
 
-/// 启动服务（阻塞直至 Ctrl+C）
+/// 启动服务（阻塞直至 Ctrl+C）。默认生产模式；`--demo` 为显式演示。
 pub fn run(cfg: &Config, args: &ServeArgs) -> Result<()> {
     let host = args.host.clone().unwrap_or_else(|| "127.0.0.1".into());
     let port = args.port.unwrap_or(0);
-    photos_api::serve_with(cfg.clone(), &host, port)?;
+    if args.demo {
+        photos_api::serve_demo_with(cfg.clone(), &host, port)?;
+    } else {
+        photos_api::serve_with(cfg.clone(), &host, port)?;
+    }
     Ok(())
 }
