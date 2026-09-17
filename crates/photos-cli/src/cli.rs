@@ -49,6 +49,9 @@ pub struct ProcessArgs {
     /// 手动纠偏角度（度，上限 ±45）
     #[arg(long, value_name = "角度")]
     pub rotate: Option<f64>,
+    /// 演示模式：不依赖模型，用内置 mock 回放跑通全链路出图
+    #[arg(long)]
+    pub demo: bool,
     /// 输出目录（默认 data/out）
     #[arg(short, long, value_name = "目录")]
     pub out: Option<PathBuf>,

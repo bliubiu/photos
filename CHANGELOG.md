@@ -15,6 +15,7 @@
 - 【M1 视觉】纯 Rust 算子：姿态角度（0.6 头部 + 0.4 肩线融合、±22° 自动阈值、±45° 手动覆盖）、同步仿射纠偏、RetinaFace 解码 NMS、MoveNet 17 点解码、mask 阈值/开运算/羽化、alpha 换底色、证件照裁剪
 - 【M1 流水线】`run_pipeline` 最小闭环：读图 → 检测/抠图 → 角度决策 → 同步纠偏 → 换底色 → 裁切缩放（mock 回放打通端到端）
 - 【M1 CLI】`photos process` 子命令：单图处理、task_history 落库、缺模型中文指引
+- 【M1 CLI】`photos process --demo` 演示模式：内置 mock 回放（居中椭圆人形 mask）无模型跑通全链路，验证纠偏/换底/裁切输出
 
 ### 🔧 Dependencies 依赖更新
 - `ort` 2.0.0-rc.13 改为显式 feature（默认关闭），规避 Windows 构建文件锁与 DirectML 默认下载问题

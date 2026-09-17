@@ -1379,6 +1379,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "image",
  "photos-api",
  "photos-core",
  "serde_json",

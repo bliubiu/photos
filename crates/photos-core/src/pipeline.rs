@@ -10,7 +10,7 @@ use image::{GrayImage, RgbImage};
 
 use crate::config::Config;
 use crate::error::{CoreError, CoreResult};
-use crate::inference::{InferenceEngine, TensorData, ensure_models_ready};
+use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
 use crate::vision::affine::rotate_image_same;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
@@ -145,6 +145,54 @@ fn placeholder() -> TensorData {
     }
 }
 
+/// 演示引擎：balanced 三件套内置 mock 回放（`photos process --demo` 与测试共用）。
+/// 人脸框居中、双眼/双肩水平（融合角 0）、mask 为中心椭圆（可演示换底色）。
+pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
+    let (fw, fh) = (w as f32, h as f32);
+    let face_out = vec![
+        TensorData::new(vec![1, 1], vec![0.99]).unwrap(),
+        TensorData::new(vec![1, 1, 4], vec![0.3 * fw, 0.3 * fh, 0.7 * fw, 0.7 * fh]).unwrap(),
+        // 左眼、右眼、鼻尖、左嘴角、右嘴角
+        TensorData::new(
+            vec![1, 1, 10],
+            vec![
+                0.44 * fw, 0.40 * fh, 0.56 * fw, 0.40 * fh, 0.50 * fw, 0.45 * fh,
+                0.45 * fw, 0.52 * fh, 0.55 * fw, 0.52 * fh,
+            ],
+        )
+        .unwrap(),
+    ];
+    // 双眼 idx1/2、双肩 idx5/6 均高置信且水平（y 相同 → 角度 0）
+    let mut kp = vec![0.0f32; 17 * 3];
+    for (i, (x, y)) in [
+        (1usize, (0.44f32, 0.40f32)),
+        (2, (0.56, 0.40)),
+        (5, (0.30, 0.75)),
+        (6, (0.70, 0.75)),
+    ] {
+        kp[i * 3] = y * fh;
+        kp[i * 3 + 1] = x * fw;
+        kp[i * 3 + 2] = 0.99;
+    }
+    // mask：中心椭圆不透明（a=0.32w、b=0.38h），边缘透明以演示换底色
+    let cx = fw / 2.0;
+    let cy = fh / 2.0;
+    let a = 0.32 * fw;
+    let b = 0.38 * fh;
+    let mut matting = vec![0.0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            if dx * dx / (a * a) + dy * dy / (b * b) <= 1.0 {
+                matting[(y * w + x) as usize] = 1.0;
+            }
+        }
+    }
+    let matting = TensorData::new(vec![1, 1, h as i64, w as i64], matting).unwrap();
+    FakeEngine::balanced_stub(face_out, vec![TensorData::new(vec![1, 17, 3], kp).unwrap()], vec![matting])
+}
+
 /// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；缺失时降级并记录告警
 fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
     let head = kps.eyes().map(|(l, r)| head_angle(&l, &r));
@@ -188,27 +236,7 @@ fn probability_mask(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::FakeEngine;
     use image::Rgb;
-
-    /// 构建 balanced 三件套 mock 回放：1 个居中人脸、双眼/双肩水平、mask 全不透明
-    fn stub_engine(w: u32, h: u32) -> FakeEngine {
-        let face_out = vec![
-            TensorData::new(vec![1, 1], vec![0.99]).unwrap(),
-            TensorData::new(vec![1, 1, 4], vec![30.0, 40.0, 70.0, 90.0]).unwrap(),
-            // 左眼、右眼、鼻尖、左嘴角、右嘴角
-            TensorData::new(vec![1, 1, 10], vec![38.0, 48.0, 62.0, 48.0, 50.0, 56.0, 44.0, 60.0, 56.0, 60.0]).unwrap(),
-        ];
-        // 双眼 idx1/2、双肩 idx5/6 均高置信且水平（y 相同 → 角度 0）
-        let mut kp = vec![0.0f32; 17 * 3];
-        for (i, (x, y)) in [(1usize, (38.0f32, 48.0f32)), (2, (62.0, 48.0)), (5, (30.0, 95.0)), (6, (70.0, 95.0))] {
-            kp[i * 3] = y / h as f32;
-            kp[i * 3 + 1] = x / w as f32;
-            kp[i * 3 + 2] = 0.99;
-        }
-        let matting = TensorData::new(vec![1, 1, h as i64, w as i64], vec![1.0; (w * h) as usize]).unwrap();
-        FakeEngine::balanced_stub(face_out, vec![TensorData::new(vec![1, 17, 3], kp).unwrap()], vec![matting])
-    }
 
     #[test]
     fn 最小闭环输出标准证件照() {
@@ -217,7 +245,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         img.save(&input).unwrap();
-        let mut engine = stub_engine(100, 140);
+        let mut engine = demo_balanced_engine(100, 140);
         let req = ProcessRequest {
             input,
             mode: "balanced".into(),
@@ -240,7 +268,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         img.save(&input).unwrap();
-        let mut engine = stub_engine(100, 140);
+        let mut engine = demo_balanced_engine(100, 140);
         let req = ProcessRequest {
             input,
             mode: "balanced".into(),

@@ -4,14 +4,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
-use photos_core::inference::{default_engine, ensure_models_ready};
-use photos_core::pipeline::{ProcessRequest, run_pipeline};
+use photos_core::inference::InferenceEngine;
+use photos_core::pipeline::{ProcessRequest, demo_balanced_engine, run_pipeline};
 use photos_core::storage::NewTask;
 
 use crate::cli::ProcessArgs;
 use crate::commands::open_store;
 
-/// 单图处理入口：模型就绪校验 → 流水线 → 落盘 → 落库 task_history
+/// 单图处理入口：模型就绪校验（或演示模式）→ 流水线 → 落盘 → 落库 task_history
 pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
     let mode = args
         .mode
@@ -20,11 +20,18 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
     let size = args.size.clone().unwrap_or_else(|| "one_inch".to_string());
     let bg = args.bg.clone().unwrap_or_else(|| "white".to_string());
 
-    // 模型就绪校验（缺失给出中文指引）
-    let mut engine = default_engine();
-    ensure_models_ready(cfg, engine.as_mut(), &mode).context(
-        "模型检查未通过：请按 docs/04-模型清单.md §6 放置模型文件到 models/ 目录，或启用一键下载",
-    )?;
+    // 引擎：演示模式用内置 mock 回放（不依赖模型），否则真实引擎并做模型就绪校验
+    let mut engine: Box<dyn InferenceEngine> = if args.demo {
+        let (w, h) = image::image_dimensions(&args.input)
+            .with_context(|| format!("读取图片尺寸失败：{}", args.input.display()))?;
+        Box::new(demo_balanced_engine(w, h))
+    } else {
+        let mut engine = photos_core::inference::default_engine();
+        photos_core::inference::ensure_models_ready(cfg, engine.as_mut(), &mode).context(
+            "模型检查未通过：请按 docs/04-模型清单.md §6 放置模型文件到 models/ 目录，或启用一键下载",
+        )?;
+        engine
+    };
 
     let store = open_store(cfg)?;
     let started = std::time::Instant::now();
