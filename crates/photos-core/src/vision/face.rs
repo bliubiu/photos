@@ -81,7 +81,8 @@ const RF_MIN_SIZES: [[f32; 2]; 3] = [[16.0, 32.0], [64.0, 128.0], [256.0, 512.0]
 const RF_STEPS: [f32; 3] = [8.0, 16.0, 32.0];
 const RF_VARIANCE: [f32; 2] = [0.1, 0.2];
 
-/// 生成 RetinaFace 归一化 prior（中心 x/y + 宽/高，均相对输入图像尺寸）
+/// 生成 RetinaFace prior（对齐 Hivision prior_box.py）：中心 x/y 相对特征图尺寸归一化
+/// [0,1]，宽/高相对输入图像尺寸归一化（min_size / image_w|h）
 fn retinaface_priors(image_h: u32, image_w: u32) -> Vec<[f32; 4]> {
     let mut priors = Vec::new();
     for (idx, step) in RF_STEPS.iter().enumerate() {
@@ -92,7 +93,7 @@ fn retinaface_priors(image_h: u32, image_w: u32) -> Vec<[f32; 4]> {
                 for &min_size in &RF_MIN_SIZES[idx] {
                     let s_kx = min_size / image_w as f32;
                     let s_ky = min_size / image_h as f32;
-                    priors.push([x as f32 + 0.5, y as f32 + 0.5, s_kx, s_ky]);
+                    priors.push([(x as f32 + 0.5) / fw as f32, (y as f32 + 0.5) / fh as f32, s_kx, s_ky]);
                 }
             }
         }
@@ -105,32 +106,22 @@ pub fn retinaface_prior_count(image_size: (u32, u32)) -> usize {
     retinaface_priors(image_size.0, image_size.1).len()
 }
 
-/// SSD 式解码：prior 中心 + loc 偏移 → 绝对归一化坐标 [x1, y1, x2, y2]
-fn decode_box(loc: &[f32], prior: &[f32; 4], variance: f32) -> [f32; 4] {
-    let cx = prior[0] + loc[0] * variance * prior[2];
-    let cy = prior[1] + loc[1] * variance * prior[3];
-    let w = prior[2] * (loc[2] * variance).exp();
-    let h = prior[3] * (loc[3] * variance).exp();
+/// SSD 式解码（对齐 Hivision box_utils.decode）：prior 中心 + loc 偏移（variance[0]=0.1），
+/// 宽高 exp 缩放（variance[1]=0.2），输出 [x1, y1, x2, y2] 归一化坐标
+fn decode_box(loc: &[f32], prior: &[f32; 4]) -> [f32; 4] {
+    let cx = prior[0] + loc[0] * RF_VARIANCE[0] * prior[2];
+    let cy = prior[1] + loc[1] * RF_VARIANCE[0] * prior[3];
+    let w = prior[2] * (loc[2] * RF_VARIANCE[1]).exp();
+    let h = prior[3] * (loc[3] * RF_VARIANCE[1]).exp();
     [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0]
 }
 
-/// 5 点关键点解码：前三点中心偏移，后两点按 prior 尺寸缩放
-fn decode_landm(lm: &[f32], prior: &[f32; 4], variance: f32) -> [f32; 10] {
+/// 5 点关键点解码（对齐 Hivision box_utils.decode_landm）：5 点均为中心偏移公式
+fn decode_landm(lm: &[f32], prior: &[f32; 4]) -> [f32; 10] {
     let mut out = [0.0f32; 10];
     for k in 0..5 {
-        let (px, py) = if k < 3 {
-            (
-                prior[0] + lm[2 * k] * variance * prior[2],
-                prior[1] + lm[2 * k + 1] * variance * prior[3],
-            )
-        } else {
-            (
-                prior[0] + prior[2] * lm[2 * k] * variance,
-                prior[1] + prior[3] * lm[2 * k + 1] * variance,
-            )
-        };
-        out[2 * k] = px;
-        out[2 * k + 1] = py;
+        out[2 * k] = prior[0] + lm[2 * k] * RF_VARIANCE[0] * prior[2];
+        out[2 * k + 1] = prior[1] + lm[2 * k + 1] * RF_VARIANCE[0] * prior[3];
     }
     out
 }
@@ -192,8 +183,8 @@ pub fn decode_retinaface(
         if score < score_threshold {
             continue;
         }
-        let b = decode_box(&boxes.data[i * 4..i * 4 + 4], &priors[i], RF_VARIANCE[0]);
-        let lm = decode_landm(&landmarks.data[i * 10..i * 10 + 10], &priors[i], RF_VARIANCE[1]);
+        let b = decode_box(&boxes.data[i * 4..i * 4 + 4], &priors[i]);
+        let lm = decode_landm(&landmarks.data[i * 10..i * 10 + 10], &priors[i]);
         let mut points = [Point2::new(0.0, 0.0); 5];
         for (k, p) in points.iter_mut().enumerate() {
             *p = Point2::new(lm[k * 2] as f64 * iw as f64, lm[k * 2 + 1] as f64 * ih as f64);
@@ -263,24 +254,24 @@ mod tests {
         let p = retinaface_priors(640, 640);
         assert_eq!(p.len(), 80 * 80 * 2 + 40 * 40 * 2 + 20 * 20 * 2);
         assert_eq!(p.len(), 16800);
-        // 首个 prior：stride8 cell(0,0) min16 → 中心 (0.5, 0.5)，尺寸 16/640
-        assert_eq!(p[0], [0.5, 0.5, 16.0 / 640.0, 16.0 / 640.0]);
+        // 首个 prior：stride8 cell(0,0) min16 → 中心 (0.5/80, 0.5/80)，尺寸 16/640
+        assert_eq!(p[0], [0.5 / 80.0, 0.5 / 80.0, 16.0 / 640.0, 16.0 / 640.0]);
         // 第二个：同 cell min32
-        assert_eq!(p[1], [0.5, 0.5, 32.0 / 640.0, 32.0 / 640.0]);
+        assert_eq!(p[1], [0.5 / 80.0, 0.5 / 80.0, 32.0 / 640.0, 32.0 / 640.0]);
     }
 
     #[test]
     fn prior解码公式() {
         // loc 全 0 → bbox 为 prior 中心 ± 半尺寸；landmark 全 0 → 全部落在 prior 中心
         let prior = [0.5, 0.5, 0.25, 0.25];
-        let b = decode_box(&[0.0; 4], &prior, RF_VARIANCE[0]);
+        let b = decode_box(&[0.0; 4], &prior);
         assert!((b[0] - 0.375).abs() < 1e-6);
         assert!((b[1] - 0.375).abs() < 1e-6);
         assert!((b[2] - 0.625).abs() < 1e-6);
-        // loc 正向偏移 → 中心右移、尺寸增大
-        let b2 = decode_box(&[1.0, 1.0, 1.0, 1.0], &prior, RF_VARIANCE[0]);
-        assert!(b2[0] > b[0] && b2[2] > b[2]);
-        let lm = decode_landm(&[0.0; 10], &prior, RF_VARIANCE[1]);
+        // loc 正向偏移 → 中心右移、尺寸增大（variance[1]=0.2 的 exp 缩放）
+        let b2 = decode_box(&[1.0, 1.0, 1.0, 1.0], &prior);
+        assert!((b2[0] + b2[2]) / 2.0 > 0.5 && b2[2] - b2[0] > 0.25);
+        let lm = decode_landm(&[0.0; 10], &prior);
         for i in 0..5 {
             assert!((lm[2 * i] - 0.5).abs() < 1e-6);
             assert!((lm[2 * i + 1] - 0.5).abs() < 1e-6);
@@ -290,16 +281,16 @@ mod tests {
     #[test]
     fn 解码过滤nms与坐标还原() {
         // image_size 64x64 → 168 个 prior（候选），loc/landmark 全 0。
-        // prior 生成顺序：y 外层、x 内层，每 cell 两个 min_size。
-        // prior[0]（y=0,x=0,min16）→ bbox (24,24,40,40) 高分 A
-        // prior[2]（y=0,x=1,min16）→ (88,24,104,40) C；prior[3]（y=0,x=1,min32）→ (80,16,112,48) D（与 C IoU 0.25）
+        // prior 生成顺序：y 外层、x 内层，每 cell 两个 min_size，中心相对特征图归一化。
+        // prior[70]（cell(4,3) min16）→ bbox (20,28,36,44) 高分 A
+        // prior[72]（cell(4,4) min16）→ (28,28,44,44) C；prior[73]（cell(4,4) min32）→ (20,20,52,52) D（与 C IoU 0.25）
         let n = 168usize;
         let scores = {
             let mut s = vec![0.0f32; n];
-            s[0] = 0.9; // A
-            s[1] = 0.05; // 低分过滤
-            s[2] = 0.8; // C
-            s[3] = 0.85; // D
+            s[70] = 0.9; // A
+            s[71] = 0.05; // 低分过滤
+            s[72] = 0.8; // C
+            s[73] = 0.85; // D
             s
         };
         let dets = decode_retinaface(
@@ -317,17 +308,17 @@ mod tests {
         .unwrap();
         // A、D、C 均保留（D 与 C IoU 0.25 < 0.5）
         assert_eq!(dets.len(), 3);
-        // A 坐标还原：x = (24-10)/2 = 7
+        // A 坐标还原：x = (20-10)/2 = 5
         let a = &dets[0];
-        assert!((a.face.x1 - 7.0).abs() < 1e-3);
-        assert!((a.face.y1 - 2.0).abs() < 1e-3); // (24-20)/2
-        // C 还原：y1 = (24-20)/2 = 2，x1 = (88-10)/2 = 39
+        assert!((a.face.x1 - 5.0).abs() < 1e-3);
+        assert!((a.face.y1 - 4.0).abs() < 1e-3); // (28-20)/2
+        // C 还原：y1 = (28-20)/2 = 4，x1 = (28-10)/2 = 9
         let c = &dets[2];
-        assert!((c.face.x1 - 39.0).abs() < 1e-3);
-        assert!((c.face.y1 - 2.0).abs() < 1e-3);
-        // 关键点还原：loc 全 0 → prior[0] 中心 (32,32) → (32-10)/2=11, (32-20)/2=6
-        assert!((a.landmarks[0].x - 11.0).abs() < 1e-3);
-        assert!((a.landmarks[0].y - 6.0).abs() < 1e-3);
+        assert!((c.face.x1 - 9.0).abs() < 1e-3);
+        assert!((c.face.y1 - 4.0).abs() < 1e-3);
+        // 关键点还原：loc 全 0 → prior[70] 中心 (28,36) → (28-10)/2=9, (36-20)/2=8
+        assert!((a.landmarks[0].x - 9.0).abs() < 1e-3);
+        assert!((a.landmarks[0].y - 8.0).abs() < 1e-3);
     }
 
     #[test]
@@ -351,11 +342,11 @@ mod tests {
     #[test]
     fn 两列分数布局取人脸分数列() {
         // 真实 RetinaFace 输出 scores [1, N, 2]：背景分在前、人脸分在后 → 取后一列
-        // 168 个候选，仅候选 1 高分 → prior[1]（min32 cell(0,0)）→ bbox (16,16,48,48)
+        // 168 个候选，仅候选 73 高分 → prior[73]（cell(4,4) min32）→ bbox (20,20,52,52)
         let n = 168usize;
         let mut scores = vec![0.0f32; n * 2];
-        scores[1 * 2 + 1] = 0.95; // 候选 1 人脸分
-        scores[1 * 2] = 0.05;
+        scores[73 * 2 + 1] = 0.95; // 候选 73 人脸分
+        scores[73 * 2] = 0.05;
         let dets = decode_retinaface(
             &TensorData::new(vec![1, n as i64, 2], scores).unwrap(),
             &TensorData::new(vec![1, n as i64, 4], vec![0.0; n * 4]).unwrap(),
@@ -370,7 +361,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dets.len(), 1);
-        assert!((dets[0].face.x1 - 16.0).abs() < 1e-3);
-        assert!((dets[0].face.y1 - 16.0).abs() < 1e-3);
+        assert!((dets[0].face.x1 - 20.0).abs() < 1e-3);
+        assert!((dets[0].face.y1 - 20.0).abs() < 1e-3);
     }
 }

@@ -11,7 +11,7 @@ use image::{GrayImage, RgbImage};
 use crate::config::Config;
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
-use crate::preprocess::{build_input, probability_map};
+use crate::preprocess::{build_input, probability_map, LetterBox};
 use crate::vision::affine::rotate_image_same;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
@@ -93,7 +93,6 @@ pub fn run_pipeline(
     let mat_spec = cfg.model_spec(&suite.matting)?;
     let mat_in = build_input(&img, &mat_spec.input_dims, false)?;
     let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
-
     // 4. 解码：人脸框 + 5 关键点、17 关键点、概率 mask（mask 输出尺寸与原图不一致时先 resize）
     let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
         Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
@@ -117,7 +116,7 @@ pub fn run_pipeline(
         .first()
         .ok_or_else(|| CoreError::Image("未检测到人脸".into()))?;
     let kps = decode_movenet(&kp_outs[0], w, h)?;
-    let mask = probability_mask(&mat_outs[0], w, h)?;
+    let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
 
     // 5. 姿态角度求解（0.6 头部 + 0.4 肩线，缺失降级并告警）
     let mut warnings = Vec::new();
@@ -152,20 +151,25 @@ pub fn run_pipeline(
     })
 }
 
-/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（resize 对齐 + 阈值化 + 形态学去噪）
-fn probability_mask(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage> {
-    let prob = probability_map(out, w, h)?;
+/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（letterbox 逆变换 + 阈值化 + 形态学去噪）
+fn probability_mask(
+    out: &TensorData,
+    w: u32,
+    h: u32,
+    letterbox: Option<&LetterBox>,
+) -> CoreResult<GrayImage> {
+    let prob = probability_map(out, w, h, letterbox)?;
     let bin = threshold_mask(&prob, MASK_THRESHOLD);
     Ok(morph_open(&bin, MASK_MORPH_RADIUS))
 }
 
 /// 演示引擎：balanced 三件套内置 mock 回放（`photos process --demo` 与测试共用）。
-/// 人脸框接近全图（候选 idx 16001 = stride32 cell(0,0) min512，loc 全 0 解码）、
+/// 人脸框接近全图（候选 idx 16421 = stride32 cell(10,10) min512，loc 全 0 解码 → 中心 336/640、半宽 256）、
 /// 双眼/双肩水平（融合角 0）、mask 为中心椭圆（可演示换底色）。
 pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
     let (fw, fh) = (w as f32, h as f32);
     let n = retinaface_prior_count((640, 640));
-    let face_idx = 16001usize; // 解码后 bbox ≈ (0.1,0.1,0.9,0.9)*640 → 还原后接近全图
+    let face_idx = 16421usize; // stride32 cell(10,10) min512 → 解码 bbox (80,80,592,592)/640 → 还原后接近全图
     let mut conf = vec![0.0f32; n * 2];
     conf[face_idx * 2] = 0.01;
     conf[face_idx * 2 + 1] = 0.99;
@@ -187,22 +191,27 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         kp[i * 3 + 1] = x * fw;
         kp[i * 3 + 2] = 0.99;
     }
-    // mask：中心椭圆不透明（a=0.32w、b=0.38h），边缘透明以演示换底色
-    let cx = fw / 2.0;
-    let cy = fh / 2.0;
+    // mask：中心椭圆不透明（a=0.32w、b=0.38h），边缘透明以演示换底色。
+    // 与真实 BiRefNet 输出一致：先按原图生成椭圆，再 letterbox 到 1024x1024 画布，
+    // 使 pipeline 的 letterbox 逆变换能还原回原图几何
+    let mut el = RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
     let a = 0.32 * fw;
     let b = 0.38 * fh;
-    let mut matting = vec![0.0f32; (w * h) as usize];
     for y in 0..h {
         for x in 0..w {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
+            let dx = x as f32 - fw / 2.0;
+            let dy = y as f32 - fh / 2.0;
             if dx * dx / (a * a) + dy * dy / (b * b) <= 1.0 {
-                matting[(y * w + x) as usize] = 1.0;
+                el.put_pixel(x, y, image::Rgb([255, 255, 255]));
             }
         }
     }
-    let matting = TensorData::new(vec![1, 1, h as i64, w as i64], matting).unwrap();
+    let (canvas, _) = crate::preprocess::letterbox(&el, 1024, 1024);
+    let matting = canvas
+        .pixels()
+        .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
+        .collect::<Vec<f32>>();
+    let matting = TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap();
     FakeEngine::balanced_stub(face_out, vec![TensorData::new(vec![1, 17, 3], kp).unwrap()], vec![matting])
 }
 
@@ -320,8 +329,8 @@ mod tests {
                 ]
             },
             vec![TensorData::new(vec![1, 17, 3], vec![0.0; 17 * 3]).unwrap()],
-            // mask 尺寸与原图不符（60x50 vs 50x60，模拟 BiRefNet 输出 ≠ 原图）→ 自动 resize 对齐
-            vec![TensorData::new(vec![1, 1, 50, 60], vec![0.0; 50 * 60]).unwrap()],
+            // mask 为 1024x1024 letterbox 画布布局（模拟 BiRefNet 输出 ≠ 原图尺寸）→ 逆变换对齐
+            vec![TensorData::new(vec![1, 1, 1024, 1024], vec![0.0; 1024 * 1024]).unwrap()],
         );
         let req = ProcessRequest {
             input,

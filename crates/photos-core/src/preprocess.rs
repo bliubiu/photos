@@ -127,10 +127,16 @@ fn rgb_to_nhwc(img: &RgbImage) -> Vec<f32> {
 }
 
 /// 概率 mask 张量 `[1,1,H,W]`（行主序，值域 [0,1]）→ 原图尺寸灰度概率图。
-/// 输出尺寸与原图不一致时先 resize 回原图（如 BiRefNet 输出 1024x1024 ≠ 原图）。
 /// BiRefNet 等模型输出为 logits（值域可超 [0,1]），先整体判定：全部落在 [0,1] 视为概率
 /// 直接使用，否则过 sigmoid 归一化（避免负 logit 被硬钳为 0、正 logit 硬切为 255）。
-pub fn probability_map(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage> {
+/// `letterbox` 提供模型输入的画布几何：mask 是整幅 letterbox 画布，须先按逆变换裁出内容区
+/// 再等比还原到原图（直接整幅 resize 会因灰边产生几何畸变、mask 与人像错位）。
+pub fn probability_map(
+    out: &TensorData,
+    w: u32,
+    h: u32,
+    letterbox: Option<&LetterBox>,
+) -> CoreResult<GrayImage> {
     let n = out.shape.len();
     let out_w = out.dim(n - 1).max(1) as u32;
     let out_h = out.dim(n - 2).max(1) as u32;
@@ -146,7 +152,15 @@ pub fn probability_map(out: &TensorData, w: u32, h: u32) -> CoreResult<GrayImage
         };
         p[0] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     }
-    if prob.dimensions() != (w, h) {
+    if let Some(lb) = letterbox {
+        // 逆 letterbox：裁出等比内容区（含 pad 偏移），再缩放到原图尺寸
+        let cw = (lb.scale * w as f32).round().max(1.0) as u32;
+        let ch = (lb.scale * h as f32).round().max(1.0) as u32;
+        let cx = lb.pad_x.max(0.0) as u32;
+        let cy = lb.pad_y.max(0.0) as u32;
+        let sub = image::imageops::crop_imm(&prob, cx, cy, cw.min(out_w - cx), ch.min(out_h - cy)).to_image();
+        Ok(image::imageops::resize(&sub, w, h, image::imageops::FilterType::Triangle))
+    } else if prob.dimensions() != (w, h) {
         Ok(image::imageops::resize(&prob, w, h, image::imageops::FilterType::Triangle))
     } else {
         Ok(prob)
@@ -240,17 +254,17 @@ mod tests {
     fn 概率图尺寸对齐() {
         // 输出 2x2 概率，目标 4x4 → resize 回 4x4
         let t = TensorData::new(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]).unwrap();
-        let m = probability_map(&t, 4, 4).unwrap();
+        let m = probability_map(&t, 4, 4, None).unwrap();
         assert_eq!(m.dimensions(), (4, 4));
         assert!(m.pixels().all(|p| p[0] >= 250)); // 全 1 → 全 255
         // 输出与原图同尺寸 → 不 resize
         let t2 = TensorData::new(vec![1, 1, 2, 2], vec![0.5, 0.5, 0.5, 0.5]).unwrap();
-        let m2 = probability_map(&t2, 2, 2).unwrap();
+        let m2 = probability_map(&t2, 2, 2, None).unwrap();
         assert_eq!(m2.dimensions(), (2, 2));
         assert!(m2.pixels().all(|p| p[0] == 128));
         // 超 [0,1] 值视为 logits → sigmoid(2.0) ≈ 0.8808 → 225
         let t3 = TensorData::new(vec![1, 1, 1, 1], vec![2.0]).unwrap();
-        let m3 = probability_map(&t3, 1, 1).unwrap();
+        let m3 = probability_map(&t3, 1, 1, None).unwrap();
         assert_eq!(m3.get_pixel(0, 0)[0], 225);
     }
 
@@ -258,7 +272,7 @@ mod tests {
     fn logits输出先过sigmoid() {
         // BiRefNet logits：负 → 接近 0，正 → 接近 255（sigmoid 后按概率量化）
         let t = TensorData::new(vec![1, 1, 2, 2], vec![-3.0, 3.0, 0.0, 0.5]).unwrap();
-        let m = probability_map(&t, 2, 2).unwrap();
+        let m = probability_map(&t, 2, 2, None).unwrap();
         let s = |v: f32| (1.0 / (1.0 + (-v).exp()) * 255.0).round() as u8;
         assert_eq!(m.get_pixel(0, 0)[0], s(-3.0));
         assert_eq!(m.get_pixel(1, 0)[0], s(3.0));
@@ -266,7 +280,24 @@ mod tests {
         assert_eq!(m.get_pixel(1, 1)[0], s(0.5));
         // 全概率输入不受影响
         let t2 = TensorData::new(vec![1, 1, 1, 1], vec![0.8]).unwrap();
-        let m2 = probability_map(&t2, 1, 1).unwrap();
+        let m2 = probability_map(&t2, 1, 1, None).unwrap();
         assert_eq!(m2.get_pixel(0, 0)[0], 204);
+    }
+
+    #[test]
+    fn letterbox画布逆变换还原mask() {
+        // 模型输入 100x100 letterbox（scale 0.5, pad_y 25）：内容区 50x50 在画布中央，前景全 1
+        let mut img = GrayImage::new(50, 50);
+        for p in img.pixels_mut() {
+            p[0] = 255;
+        }
+        let mut canvas = GrayImage::from_pixel(100, 100, image::Luma([0u8]));
+        image::imageops::replace(&mut canvas, &img, 0, 25);
+        let t = TensorData::new(vec![1, 1, 100, 100], canvas.pixels().map(|p| p[0] as f32 / 255.0).collect()).unwrap();
+        let lb = LetterBox { scale: 0.5, pad_x: 0.0, pad_y: 25.0 };
+        let m = probability_map(&t, 100, 50, Some(&lb)).unwrap();
+        assert_eq!(m.dimensions(), (100, 50));
+        // 逆变换后前景应铺满原图（内容区 50x50 还原到 100x50）
+        assert!(m.pixels().all(|p| p[0] >= 250), "前景未铺满原图");
     }
 }
