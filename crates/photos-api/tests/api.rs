@@ -244,6 +244,63 @@ async fn 美颜开启任务成功且记录参数() {
 }
 
 #[tokio::test]
+async fn 换装样式非法返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"dress":{"enabled":true,"style":"tuxedo"}}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "INVALID_PARAMS");
+    assert!(json["message"].as_str().unwrap().contains("未知正装样式"));
+}
+
+#[tokio::test]
+async fn 换装开启任务成功且记录参数() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"dress":{"enabled":true,"style":"suit_navy"}}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = json["id"].as_str().unwrap();
+    let mut detail = json.clone();
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (s, j) = send(&app, req).await;
+        assert_eq!(s, StatusCode::OK);
+        detail = j;
+        if detail["status"] != "queued" && detail["status"] != "running" {
+            break;
+        }
+    }
+    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    // 任务记录含换装参数（正装样式）
+    assert!(detail["dress"].as_str().unwrap().contains("suit_navy"));
+}
+
+#[tokio::test]
 async fn 不支持媒体返回415() {
     let t = TestApp::new();
     let app = t.app();

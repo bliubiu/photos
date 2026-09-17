@@ -27,6 +27,7 @@ pub struct TaskRecord {
     pub size: String,
     pub backgrounds: String,
     pub beauty: String,
+    pub dress: String,
     pub rotate: Option<f64>,
     pub outputs: String,
     pub status: String,
@@ -44,6 +45,7 @@ pub struct NewTask {
     pub size: String,
     pub backgrounds: String,
     pub beauty: String,
+    pub dress: String,
     pub rotate: Option<f64>,
     pub outputs: String,
     pub status: String,
@@ -82,6 +84,7 @@ impl Store {
                     size        TEXT NOT NULL,
                     backgrounds TEXT NOT NULL,
                     beauty      TEXT NOT NULL DEFAULT '',
+                    dress       TEXT NOT NULL DEFAULT '',
                     rotate      REAL NULL,
                     outputs     TEXT NOT NULL DEFAULT '',
                     status      TEXT NOT NULL DEFAULT 'queued',
@@ -103,6 +106,23 @@ impl Store {
                 "#,
             )
             .map_err(|e| CoreError::Storage(format!("建表失败：{e}")))?;
+        // 旧库迁移：v2 新增 dress 列（CREATE TABLE IF NOT EXISTS 不作用于已存在的表）
+        let has_dress = {
+            let mut stmt = self
+                .conn
+                .prepare("PRAGMA table_info(task_history)")
+                .map_err(|e| CoreError::Storage(format!("查询任务表结构失败：{e}")))?;
+            let cols = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(|e| CoreError::Storage(format!("查询任务表结构失败：{e}")))?;
+            cols.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| CoreError::Storage(format!("查询任务表结构失败：{e}")))?
+        };
+        if !has_dress.iter().any(|c| c == "dress") {
+            self.conn
+                .execute_batch("ALTER TABLE task_history ADD COLUMN dress TEXT NOT NULL DEFAULT ''")
+                .map_err(|e| CoreError::Storage(format!("迁移任务表新增 dress 列失败：{e}")))?;
+        }
         Ok(())
     }
 
@@ -177,14 +197,15 @@ impl Store {
         self.conn
             .execute(
                 "INSERT INTO task_history
-                 (input_path, mode, size, backgrounds, beauty, rotate, outputs, status, message, warnings, created_at, elapsed_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 (input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     t.input_path,
                     t.mode,
                     t.size,
                     t.backgrounds,
                     t.beauty,
+                    t.dress,
                     t.rotate,
                     t.outputs,
                     t.status,
@@ -223,7 +244,7 @@ impl Store {
     pub fn get_task(&self, id: i64) -> CoreResult<Option<TaskRecord>> {
         self.conn
             .query_row(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, rotate, outputs, status, message, warnings, created_at, elapsed_ms
+                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
                  FROM task_history WHERE id = ?1",
                 params![id],
                 row_to_task,
@@ -237,7 +258,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, rotate, outputs, status, message, warnings, created_at, elapsed_ms
+                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
                  FROM task_history ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| CoreError::Storage(format!("准备任务列表查询失败：{e}")))?;
@@ -260,7 +281,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, rotate, outputs, status, message, warnings, created_at, elapsed_ms
+                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
                  FROM task_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| CoreError::Storage(format!("准备任务分页查询失败：{e}")))?;
@@ -280,13 +301,14 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         size: row.get(3)?,
         backgrounds: row.get(4)?,
         beauty: row.get(5)?,
-        rotate: row.get(6)?,
-        outputs: row.get(7)?,
-        status: row.get(8)?,
-        message: row.get(9)?,
-        warnings: row.get(10)?,
-        created_at: row.get(11)?,
-        elapsed_ms: row.get(12)?,
+        dress: row.get(6)?,
+        rotate: row.get(7)?,
+        outputs: row.get(8)?,
+        status: row.get(9)?,
+        message: row.get(10)?,
+        warnings: row.get(11)?,
+        created_at: row.get(12)?,
+        elapsed_ms: row.get(13)?,
     })
 }
 
@@ -307,6 +329,7 @@ mod tests {
             size: "one_inch".into(),
             backgrounds: "white".into(),
             beauty: String::new(),
+            dress: String::new(),
             rotate: Some(2.5),
             outputs: r#"[{"kind":"证件照","path":"data/out/task_1_one_inch_white.jpg"}]"#.into(),
             status: "succeeded".into(),

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use image::{GrayImage, RgbImage};
+use image::{GrayImage, Luma, RgbImage};
 
 use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
@@ -16,6 +16,7 @@ use crate::vision::affine::rotate_image_same;
 use crate::vision::beauty::apply_beauty;
 use crate::vision::blend::composite_feathered;
 use crate::vision::crop::{compute_crop, crop_resize};
+use crate::vision::dressing::{SuitStyle, self};
 use crate::vision::face::{decode_retinaface, retinaface_prior_count};
 use crate::vision::geometry::{
     RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
@@ -57,6 +58,8 @@ pub struct ProcessRequest {
     pub layout: Option<String>,
     /// 美颜参数（None 不美颜；Some 时未指定的强度取全局配置 `[beauty]` 默认值）
     pub beauty: Option<BeautyParams>,
+    /// 换装参数（None 不换装；启用时人像解析 + 服装贴合，作用于纠偏后原图）
+    pub dress: Option<DressParams>,
 }
 
 /// 美颜请求参数（M4 实现算子）
@@ -70,6 +73,17 @@ pub struct BeautyParams {
     pub brighten: Option<f64>,
     /// 美白强度（可选，默认取全局配置）
     pub whiten: Option<f64>,
+}
+
+/// 换装请求参数（人像解析 + 服装贴合，M4 遗留项落地）
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DressParams {
+    /// 是否启用换装
+    pub enabled: bool,
+    /// 用户服装图路径（可选，优先于 `style`）
+    pub garment: Option<PathBuf>,
+    /// 程序化正装样式（suit_navy | suit_black | shirt_white；无 garment 时生效）
+    pub style: Option<String>,
 }
 
 /// 单底色产物（证件照或效果图）
@@ -174,10 +188,42 @@ pub fn run_pipeline(
     // 6. 同步几何纠偏（同一仿射矩阵变换原图与 mask）
     let (rot_img, rot_mask) = rotate_image_same(&img, &mask, decision.correction())?;
 
-    // 6.5 美颜（可选）：换底色前对旋转后原图做磨皮/提亮/美白（美颜不改变 mask 与裁剪框）
+    // 6.5 换装（可选）：人像解析 → 衣服 mask → 服装贴合（作用于旋转后原图，美颜之前）。
+    // 解析模型独立于三模式套件，按需惰性装载（失败给出中文指引）。
+    let dressed = match &req.dress {
+        Some(d) if d.enabled => {
+            engine.load(cfg, dressing::PARSING_MODEL_ID, suite.execution_provider)?;
+            let p_spec = cfg.model_spec(dressing::PARSING_MODEL_ID)?;
+            let p_in = build_input(&rot_img, &p_spec.input_dims, false)?;
+            let p_outs = engine.run(dressing::PARSING_MODEL_ID, &p_in.tensor)?;
+            let parsing = dressing::decode_parsing(
+                &p_outs[0],
+                rot_img.width(),
+                rot_img.height(),
+                p_in.letterbox.as_ref(),
+            )?;
+            let clothes = dressing::clothes_mask(&parsing);
+            let garment = match &d.garment {
+                Some(path) => image::open(path)
+                    .map_err(|e| {
+                        CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display()))
+                    })?
+                    .to_rgb8(),
+                None => dressing::formal_suit(
+                    SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy"))?,
+                    240,
+                    360,
+                ),
+            };
+            dressing::fit_garment(&rot_img, &garment, &clothes)?
+        }
+        _ => rot_img.clone(),
+    };
+
+    // 6.6 美颜（可选）：换底色前对换装后原图做磨皮/提亮/美白（美颜不改变 mask 与裁剪框）
     let beautified = match &req.beauty {
         Some(p) if p.enabled => apply_beauty(
-            &rot_img,
+            &dressed,
             &BeautyConfig {
                 enabled: true,
                 skin_smooth: p.skin_smooth.unwrap_or(cfg.beauty.skin_smooth),
@@ -185,7 +231,7 @@ pub fn run_pipeline(
                 whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
             },
         ),
-        _ => rot_img.clone(),
+        _ => dressed,
     };
 
     // 7. 换底色（mask 羽化后逐像素 alpha 混合，按底色重复；廉价操作只做一次检测/抠图/纠偏）
@@ -306,11 +352,39 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
         .collect::<Vec<f32>>();
     let matting = TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap();
+    // 人像解析 stub：同一人形椭圆，上半（y < 中心）为 13 脸、下半为 5 上衣；
+    // letterbox 到 473x473 画布后转 one-hot logits（对应类 +10，其余 -10）
+    let mut cls = GrayImage::from_pixel(w, h, Luma([0u8]));
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 - fw / 2.0;
+            let dy = y as f32 - fh / 2.0;
+            if dx * dx / (a * a) + dy * dy / (b * b) <= 1.0 {
+                let c = if (y as f32) < fh / 2.0 { 13u8 } else { 5u8 };
+                cls.put_pixel(x, y, Luma([c]));
+            }
+        }
+    }
+    let cls_rgb = image::ImageBuffer::from_fn(w, h, |x, y| {
+        let c = cls.get_pixel(x, y)[0];
+        image::Rgb([c, c, c])
+    });
+    let (p_canvas, _) = crate::preprocess::letterbox(&cls_rgb, 473, 473);
+    let hw = 473usize * 473;
+    let mut logits = vec![-10.0f32; hw * 20];
+    for (i, p) in p_canvas.pixels().enumerate() {
+        let c = p[0] as usize;
+        if (0..20).contains(&c) {
+            logits[c * hw + i] = 10.0;
+        }
+    }
+    let parsing = TensorData::new(vec![1, 20, 473, 473], logits).unwrap();
     FakeEngine::balanced_stub(
         face_out,
         vec![TensorData::new(vec![1, 17, 3], kp).unwrap()],
         vec![matting],
     )
+    .stub("parsing_lip", vec![parsing])
 }
 
 /// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；缺失时降级并记录告警
@@ -355,6 +429,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -381,6 +456,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
             rotate: Some(10.0),
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -410,6 +486,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
             rotate: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
@@ -449,6 +526,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -479,6 +557,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         assert_eq!(result.photos.len(), 3);
@@ -514,6 +593,7 @@ mod tests {
             effect: true,
             layout: None,
             beauty: None,
+            dress: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图 = 旋转后全图尺寸（纠偏角 0 → 原图 100x140）
@@ -541,6 +621,7 @@ mod tests {
             effect: false,
             layout: Some("6inch".into()),
             beauty: None,
+            dress: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         let canvas = result.layout.expect("应有排版相纸");
@@ -565,6 +646,7 @@ mod tests {
             effect: false,
             layout: None,
             beauty: None,
+            dress: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
         assert!(err.to_string().contains("底色"), "实际：{err}");
@@ -578,6 +660,7 @@ mod tests {
             effect: false,
             layout: Some("b5".into()),
             beauty: None,
+            dress: None,
         };
         let err2 = run_pipeline(&cfg, &mut engine, &req2).unwrap_err();
         assert!(err2.to_string().contains("未知排版"), "实际：{err2}");
@@ -602,6 +685,7 @@ mod tests {
             effect: true,
             layout: None,
             beauty: None,
+            dress: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -621,6 +705,7 @@ mod tests {
                 brighten: Some(0.3),
                 whiten: None, // 未指定 → 取全局配置 0.1
             }),
+            dress: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -634,5 +719,56 @@ mod tests {
         let eb = base.effects[0].image.get_pixel(50, 70);
         let ea = result.effects[0].image.get_pixel(50, 70);
         assert!(ea[0] > eb[0], "效果图人像区美颜后 {ea:?} 应亮于基准 {eb:?}");
+    }
+
+    #[test]
+    fn 换装正装覆盖衣服区域() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+
+        // 基准：不换装
+        let mut engine = demo_balanced_engine(100, 140);
+        let base = ProcessRequest {
+            input: input.clone(),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: None,
+        };
+        let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
+
+        // 换装：程序化藏青正装
+        let mut engine2 = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: Some(DressParams {
+                enabled: true,
+                garment: None,
+                style: Some("suit_navy".into()),
+            }),
+        };
+        let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
+
+        // 衣服区（下半人形椭圆中心 (50,105)）：换装后为藏青 (31,56,100)，原图为 (10,20,30)
+        let pb = *base.effects[0].image.get_pixel(50, 105);
+        let pa = *result.effects[0].image.get_pixel(50, 105);
+        assert!(pb[2] < 60, "基准衣服区不应为藏青：{pb:?}");
+        assert!(pa[2] > 60 && pa[0] < 80, "换装后衣服区应偏藏青，实际 {pa:?}");
+        // 效果图尺寸保持全图
+        assert_eq!(result.effects[0].image.dimensions(), (100, 140));
     }
 }

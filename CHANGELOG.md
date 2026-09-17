@@ -2,6 +2,22 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.7] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M4 换装】新增 `vision/dressing.rs`：人像解析（LIP 20 类语义分割）+ 服装贴合——`decode_parsing`（argmax + letterbox 逆变换 + 最近邻还原，兼容 NCHW/NHWC）、`clothes_mask`（服装类 5 上衣/6 连衣裙/7 外套/10 连体裤）、`fit_garment`（按衣服包围盒等比缩放居中贴合 + 边缘羽化合成）、`formal_suit`（程序化正装：藏青/黑西装 + 白衬衫 V 领、白衬衫，无外部素材）
+- 【M4 换装模型】注册 `parsing_lip` 模型（`models/parsing_lip.onnx`，`[1,3,473,473]`，SCNet LIP 20 类；独立于三模式套件，按需惰性装载，缺失自动下载）
+- 【M4 换装链路】`ProcessRequest.dress` 新增 `Option<DressParams>`（enabled + garment 服装图 + style 正装样式）；pipeline 纠偏后、美颜前插入换装，证件照与效果图同步生效；演示引擎 stub 人形解析输出，`--demo` 可直接演示换装
+- 【M4 换装 CLI】`--dress <服装图>`（用户服装图）或 `--dress-style <suit_navy|suit_black|shirt_white>`（程序化正装，缺省藏青）
+- 【M4 换装 API】`params.dress` 透传（`garment_path`/`style` 至少其一，`garment_path` 优先；`style` 非法或两者皆缺返回 400）；`GET /tasks/{id}` 响应新增 `dress` 字段；任务记录完整保存换装参数
+- 【M4 存储迁移】`task_history` 新增 `dress` 列，旧库启动时 `ALTER TABLE` 幂等补列
+
+### 📚 Docs 文档更新
+- `docs/04-模型清单.md`：新增 `parsing_lip` 条目（OOTDiffusion/humanparsing，占位 sha256）
+- `docs/05-API契约.md`：`dress` 参数约束（样式枚举 + 400 错误码）+ 任务详情 `dress` 字段
+- `docs/03-实施计划.md`：M4 换装落地说明（替换「推迟至后续里程碑」表述）
+- `docs/examples/application.toml`：新增 `[models.parsing_lip]` 样例
+
 ## [2026.09.17.6] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
-use photos_core::pipeline::{BeautyParams, ProcessRequest, demo_balanced_engine, run_pipeline};
+use photos_core::pipeline::{BeautyParams, DressParams, ProcessRequest, demo_balanced_engine, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
 use crate::cli::ProcessArgs;
@@ -169,12 +169,23 @@ fn process_one(
     } else {
         "{}"
     };
+    let dress = if args.dress.is_some() || args.dress_style.is_some() {
+        Some(DressParams {
+            enabled: true,
+            garment: args.dress.clone(),
+            style: args.dress_style.clone(),
+        })
+    } else {
+        None
+    };
+    let dress_json = serde_json::to_string(&dress).unwrap_or_else(|_| "{}".into());
     let task_id = store.insert_task(&NewTask {
         input_path: input.display().to_string(),
         mode: mode.clone(),
         size: size.clone(),
         backgrounds: bgs.join(","),
         beauty: beauty.into(),
+        dress: dress_json,
         rotate: args.rotate,
         outputs: String::new(),
         status: "running".into(),
@@ -201,6 +212,7 @@ fn process_one(
         } else {
             None
         },
+        dress,
     };
     match run_pipeline(cfg, engine, &req) {
         Ok(r) => {

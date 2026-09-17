@@ -5,6 +5,7 @@ pub mod affine;
 pub mod beauty;
 pub mod blend;
 pub mod crop;
+pub mod dressing;
 pub mod face;
 pub mod geometry;
 pub mod keypoint;

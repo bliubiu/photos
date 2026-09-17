@@ -432,6 +432,12 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
             vec![1, 3, 1024, 1024],
         ),
         ("modnet", "models/modnet.onnx", vec![1, 3, 512, 512]),
+        // 人像解析（LIP 20 类语义分割）：虚拟试衣换装用，独立于三模式套件
+        (
+            "parsing_lip",
+            "models/parsing_lip.onnx",
+            vec![1, 3, 473, 473],
+        ),
     ] {
         m.insert(
             id.to_string(),
@@ -459,6 +465,9 @@ fn default_download_url(id: &str) -> Option<ModelDownload> {
         }
         "birefnet_lite" => {
             "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx"
+        }
+        "parsing_lip" => {
+            "https://huggingface.co/levihsu/OOTDiffusion/resolve/main/checkpoints/humanparsing/parsing_lip.onnx"
         }
         _ => return None,
     };

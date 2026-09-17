@@ -102,6 +102,12 @@ pub struct ProcessArgs {
     /// 演示模式：不依赖模型，用内置 mock 回放跑通全链路出图
     #[arg(long)]
     pub demo: bool,
+    /// 用户服装图路径（智能换装：人像解析 + 服装贴合）
+    #[arg(long, value_name = "服装图")]
+    pub dress: Option<PathBuf>,
+    /// 程序化正装样式（suit_navy | suit_black | shirt_white；未提供 --dress 时生效）
+    #[arg(long, value_name = "样式")]
+    pub dress_style: Option<String>,
     /// 输出目录（默认 data/out）
     #[arg(short, long, value_name = "目录")]
     pub out: Option<PathBuf>,

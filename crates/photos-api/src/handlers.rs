@@ -70,6 +70,7 @@ pub struct TaskParams {
     pub size: Option<String>,
     pub backgrounds: Option<Vec<String>>,
     pub beauty: Option<BeautyParams>,
+    pub dress: Option<DressParams>,
     pub rotate: Option<f64>,
     pub layout: Option<String>,
     pub effect_image: Option<bool>,
@@ -88,6 +89,17 @@ pub struct BeautyParams {
     pub whiten: Option<f64>,
 }
 
+/// 换装参数（enabled 开关；garment_path 为服务端已有服装图路径，style 为程序化正装）
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DressParams {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub garment_path: Option<String>,
+    #[serde(default)]
+    pub style: Option<String>,
+}
+
 /// 校验美颜强度取值（0..=1，越界返回中文错误）
 fn validate_beauty(beauty: &Option<BeautyParams>) -> Result<(), ApiError> {
     if let Some(b) = beauty {
@@ -101,6 +113,31 @@ fn validate_beauty(beauty: &Option<BeautyParams>) -> Result<(), ApiError> {
                     return Err(ApiError::InvalidParams(format!(
                         "{name}需在 0..=1 内，收到 {x}"
                     )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 校验换装参数（启用时需提供服装图或合法正装样式）
+fn validate_dress(dress: &Option<DressParams>) -> Result<(), ApiError> {
+    if let Some(d) = dress {
+        if !d.enabled {
+            return Ok(());
+        }
+        if d.garment_path.is_none() {
+            match d.style.as_deref() {
+                Some("suit_navy" | "suit_black" | "shirt_white") => {}
+                Some(other) => {
+                    return Err(ApiError::InvalidParams(format!(
+                        "未知正装样式“{other}”，可选：suit_navy、suit_black、shirt_white"
+                    )));
+                }
+                None => {
+                    return Err(ApiError::InvalidParams(
+                        "换装需提供 garment_path（服装图路径）或 style（正装样式）".into(),
+                    ));
                 }
             }
         }
@@ -282,6 +319,7 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     }
     let effect = params.effect_image.unwrap_or(false);
     validate_beauty(&params.beauty)?;
+    validate_dress(&params.dress)?;
 
     // 4. 模型预检（就绪才受理；缺失返回 503，不自动下载以免阻塞）
     if state.model_precheck {
@@ -313,6 +351,15 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         .to_string(),
         _ => "{}".to_string(),
     };
+    let dress_json = match &params.dress {
+        Some(d) if d.enabled => serde_json::json!({
+            "enabled": true,
+            "garment_path": d.garment_path,
+            "style": d.style,
+        })
+        .to_string(),
+        _ => "{}".to_string(),
+    };
     let (task_id, created_at) = {
         let store = state.store.lock().unwrap();
         let id = store
@@ -322,6 +369,7 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
                 size: size.clone(),
                 backgrounds: bgs.join(","),
                 beauty: beauty_json,
+                dress: dress_json,
                 rotate: params.rotate,
                 outputs: String::new(),
                 status: "queued".into(),
@@ -343,6 +391,7 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         layout: params.layout,
         effect_image: Some(effect),
         beauty: params.beauty,
+        dress: params.dress,
     }, input_path);
 
     // 7. 202 返回
@@ -387,6 +436,11 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             brighten: b.brighten,
             whiten: b.whiten,
         });
+        let dress = params.dress.clone().map(|d| photos_core::pipeline::DressParams {
+            enabled: d.enabled,
+            garment: d.garment_path.map(PathBuf::from),
+            style: d.style,
+        });
 
         let started = std::time::Instant::now();
         let state2 = state.clone();
@@ -399,6 +453,7 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             effect,
             layout: layout.clone(),
             beauty,
+            dress,
         };
         let result = tokio::task::spawn_blocking(move || {
             let (w, h) = image::image_dimensions(&req.input).unwrap_or((640, 640));
@@ -551,6 +606,7 @@ pub async fn get_task(
         "message": if record.message.is_empty() { serde_json::Value::Null } else { json!(record.message) },
         "warnings": serde_json::from_str::<Vec<String>>(&record.warnings).unwrap_or_default(),
         "beauty": record.beauty,
+        "dress": record.dress,
         "elapsed_ms": record.elapsed_ms,
         "created_at": record.created_at,
         "artifacts": artifacts,
