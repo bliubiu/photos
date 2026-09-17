@@ -94,16 +94,9 @@ impl InferenceEngine for FakeEngine {
         if self.stubbed.contains(model_id) {
             return Ok(());
         }
-        // 未 stub：按磁盘校验（复用模型管理逻辑）
-        let spec = cfg.model_spec(model_id)?;
-        let path = crate::model::resolve_model_path(cfg, Path::new(&spec.path));
-        if !path.exists() {
-            return Err(CoreError::Model(format!(
-                "模型“{model_id}”缺失：{}。请按 docs/04-模型清单.md §6 放置模型或使用一键下载",
-                path.display()
-            )));
-        }
-        // 简单校验通过后视为可装载（完整 sha256 校验见 photos models）
+        // 未 stub：先确保模型文件就绪（缺失时自动下载，无需手动执行命令）
+        let _ = cfg.model_spec(model_id)?;
+        crate::model::ensure_model_downloaded(cfg, model_id)?;
         Ok(())
     }
 
@@ -141,14 +134,9 @@ impl InferenceEngine for OrtEngine {
         if self.sessions.read().map_err(lock_err)?.contains_key(model_id) {
             return Ok(());
         }
-        // 装载前先做磁盘存在性校验
         let path = Self::model_path(cfg, model_id)?;
-        if !path.exists() {
-            return Err(CoreError::Model(format!(
-                "模型“{model_id}”缺失：{}。请按 docs/04-模型清单.md §6 放置模型或使用一键下载",
-                path.display()
-            )));
-        }
+        // 缺模型自动下载（不依赖手动执行命令）；无下载地址或下载失败时给出中文指引
+        crate::model::ensure_model_downloaded(cfg, model_id)?;
         let session = ort::session::Session::builder()
             .map_err(|e| CoreError::Inference(format!("创建推理会话失败：{e}")))?
             .commit_from_file(&path)

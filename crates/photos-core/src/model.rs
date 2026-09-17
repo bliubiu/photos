@@ -270,6 +270,24 @@ fn download_to(url: &str, tmp: &Path, timeout: std::time::Duration) -> Result<()
     Ok(())
 }
 
+/// 确保模型文件存在：缺失时按注册表下载地址自动下载（处理图片时无需手动执行下载命令）。
+/// 已存在直接返回；无下载地址或下载失败时给出中文指引错误。
+pub fn ensure_model_downloaded(cfg: &Config, model_id: &str) -> CoreResult<()> {
+    let spec = cfg.model_spec(model_id)?;
+    let path = resolve_model_path(cfg, Path::new(&spec.path));
+    if path.exists() {
+        return Ok(());
+    }
+    tracing::info!("模型“{model_id}”缺失，开始自动下载…");
+    if let Err(e) = download_model(cfg, model_id) {
+        return Err(CoreError::Model(format!(
+            "模型“{model_id}”缺失且自动下载失败：{e}。请检查网络或按 docs/04-模型清单.md §6 放置模型后重试"
+        )));
+    }
+    tracing::info!("模型“{model_id}”自动下载完成：{}", path.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +475,40 @@ mod tests {
         let cfg = download_cfg(dir.path(), &url, "");
         let err = download_model(&cfg, "retinaface").unwrap_err();
         assert!(err.to_string().contains("404"), "实际：{err}");
+    }
+
+    #[test]
+    fn 自动下载缺失模型() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"auto-download-bytes";
+        let url = start_http_server(content, 200);
+        let cfg = download_cfg(dir.path(), &url, &expected_of(content));
+        ensure_model_downloaded(&cfg, "retinaface").unwrap();
+        let target = dir.path().join("retinaface.onnx");
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), content);
+    }
+
+    #[test]
+    fn 已存在模型跳过下载() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write_file(dir.path(), "retinaface.onnx", b"existing");
+        // 即使下载地址无效（未启动 server），已存在也应直接通过
+        let cfg = download_cfg(dir.path(), "http://127.0.0.1:1/不存在.onnx", "");
+        assert_eq!(
+            std::fs::read(&cfg.model_spec("retinaface").unwrap().path.as_str()).unwrap(),
+            std::fs::read(&target).unwrap()
+        );
+        ensure_model_downloaded(&cfg, "retinaface").unwrap();
+    }
+
+    #[test]
+    fn 无下载地址自动下载报错() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.models.get_mut("retinaface").unwrap().path = dir.path().join("retinaface.onnx").display().to_string();
+        cfg.models.get_mut("retinaface").unwrap().download = None;
+        let err = ensure_model_downloaded(&cfg, "retinaface").unwrap_err();
+        assert!(err.to_string().contains("自动下载失败"), "实际：{err}");
     }
 }

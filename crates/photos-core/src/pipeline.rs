@@ -276,11 +276,17 @@ mod tests {
 
     #[test]
     fn 模型缺失给出中文指引() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         RgbImage::from_pixel(10, 10, Rgb([0, 0, 0])).save(&input).unwrap();
-        let mut engine = FakeEngine::new(); // 未 stub：load 按磁盘校验，models 目录不存在 → 缺失
+        // balanced 三件套指向不存在路径且无下载地址 → 自动下载失败给出中文指引（不触发真实网络）
+        for id in ["retinaface", "movnet_light", "birefnet_lite"] {
+            let spec = cfg.models.get_mut(id).unwrap();
+            spec.path = dir.path().join(format!("{id}.onnx")).display().to_string();
+            spec.download = None;
+        }
+        let mut engine = FakeEngine::new(); // 未 stub：load 先自动下载，无地址 → 缺失指引
         let req = ProcessRequest {
             input,
             mode: "balanced".into(),

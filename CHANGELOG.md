@@ -2,6 +2,11 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.2] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M1 模型】模型缺失自动下载：`photos process` 处理时检测到模型文件缺失，按注册表下载地址静默自动补全（无需手动执行 `photos models download`），下载失败给出中文指引
+
 ## [2026.09.17.1] - 0.1.0
 
 ### ✨ New Features 新增功能
