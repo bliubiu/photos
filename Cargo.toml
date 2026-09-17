@@ -39,3 +39,10 @@ ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 
 # 模型一键下载（纯 Rust HTTP 客户端，无外部 curl 依赖）
 ureq = "2"
+
+# M3 服务与桌面：HTTP 服务（Axum）+ 异步运行时 + 静态资源 + 打包下载
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tower-http = { version = "0.6", features = ["fs"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+mime = "0.3"

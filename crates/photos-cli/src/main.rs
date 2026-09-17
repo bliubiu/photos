@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     match &cli.command {
         Commands::Models(args) => commands::models::run(&cfg, args)?,
         Commands::Process(args) => commands::process::run(&cfg, args)?,
-        Commands::Serve => anyhow::bail!("serve 子命令将于 M3 阶段实现（HTTP 服务 + WebUI）"),
+        Commands::Serve(args) => commands::serve::run(&cfg, args)?,
         Commands::Gui => anyhow::bail!("gui 子命令将于 M3 阶段实现（Tauri 桌面壳）"),
     }
     Ok(())

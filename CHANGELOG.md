@@ -2,6 +2,23 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.5] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M3 API】`photos-api` 实现 `docs/05-API契约.md` 全部 7 端点：POST /tasks（multipart 提交 + 202 任务 id）、GET /tasks/{id}（轮询状态/告警/产物清单）、GET /tasks/{id}/output（单产物下载 + bundle zip）、GET /tasks（历史分页列表）、GET /models、GET /config、GET /ping
+- 【M3 任务状态机】queued → running → succeeded | failed：入库即返回任务 id，后台异步推理（spawn_blocking 不阻塞请求）；产物按 CLI 命名规约落盘 `data/out/`
+- 【M3 错误契约】统一错误体 `{code, message}`（全中文）：INVALID_PARAMS / MODEL_MISSING / FILE_TOO_LARGE / UNSUPPORTED_MEDIA / TASK_NOT_FOUND / ARTIFACT_NOT_FOUND / INTERNAL
+- 【M3 模型预检】POST /tasks 创建时按模式套件三件套预检模型就绪，缺失返回 503 MODEL_MISSING（不自动下载阻塞请求）
+- 【M3 打包下载】`artifact=bundle` 以 zip 打包该任务全部产物（zip 2 纯 Rust）
+- 【M3 serve】`photos serve` 子命令：默认绑定 127.0.0.1 随机端口并打印访问地址，支持 `--host`/`--port`；桌面壳与无头服务共用 `photos-api`
+- 【M3 存储】task_history 支持分页查询（`list_tasks_paged` + `count_tasks`）
+
+### 📈 Improvements 性能/体验优化
+- 【M3 并发】推理任务放入 `spawn_blocking`，HTTP 请求不被 CPU 密集推理阻塞
+
+### 🔧 Dependencies 依赖更新
+- 新增 `axum`（multipart）、`tokio`、`tower-http`、`zip`、`mime`（workspace 统一管理）
+
 ## [2026.09.17.4] - 0.1.0
 
 ### ✨ New Features 新增功能

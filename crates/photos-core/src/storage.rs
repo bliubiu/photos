@@ -247,6 +247,29 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| CoreError::Storage(format!("读取任务列表失败：{e}")))
     }
+
+    /// 任务总数
+    pub fn count_tasks(&self) -> CoreResult<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM task_history", [], |r| r.get(0))
+            .map_err(|e| CoreError::Storage(format!("统计任务数失败：{e}")))
+    }
+
+    /// 任务分页列表（按 id 倒序，`limit`/`offset` 分页；供 GET /tasks 使用）
+    pub fn list_tasks_paged(&self, limit: i64, offset: i64) -> CoreResult<Vec<TaskRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, input_path, mode, size, backgrounds, beauty, rotate, outputs, status, message, warnings, created_at, elapsed_ms
+                 FROM task_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| CoreError::Storage(format!("准备任务分页查询失败：{e}")))?;
+        let rows = stmt
+            .query_map(params![limit, offset], row_to_task)
+            .map_err(|e| CoreError::Storage(format!("查询任务分页失败：{e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(format!("读取任务分页失败：{e}")))
+    }
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
@@ -372,5 +395,27 @@ mod tests {
         t.status = "queued".into();
         let id = store.insert_task(&t).unwrap();
         assert_eq!(store.get_task(id).unwrap().unwrap().status, "queued");
+    }
+
+    #[test]
+    fn 任务分页与总数() {
+        let (_d, store) = open_temp();
+        for _ in 0..5 {
+            store.insert_task(&new_task()).unwrap();
+        }
+        assert_eq!(store.count_tasks().unwrap(), 5);
+        // 第一页 2 条（id 倒序 5,4）
+        let page1 = store.list_tasks_paged(2, 0).unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, 5);
+        assert_eq!(page1[1].id, 4);
+        // 第二页偏移 2 → 3,2
+        let page2 = store.list_tasks_paged(2, 2).unwrap();
+        assert_eq!(page2[0].id, 3);
+        assert_eq!(page2[1].id, 2);
+        // 偏移 4 → 只剩 1 条
+        let page3 = store.list_tasks_paged(2, 4).unwrap();
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3[0].id, 1);
     }
 }

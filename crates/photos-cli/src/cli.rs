@@ -21,10 +21,21 @@ pub enum Commands {
     Models(ModelsArgs),
     /// 处理证件照（单图或文件夹批量，一次出齐多底色/效果图/排版）
     Process(ProcessArgs),
-    /// 启动本地 HTTP 服务（M3 实现）
-    Serve,
-    /// 启动桌面版（M3 实现）
+    /// 启动本地 HTTP 服务（WebUI，M3）
+    Serve(ServeArgs),
+    /// 启动桌面版（M3）
     Gui,
+}
+
+/// `photos serve` 参数
+#[derive(Debug, clap::Args)]
+pub struct ServeArgs {
+    /// 监听地址（默认 127.0.0.1，仅本地回环）
+    #[arg(long, value_name = "地址")]
+    pub host: Option<String>,
+    /// 监听端口（默认 0 = 系统随机端口）
+    #[arg(long, value_name = "端口")]
+    pub port: Option<u16>,
 }
 
 /// `photos models` 参数

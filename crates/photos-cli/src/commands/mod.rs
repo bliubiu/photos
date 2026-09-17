@@ -2,6 +2,7 @@
 
 pub mod models;
 pub mod process;
+pub mod serve;
 
 use photos_core::config::Config;
 use photos_core::error::CoreResult;

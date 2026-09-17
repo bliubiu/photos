@@ -10,3 +10,19 @@ authors.workspace = true
 
 [dependencies]
 photos-core = { path = "../photos-core" }
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+mime.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+bytes = "1"
+image.workspace = true
+tokio = { version = "1", features = ["time", "rt"] }
