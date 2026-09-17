@@ -12,3 +12,7 @@ target/
 # Node / Tauri 前端构建产物
 node_modules/
 dist/
+*.tsbuildinfo
+
+# Tauri 生成资源
+gen/
