@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
-use photos_core::pipeline::{BeautyParams, DressParams, ProcessRequest, demo_balanced_engine, run_pipeline};
+use photos_core::pipeline::{BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
 use crate::cli::ProcessArgs;
@@ -169,11 +169,28 @@ fn process_one(
     } else {
         "{}"
     };
-    let dress = if args.dress.is_some() || args.dress_style.is_some() {
+    let dress = if args.dress.is_some()
+        || args.dress_style.is_some()
+        || args.dress_top.is_some()
+        || args.dress_bottom.is_some()
+        || args.dress_shoes.is_some()
+    {
         Some(DressParams {
             enabled: true,
             garment: args.dress.clone(),
             style: args.dress_style.clone(),
+            garments: if args.dress_top.is_some()
+                || args.dress_bottom.is_some()
+                || args.dress_shoes.is_some()
+            {
+                Some(GarmentSet {
+                    top: args.dress_top.clone(),
+                    bottom: args.dress_bottom.clone(),
+                    shoes: args.dress_shoes.clone(),
+                })
+            } else {
+                None
+            },
         })
     } else {
         None

@@ -18,6 +18,15 @@ pub const CLOTHING_CLASSES: [u8; 4] = [5, 6, 7, 10];
 /// （全身套装贴合：西装 + 西裤 + 皮鞋一次覆盖全身）
 pub const FULL_CLOTHING_CLASSES: [u8; 10] = [5, 6, 7, 8, 9, 10, 16, 17, 18, 19];
 
+/// 上半身服装类（上衣/连衣裙/外套/连体裤）——多图分部位贴合的上衣部位
+pub const TOP_CLASSES: [u8; 4] = [5, 6, 7, 10];
+
+/// 下装类（裤子/短裤）——多图分部位贴合的下装部位
+pub const BOTTOM_CLASSES: [u8; 2] = [8, 9];
+
+/// 鞋类（左鞋/右鞋）——多图分部位贴合的鞋部位
+pub const SHOE_CLASSES: [u8; 2] = [18, 19];
+
 /// 边缘羽化高斯 sigma（与换底色羽化一致）
 const GARMENT_FEATHER_SIGMA: f32 = 1.0;
 
@@ -138,8 +147,8 @@ pub fn decode_parsing(
     }
 }
 
-/// 类别索引图 → 衣服二值 mask（指定类 255，其余 0）
-fn mask_for(parsing: &GrayImage, classes: &[u8]) -> GrayImage {
+/// 类别索引图 → 指定类别二值 mask（255，其余 0）
+pub fn part_mask(parsing: &GrayImage, classes: &[u8]) -> GrayImage {
     GrayImage::from_fn(parsing.width(), parsing.height(), |x, y| {
         let c = parsing.get_pixel(x, y)[0];
         Luma([if classes.contains(&c) { 255 } else { 0 }])
@@ -148,12 +157,47 @@ fn mask_for(parsing: &GrayImage, classes: &[u8]) -> GrayImage {
 
 /// 类别索引图 → 衣服二值 mask（服装类 5/6/7/10，255，其余 0；上半身/连体语义）
 pub fn clothes_mask(parsing: &GrayImage) -> GrayImage {
-    mask_for(parsing, &CLOTHING_CLASSES)
+    part_mask(parsing, &CLOTHING_CLASSES)
 }
 
 /// 类别索引图 → 全身衣服二值 mask（服装类含裤装/腿/鞋，255，其余 0；全身套装语义）
 pub fn full_clothes_mask(parsing: &GrayImage) -> GrayImage {
-    mask_for(parsing, &FULL_CLOTHING_CLASSES)
+    part_mask(parsing, &FULL_CLOTHING_CLASSES)
+}
+
+/// 单部位贴合项：部位类别集 + 该部位服装图
+pub struct GarmentPart<'a> {
+    /// 该部位覆盖的 LIP 类别（如 `TOP_CLASSES`）
+    pub classes: &'a [u8],
+    /// 该部位服装图
+    pub image: &'a RgbImage,
+}
+
+/// 多图分部位贴合：各部位按自身类别 mask 包围盒分别等比缩放居中贴合，依次叠加到人像上。
+/// 未检出的部位（该类别无前景）自动跳过；解析图与人像尺寸须一致。
+pub fn fit_garment_parts(
+    portrait: &RgbImage,
+    parsing: &GrayImage,
+    parts: &[GarmentPart<'_>],
+) -> CoreResult<RgbImage> {
+    if portrait.dimensions() != parsing.dimensions() {
+        return Err(CoreError::Image(format!(
+            "人像与解析图尺寸不一致：{}x{} vs {}x{}",
+            portrait.width(),
+            portrait.height(),
+            parsing.width(),
+            parsing.height()
+        )));
+    }
+    let mut out = portrait.clone();
+    for part in parts {
+        if part.image.dimensions().0 == 0 || part.image.dimensions().1 == 0 {
+            return Err(CoreError::Image("分部位服装图为空".into()));
+        }
+        let mask = part_mask(parsing, part.classes);
+        out = fit_garment(&out, part.image, &mask)?;
+    }
+    Ok(out)
 }
 
 /// 服装贴合：按衣服 mask 包围盒将服装图等比缩放居中贴合，边缘按衣服 mask 羽化合成。
@@ -487,5 +531,66 @@ mod tests {
         assert!(q[2] > 30 && q[2] < 60, "裤子应深藏青，实际 {q:?}");
         // 衣服区外保持灰底
         assert_eq!(*out.get_pixel(0, 100), Rgb([200, 200, 200]));
+    }
+
+    #[test]
+    fn 分部位贴合各自区域() {
+        // 人像 100x200 灰底；解析图：上半 5 上衣、下半 8 裤子
+        let portrait = RgbImage::from_pixel(100, 200, Rgb([200, 200, 200]));
+        let mut parsing = GrayImage::from_pixel(100, 200, Luma([0u8]));
+        for y in 0..100 {
+            for x in 0..100 {
+                parsing.put_pixel(x, y, Luma([5u8]));
+            }
+        }
+        for y in 100..200 {
+            for x in 0..100 {
+                parsing.put_pixel(x, y, Luma([8u8]));
+            }
+        }
+        // 上衣图纯红、下装图纯蓝，各贴合到对应部位
+        let top = RgbImage::from_pixel(100, 100, Rgb([200, 30, 30]));
+        let bottom = RgbImage::from_pixel(100, 100, Rgb([30, 30, 200]));
+        let parts = [
+            GarmentPart {
+                classes: &TOP_CLASSES,
+                image: &top,
+            },
+            GarmentPart {
+                classes: &BOTTOM_CLASSES,
+                image: &bottom,
+            },
+        ];
+        let out = fit_garment_parts(&portrait, &parsing, &parts).unwrap();
+        let p = *out.get_pixel(50, 50);
+        assert!(p[0] > 150 && p[2] < 80, "上身应偏红，实际 {p:?}");
+        let q = *out.get_pixel(50, 150);
+        assert!(q[2] > 150 && q[0] < 80, "下身应偏蓝，实际 {q:?}");
+    }
+
+    #[test]
+    fn 分部位未检出部位自动跳过() {
+        // 解析图全为背景（0），任一部位无前景 → 原样返回
+        let portrait = RgbImage::from_pixel(10, 10, Rgb([9, 9, 9]));
+        let parsing = GrayImage::from_pixel(10, 10, Luma([0u8]));
+        let top = RgbImage::from_pixel(10, 10, Rgb([200, 30, 30]));
+        let parts = [GarmentPart {
+            classes: &TOP_CLASSES,
+            image: &top,
+        }];
+        let out = fit_garment_parts(&portrait, &parsing, &parts).unwrap();
+        assert_eq!(out, portrait);
+    }
+
+    #[test]
+    fn 分部位尺寸不一致报错() {
+        let portrait = RgbImage::new(10, 10);
+        let parsing = GrayImage::new(11, 10);
+        let top = RgbImage::new(5, 5);
+        let parts = [GarmentPart {
+            classes: &TOP_CLASSES,
+            image: &top,
+        }];
+        assert!(fit_garment_parts(&portrait, &parsing, &parts).is_err());
     }
 }

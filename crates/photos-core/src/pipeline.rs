@@ -82,8 +82,21 @@ pub struct DressParams {
     pub enabled: bool,
     /// 用户服装图路径（可选，优先于 `style`）
     pub garment: Option<PathBuf>,
-    /// 程序化正装样式（suit_navy | suit_black | shirt_white；无 garment 时生效）
+    /// 程序化正装样式（suit_navy | suit_black | shirt_white | suit_full_navy | suit_full_black；无 garment 时生效）
     pub style: Option<String>,
+    /// 分部位服装图集合（可选，多图分部位贴合；优先于 `garment`/`style`）
+    pub garments: Option<GarmentSet>,
+}
+
+/// 分部位服装图集合（上衣/下装/鞋 分别贴合，未提供的部位自动跳过）
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GarmentSet {
+    /// 上衣图（覆盖 LIP 5/6/7/10）
+    pub top: Option<PathBuf>,
+    /// 下装图（覆盖 LIP 8/9）
+    pub bottom: Option<PathBuf>,
+    /// 鞋图（覆盖 LIP 18/19）
+    pub shoes: Option<PathBuf>,
 }
 
 /// 单底色产物（证件照或效果图）
@@ -202,28 +215,60 @@ pub fn run_pipeline(
                 rot_img.height(),
                 p_in.letterbox.as_ref(),
             )?;
-            // 程序化全身套装样式（suit_full_*）用全身服装类集（含裤装/腿/鞋），
-            // 用户服装图与上半身样式沿用单件语义，避免误覆盖下半身
-            let style = d
-                .garment
-                .as_ref()
-                .map(|_| None)
-                .unwrap_or_else(|| Some(SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy"))))
-                .transpose()?;
-            let clothes = if style.is_some_and(SuitStyle::is_full) {
-                dressing::full_clothes_mask(&parsing)
+            if let Some(gs) = &d.garments {
+                // 多图分部位贴合：各部位按自身类别独立贴合，未提供部位自动跳过
+                let mut images: Vec<RgbImage> = Vec::new();
+                let mut specs: Vec<(&[u8], usize)> = Vec::new();
+                for (classes, path) in [
+                    (dressing::TOP_CLASSES.as_slice(), gs.top.as_ref()),
+                    (dressing::BOTTOM_CLASSES.as_slice(), gs.bottom.as_ref()),
+                    (dressing::SHOE_CLASSES.as_slice(), gs.shoes.as_ref()),
+                ] {
+                    if let Some(p) = path {
+                        images.push(
+                            image::open(p)
+                                .map_err(|e| {
+                                    CoreError::Image(format!("读取服装图 {} 失败：{e}", p.display()))
+                                })?
+                                .to_rgb8(),
+                        );
+                        specs.push((classes, images.len() - 1));
+                    }
+                }
+                let parts: Vec<dressing::GarmentPart<'_>> = specs
+                    .iter()
+                    .map(|(c, i)| dressing::GarmentPart {
+                        classes: c,
+                        image: &images[*i],
+                    })
+                    .collect();
+                dressing::fit_garment_parts(&rot_img, &parsing, &parts)?
             } else {
-                dressing::clothes_mask(&parsing)
-            };
-            let garment = match &d.garment {
-                Some(path) => image::open(path)
-                    .map_err(|e| {
-                        CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display()))
-                    })?
-                    .to_rgb8(),
-                None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
-            };
-            dressing::fit_garment(&rot_img, &garment, &clothes)?
+                // 程序化全身套装样式（suit_full_*）用全身服装类集（含裤装/腿/鞋），
+                // 用户服装图与上半身样式沿用单件语义，避免误覆盖下半身
+                let style = d
+                    .garment
+                    .as_ref()
+                    .map(|_| None)
+                    .unwrap_or_else(|| {
+                        Some(SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy")))
+                    })
+                    .transpose()?;
+                let clothes = if style.is_some_and(SuitStyle::is_full) {
+                    dressing::full_clothes_mask(&parsing)
+                } else {
+                    dressing::clothes_mask(&parsing)
+                };
+                let garment = match &d.garment {
+                    Some(path) => image::open(path)
+                        .map_err(|e| {
+                            CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display()))
+                        })?
+                        .to_rgb8(),
+                    None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
+                };
+                dressing::fit_garment(&rot_img, &garment, &clothes)?
+            }
         }
         _ => rot_img.clone(),
     };
@@ -361,15 +406,25 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         .collect::<Vec<f32>>();
     let matting = TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap();
     // 人像解析 stub：同一人形椭圆，自上而下 0..0.30h 脸(13)、0.30..0.60h 上衣(5)、
-    // 0.60..0.85h 裤子(8)、0.85h 以下鞋(19)，可演示上半身与全身套装两种换装；
-    // letterbox 到 473x473 画布后转 one-hot logits（对应类 +10，其余 -10）
-    let mut cls = GrayImage::from_pixel(w, h, Luma([0u8]));
-    for y in 0..h {
-        for x in 0..w {
-            let dx = x as f32 - fw / 2.0;
-            let dy = y as f32 - fh / 2.0;
+    // 0.60..0.85h 裤子(8)、0.85h 以下鞋(19)，可演示上半身与全身套装两种换装。
+    // 关键：类别图直接在 473x473 画布坐标系生成（像素反算回原图坐标判定），
+    // 避免「灰度编码 + Triangle 插值」在类别边界产生假类别（真实模型为 one-hot logits，
+    // argmax 后类别干净，不受插值污染），随后转 one-hot logits（对应类 +10，其余 -10）
+    let (tw, th) = (473u32, 473u32);
+    let lb_scale = (tw as f32 / w.max(1) as f32).min(th as f32 / h.max(1) as f32).max(1e-6);
+    let new_w = (w as f32 * lb_scale).round().max(1.0) as u32;
+    let new_h = (h as f32 * lb_scale).round().max(1.0) as u32;
+    let pad_x = ((tw - new_w) / 2) as f32;
+    let pad_y = ((th - new_h) / 2) as f32;
+    let mut cls_canvas = GrayImage::from_pixel(tw, th, Luma([0u8]));
+    for y in 0..th {
+        for x in 0..tw {
+            // 画布坐标 → 原图坐标（内容区反缩放，pad 区落回原图外侧）
+            let fx = (x as f32 - pad_x) / lb_scale;
+            let fy = (y as f32 - pad_y) / lb_scale;
+            let dx = fx - fw / 2.0;
+            let dy = fy - fh / 2.0;
             if dx * dx / (a * a) + dy * dy / (b * b) <= 1.0 {
-                let fy = y as f32;
                 let c = if fy < 0.30 * fh {
                     13u8
                 } else if fy < 0.60 * fh {
@@ -379,24 +434,19 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
                 } else {
                     19u8
                 };
-                cls.put_pixel(x, y, Luma([c]));
+                cls_canvas.put_pixel(x, y, Luma([c]));
             }
         }
     }
-    let cls_rgb = image::ImageBuffer::from_fn(w, h, |x, y| {
-        let c = cls.get_pixel(x, y)[0];
-        image::Rgb([c, c, c])
-    });
-    let (p_canvas, _) = crate::preprocess::letterbox(&cls_rgb, 473, 473);
-    let hw = 473usize * 473;
+    let hw = tw as usize * th as usize;
     let mut logits = vec![-10.0f32; hw * 20];
-    for (i, p) in p_canvas.pixels().enumerate() {
+    for (i, p) in cls_canvas.pixels().enumerate() {
         let c = p[0] as usize;
         if (0..20).contains(&c) {
             logits[c * hw + i] = 10.0;
         }
     }
-    let parsing = TensorData::new(vec![1, 20, 473, 473], logits).unwrap();
+    let parsing = TensorData::new(vec![1, 20, tw as i64, th as i64], logits).unwrap();
     FakeEngine::balanced_stub(
         face_out,
         vec![TensorData::new(vec![1, 17, 3], kp).unwrap()],
@@ -777,6 +827,7 @@ mod tests {
                 enabled: true,
                 garment: None,
                 style: Some("suit_navy".into()),
+                garments: None,
             }),
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
@@ -828,6 +879,7 @@ mod tests {
                 enabled: true,
                 garment: None,
                 style: Some("suit_full_navy".into()),
+                garments: None,
             }),
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
@@ -841,6 +893,52 @@ mod tests {
         let sa = *result.effects[0].image.get_pixel(50, 121);
         assert!(sa[0] < 60 && sa[1] < 60 && sa[2] < 60, "鞋区应偏黑，实际 {sa:?}");
         // 效果图尺寸保持全图
+        assert_eq!(result.effects[0].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 多图分部位换装分别覆盖上下身() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        // 上衣图纯红、下装图纯蓝
+        let top = RgbImage::from_pixel(120, 120, Rgb([200, 30, 30]));
+        let bottom = RgbImage::from_pixel(120, 120, Rgb([30, 30, 200]));
+        let top_path = dir.path().join("top.jpg");
+        let bottom_path = dir.path().join("bottom.jpg");
+        top.save(&top_path).unwrap();
+        bottom.save(&bottom_path).unwrap();
+
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: Some(DressParams {
+                enabled: true,
+                garment: None,
+                style: None,
+                garments: Some(GarmentSet {
+                    top: Some(top_path),
+                    bottom: Some(bottom_path),
+                    shoes: None,
+                }),
+            }),
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+
+        // 上衣区 (50,60) 偏红、裤区 (50,105) 偏蓝，互不串位
+        let pa = *result.effects[0].image.get_pixel(50, 60);
+        assert!(pa[0] > 150 && pa[2] < 80, "上衣应偏红，实际 {pa:?}");
+        let pb = *result.effects[0].image.get_pixel(50, 105);
+        assert!(pb[2] > 150 && pb[0] < 80, "下装应偏蓝，实际 {pb:?}");
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
     }
 }

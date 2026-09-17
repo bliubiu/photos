@@ -338,6 +338,79 @@ async fn 全身套装样式任务成功且记录参数() {
 }
 
 #[tokio::test]
+async fn 多图分部位换装任务成功() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 服务端可读的分部位服装图：上衣红、下装蓝
+    let dir = tempfile::tempdir().unwrap();
+    let top_path = dir.path().join("top.jpg");
+    let bottom_path = dir.path().join("bottom.jpg");
+    image::RgbImage::from_pixel(120, 120, image::Rgb([200, 30, 30]))
+        .save(&top_path)
+        .unwrap();
+    image::RgbImage::from_pixel(120, 120, image::Rgb([30, 30, 200]))
+        .save(&bottom_path)
+        .unwrap();
+    let params = json!({
+        "dress": {
+            "enabled": true,
+            "garments": {
+                "top": top_path.to_string_lossy().to_string(),
+                "bottom": bottom_path.to_string_lossy().to_string(),
+            }
+        }
+    })
+    .to_string();
+    let (body, ctype) = multipart_body(&demo_jpeg(), &params);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = json["id"].as_str().unwrap();
+    let mut detail = json.clone();
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (s, j) = send(&app, req).await;
+        assert_eq!(s, StatusCode::OK);
+        detail = j;
+        if detail["status"] != "queued" && detail["status"] != "running" {
+            break;
+        }
+    }
+    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    // 任务记录含分部位服装图参数
+    assert!(detail["dress"].as_str().unwrap().contains("garments"));
+}
+
+#[tokio::test]
+async fn 换装分部位集合全空返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"dress":{"enabled":true,"garments":{}}}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("换装需提供"));
+}
+
+#[tokio::test]
 async fn 不支持媒体返回415() {
     let t = TestApp::new();
     let app = t.app();

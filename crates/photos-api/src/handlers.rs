@@ -89,7 +89,8 @@ pub struct BeautyParams {
     pub whiten: Option<f64>,
 }
 
-/// 换装参数（enabled 开关；garment_path 为服务端已有服装图路径，style 为程序化正装）
+/// 换装参数（enabled 开关；garment_path 为服务端已有服装图路径，style 为程序化正装；
+/// garments 为分部位服装图集合，多图分部位贴合，优先于 garment_path/style）
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DressParams {
     #[serde(default)]
@@ -98,6 +99,19 @@ pub struct DressParams {
     pub garment_path: Option<String>,
     #[serde(default)]
     pub style: Option<String>,
+    #[serde(default)]
+    pub garments: Option<GarmentSet>,
+}
+
+/// 分部位服装图集合（上衣/下装/鞋 分别贴合，未提供的部位自动跳过）
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GarmentSet {
+    #[serde(default)]
+    pub top: Option<String>,
+    #[serde(default)]
+    pub bottom: Option<String>,
+    #[serde(default)]
+    pub shoes: Option<String>,
 }
 
 /// 校验美颜强度取值（0..=1，越界返回中文错误）
@@ -126,7 +140,12 @@ fn validate_dress(dress: &Option<DressParams>) -> Result<(), ApiError> {
         if !d.enabled {
             return Ok(());
         }
-        if d.garment_path.is_none() {
+        // 分部位集合至少提供一个部位图时即视为有效（优先于 garment_path/style）
+        let has_parts = d
+            .garments
+            .as_ref()
+            .is_some_and(|g| g.top.is_some() || g.bottom.is_some() || g.shoes.is_some());
+        if d.garment_path.is_none() && !has_parts {
             match d.style.as_deref() {
                 Some(
                     "suit_navy" | "suit_black" | "shirt_white" | "suit_full_navy"
@@ -139,7 +158,8 @@ fn validate_dress(dress: &Option<DressParams>) -> Result<(), ApiError> {
                 }
                 None => {
                     return Err(ApiError::InvalidParams(
-                        "换装需提供 garment_path（服装图路径）或 style（正装样式）".into(),
+                        "换装需提供 garment_path（服装图路径）、garments（分部位服装图）或 style（正装样式）"
+                            .into(),
                     ));
                 }
             }
@@ -359,6 +379,11 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
             "enabled": true,
             "garment_path": d.garment_path,
             "style": d.style,
+            "garments": d.garments.as_ref().map(|g| serde_json::json!({
+                "top": g.top,
+                "bottom": g.bottom,
+                "shoes": g.shoes,
+            })),
         })
         .to_string(),
         _ => "{}".to_string(),
@@ -443,6 +468,11 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             enabled: d.enabled,
             garment: d.garment_path.map(PathBuf::from),
             style: d.style,
+            garments: d.garments.map(|g| photos_core::pipeline::GarmentSet {
+                top: g.top.map(PathBuf::from),
+                bottom: g.bottom.map(PathBuf::from),
+                shoes: g.shoes.map(PathBuf::from),
+            }),
         });
 
         let started = std::time::Instant::now();

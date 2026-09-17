@@ -108,6 +108,15 @@ pub struct ProcessArgs {
     /// 程序化正装样式（suit_navy | suit_black | shirt_white 上半身；suit_full_navy | suit_full_black 全身套装；未提供 --dress 时生效）
     #[arg(long, value_name = "样式")]
     pub dress_style: Option<String>,
+    /// 分部位服装图：上衣（多图分部位贴合，优先于 --dress/--dress-style）
+    #[arg(long, value_name = "上衣图")]
+    pub dress_top: Option<PathBuf>,
+    /// 分部位服装图：下装（多图分部位贴合）
+    #[arg(long, value_name = "下装图")]
+    pub dress_bottom: Option<PathBuf>,
+    /// 分部位服装图：鞋（多图分部位贴合）
+    #[arg(long, value_name = "鞋图")]
+    pub dress_shoes: Option<PathBuf>,
     /// 输出目录（默认 data/out）
     #[arg(short, long, value_name = "目录")]
     pub out: Option<PathBuf>,

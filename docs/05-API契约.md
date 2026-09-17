@@ -84,7 +84,7 @@
   "size": "one_inch",
   "backgrounds": ["white", "blue"],
   "beauty": { "enabled": false, "skin_smooth": 0.3, "brighten": 0.2, "whiten": 0.1 },
-  "dress": { "enabled": false, "garment_path": null, "style": "suit_navy" },
+  "dress": { "enabled": false, "garment_path": null, "style": "suit_navy", "garments": { "top": null, "bottom": null, "shoes": null } },
   "rotate": null,
   "layout": null,
   "effect_image": false
@@ -97,7 +97,7 @@
 | `size` | string | 必须存在于 `[sizes.*]` |
 | `backgrounds` | string[] | 1..N，元素存在于 `[backgrounds.*]` |
 | `beauty` | object | 可选；`enabled` 默认 false；`skin_smooth`/`brighten`/`whiten` 可选，取值 `[0,1]`，缺省用全局配置 `[beauty]` 默认值（0.3/0.2/0.1）；越界返回 `400` |
-| `dress` | object | 可选；`enabled` 默认 false；`garment_path`（服务端服装图路径）与 `style`（`suit_navy`\|`suit_black`\|`shirt_white` 上半身，`suit_full_navy`\|`suit_full_black` 全身套装）至少其一，`garment_path` 优先；两者皆缺或 `style` 非法返回 `400` |
+| `dress` | object | 可选；`enabled` 默认 false；`garment_path`（服务端服装图路径）、`style`（`suit_navy`\|`suit_black`\|`shirt_white` 上半身，`suit_full_navy`\|`suit_full_black` 全身套装）、`garments`（`{top?, bottom?, shoes?}` 分部位服装图路径，`top`/`bottom`/`shoes` 任一存在即生效，全空视为未提供）三选一，`garments` 优先于 `garment_path`、`garment_path` 优先于 `style`；三者皆缺或 `style` 非法返回 `400` |
 | `rotate` | number\|null | 手动纠偏角（度），`[-45,45]`；null=自动 |
 | `layout` | string\|null | `6inch`\|`a4`\|null |
 | `effect_image` | bool | 是否输出通用效果图 |
@@ -124,7 +124,7 @@
   "message": null,
   "warnings": ["角度超限，本次未自动纠偏（测量角 25.3°）"],
   "beauty": "{ \"enabled\": true, \"skin_smooth\": 0.8, \"brighten\": 0.2, \"whiten\": null }",
-  "dress": "{ \"enabled\": true, \"garment_path\": null, \"style\": \"suit_navy\" }",
+  "dress": "{ \"enabled\": true, \"garment_path\": null, \"style\": \"suit_navy\", \"garments\": { \"top\": \"/data/demo_top.jpg\", \"bottom\": \"/data/demo_bottom.jpg\", \"shoes\": null } }",
   "elapsed_ms": 2345,
   "created_at": "2026-09-16 12:00:00.000",
   "artifacts": [

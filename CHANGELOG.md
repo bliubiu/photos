@@ -2,6 +2,18 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.10] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【换装】新增多图分部位贴合：`GarmentSet`（上衣/下装/鞋三部位服装图），`fit_garment_parts` 按部位独立贴合——上衣覆盖 LIP 5/6/7/10、下装覆盖 8/9、鞋覆盖 18/19，未提供部位自动跳过；CLI 新增 `--dress-top`/`--dress-bottom`/`--dress-shoes`，API `params.dress.garments` 透传并落库
+
+### 🐛 Bug Fixes  问题修复
+- 【演示引擎】修复人像解析 stub 用「灰度编码 + Triangle 插值」生成类别图导致的类别污染：插值在类别边界产生假类别（如 0↔13 插值出 8/9、5↔8 插值出 6/7/9），污染部位 mask 包围盒使裤区贴合矩形异常偏小；改为在 473×473 画布坐标系直接生成类别（像素反算回原图坐标判定），与真实模型 one-hot logits 行为一致，全仓 136 测试全绿
+
+### 📚 Docs 文档更新
+- `docs/03-实施计划.md`：M4 换装升级说明（分部位贴合/参数/验证数据）
+- `docs/05-API契约.md`：`params.dress.garments` 字段契约与校验规则
+
 ## [2026.09.17.9] - 0.1.0
 
 ### ✨ New Features 新增功能
