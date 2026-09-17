@@ -148,14 +148,28 @@ fn check_one(
     })
 }
 
-/// 解析模型路径：绝对路径直接使用，相对路径以当前工作目录为基准
-/// （注册表 path 如 `models/mtcnn.onnx` 已相对项目根，勿与 models_dir 拼接造成重复）
-pub fn resolve_model_path(_cfg: &Config, spec_path: &Path) -> PathBuf {
+/// 解析模型路径：
+/// - **绝对路径**：直接使用
+/// - **相对路径**：相对 `cfg.general.models_dir`（默认 `models`）
+///   1. 若 `spec.path` 已以 `models_dir` 开头，剥离该前缀后拼接，避免 `models/models/…`
+///   2. 否则若以历史默认前缀 `models/` 开头，同样剥离后接到当前 `models_dir`
+///   3. 否则视为相对 `models_dir` 的文件名/子路径
+///
+/// 注册表样例写 `models/retinaface_r50.onnx`；改为 `models_dir = "mymodels"` 后应落到
+/// `mymodels/retinaface_r50.onnx`，而不是继续写死项目根 `models/`。
+pub fn resolve_model_path(cfg: &Config, spec_path: &Path) -> PathBuf {
     if spec_path.is_absolute() {
-        spec_path.to_path_buf()
-    } else {
-        spec_path.to_path_buf()
+        return spec_path.to_path_buf();
     }
+    let models_dir = Path::new(&cfg.general.models_dir);
+    let rel = spec_path
+        .strip_prefix(models_dir)
+        .or_else(|_| spec_path.strip_prefix("models"))
+        .unwrap_or(spec_path);
+    if rel.as_os_str().is_empty() {
+        return models_dir.to_path_buf();
+    }
+    models_dir.join(rel)
 }
 
 /// 计算文件 sha256（十六进制小写）
@@ -315,6 +329,43 @@ mod tests {
         let mut h = Sha256::new();
         h.update(content);
         hex_encode(&h.finalize())
+    }
+
+    #[test]
+    fn 解析路径按models_dir拼接并避免重复前缀() {
+        let mut cfg = Config::default();
+        // 默认 models_dir=models：注册表 models/x.onnx → models/x.onnx
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("models/retinaface_r50.onnx")),
+            PathBuf::from("models/retinaface_r50.onnx")
+        );
+        // 仅文件名
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("retinaface_r50.onnx")),
+            PathBuf::from("models/retinaface_r50.onnx")
+        );
+        // 绝对路径原样
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("/abs/m.onnx")),
+            PathBuf::from("/abs/m.onnx")
+        );
+
+        // 自定义 models_dir：剥离历史 models/ 前缀后接到 mymodels
+        cfg.general.models_dir = "mymodels".into();
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("models/retinaface_r50.onnx")),
+            PathBuf::from("mymodels/retinaface_r50.onnx")
+        );
+        // 已写成 mymodels/ 前缀时不重复
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("mymodels/retinaface_r50.onnx")),
+            PathBuf::from("mymodels/retinaface_r50.onnx")
+        );
+        // 无前缀文件名
+        assert_eq!(
+            resolve_model_path(&cfg, Path::new("retinaface_r50.onnx")),
+            PathBuf::from("mymodels/retinaface_r50.onnx")
+        );
     }
 
     #[test]
