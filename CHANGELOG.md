@@ -2,6 +2,26 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.17.0] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【M0 骨架】Cargo workspace 五 crate（photos-core/api/cli/desktop/infra），依赖方向 cli→api→core、infra 供 core
+- 【M0 配置】`application.toml` 解析：优先级 命令行 > 环境变量（`PHOTOS_*`）> toml > 默认值；三套模式套件、模型注册表、尺寸/底色/布局/美颜
+- 【M0 日志】tracing 中文日志格式 + 文件日轮转（photos-YYYYMMDD.log，保留 32 天）+ 终端双写 + 敏感信息脱敏
+- 【M0 存储】sqlite（WAL）三表：`task_history` / `kv_cache` / `prefs`
+- 【M0 模型】模型注册表状态报告：惰性 sha256 校验 + 路径/mtime/size 缓存命中（<100ms）
+- 【M0 CLI】`photos models` 子命令：表格/JSON 输出就绪状态与缺失指引
+- 【M1 推理】`InferenceEngine` 抽象 + `TensorData`；`FakeEngine` mock 回放（默认），`OrtEngine` ONNX Runtime 真后端（`feature = "ort"` 门控，模型定版后就位）
+- 【M1 视觉】纯 Rust 算子：姿态角度（0.6 头部 + 0.4 肩线融合、±22° 自动阈值、±45° 手动覆盖）、同步仿射纠偏、RetinaFace 解码 NMS、MoveNet 17 点解码、mask 阈值/开运算/羽化、alpha 换底色、证件照裁剪
+- 【M1 流水线】`run_pipeline` 最小闭环：读图 → 检测/抠图 → 角度决策 → 同步纠偏 → 换底色 → 裁切缩放（mock 回放打通端到端）
+- 【M1 CLI】`photos process` 子命令：单图处理、task_history 落库、缺模型中文指引
+
+### 🔧 Dependencies 依赖更新
+- `ort` 2.0.0-rc.13 改为显式 feature（默认关闭），规避 Windows 构建文件锁与 DirectML 默认下载问题
+
+### 📚 Docs 文档更新
+- 实施计划、架构设计引用同步（目录结构调整为 `crates/*`，新增 `photos-infra`）
+
 ## [2026.09.16.4] - 0.1.0
 
 ### 📚 Docs 文档更新
