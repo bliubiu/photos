@@ -30,6 +30,15 @@ pub const SHOE_CLASSES: [u8; 2] = [18, 19];
 /// 边缘羽化高斯 sigma（与换底色羽化一致）
 const GARMENT_FEATHER_SIGMA: f32 = 1.0;
 
+/// 光影合成强度：原图衣服区域明暗起伏的保留比例（0 = 不合成，1 = 完全保留）
+const GARMENT_SHADING_STRENGTH: f32 = 0.6;
+
+/// 光影调制系数上下限（原图过暗/过亮时避免服装失真）
+const GARMENT_SHADING_RANGE: (f32, f32) = (0.6, 1.4);
+
+/// 光影场模糊 sigma 占贴合区域短边的比例（去衣物纹理噪声、保留大范围光照方向）
+const GARMENT_SHADING_SIGMA_RATIO: f32 = 0.05;
+
 /// 程序化正装样式（无外部素材即可生成）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuitStyle {
@@ -249,6 +258,8 @@ pub fn fit_garment(
         }
     }
     let alpha = super::matting::feather(&alpha, GARMENT_FEATHER_SIGMA);
+    // 光影合成：以原图衣服区域的明暗起伏（含光照方向与衣物褶皱）调制服装亮度
+    let shade = shading_factors(portrait, clothes, gx, gy, tw, th);
     // 合成：out = 服装 × alpha + 原人像 × (1 - alpha)
     let mut out = portrait.clone();
     for y in 0..th {
@@ -261,7 +272,7 @@ pub fn fit_garment(
             if a <= 0.0 {
                 continue;
             }
-            let fg = fit.get_pixel(x, y);
+            let fg = shade_pixel(*fit.get_pixel(x, y), shade[(y * tw + x) as usize]);
             let bg = *out.get_pixel(px, py);
             out.put_pixel(
                 px,
@@ -275,6 +286,67 @@ pub fn fit_garment(
         }
     }
     Ok(out)
+}
+
+/// 按系数调制服装像素亮度（逐通道，钳制到 0..=255）
+fn shade_pixel(px: Rgb<u8>, factor: f32) -> Rgb<u8> {
+    Rgb([
+        (px[0] as f32 * factor).round().clamp(0.0, 255.0) as u8,
+        (px[1] as f32 * factor).round().clamp(0.0, 255.0) as u8,
+        (px[2] as f32 * factor).round().clamp(0.0, 255.0) as u8,
+    ])
+}
+
+/// 服装贴合区域的光影场：输出逐像素亮度调制系数（1.0 = 与原图衣服区平均亮度一致）。
+/// 取原图衣服像素（mask > 0）亮度 → 相对区域均值归一化 → 高斯模糊平滑（去纹理噪声、
+/// 保留大范围光照方向）→ 强度加权并钳制。无有效衣服像素或区域亮度均值近 0 时返回全 1.0。
+fn shading_factors(
+    portrait: &RgbImage,
+    clothes: &GrayImage,
+    gx: u32,
+    gy: u32,
+    tw: u32,
+    th: u32,
+) -> Vec<f32> {
+    let n = (tw * th) as usize;
+    let in_mask = |x: u32, y: u32| -> bool {
+        let (px, py) = (gx + x, gy + y);
+        px < clothes.width() && py < clothes.height() && clothes.get_pixel(px, py)[0] > 0
+    };
+    let luminance = |x: u32, y: u32| -> f32 {
+        let p = portrait.get_pixel(gx + x, gy + y);
+        0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
+    };
+    let (mut sum, mut count) = (0f64, 0usize);
+    for y in 0..th {
+        for x in 0..tw {
+            if in_mask(x, y) {
+                sum += luminance(x, y) as f64;
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return vec![1.0; n];
+    }
+    let mean = (sum / count as f64) as f32;
+    if mean < 1.0 {
+        // 原图衣服区几乎全黑（如黑色上衣），无可提取的明暗信息
+        return vec![1.0; n];
+    }
+    // 非衣服像素以区域均值填充，避免模糊时把 0 带入污染边缘
+    let filled = GrayImage::from_fn(tw, th, |x, y| {
+        let v = if in_mask(x, y) { luminance(x, y) } else { mean };
+        Luma([v.round().clamp(0.0, 255.0) as u8])
+    });
+    let sigma = (tw.min(th) as f32 * GARMENT_SHADING_SIGMA_RATIO).max(1.0);
+    let smooth = image::imageops::blur(&filled, sigma);
+    let (lo, hi) = GARMENT_SHADING_RANGE;
+    smooth
+        .as_raw()
+        .iter()
+        .map(|v| (1.0 + GARMENT_SHADING_STRENGTH * (*v as f32 / mean - 1.0)).clamp(lo, hi))
+        .collect()
 }
 
 /// 程序化生成正装纹理图（无外部素材）：纯色西装外套 + 中央 V 领白衬衫。
@@ -454,6 +526,66 @@ mod tests {
         let portrait = RgbImage::new(4, 4);
         let clothes = GrayImage::new(5, 5);
         assert!(fit_garment(&portrait, &RgbImage::new(2, 2), &clothes).is_err());
+    }
+
+    #[test]
+    fn 光影合成保留原图明暗起伏() {
+        // 人像 40x20：衣服 mask 铺满；左半暗（60）右半亮（180），均值 120
+        let mut portrait = RgbImage::from_pixel(40, 20, Rgb([60, 60, 60]));
+        for y in 0..20 {
+            for x in 20..40 {
+                portrait.put_pixel(x, y, Rgb([180, 180, 180]));
+            }
+        }
+        let clothes = GrayImage::from_pixel(40, 20, Luma([255u8]));
+        // 服装图统一中灰：贴合后应呈现左侧压暗、右侧提亮的明暗起伏
+        let garment = RgbImage::from_pixel(40, 20, Rgb([128, 128, 128]));
+        let out = fit_garment(&portrait, &garment, &clothes).unwrap();
+        let dark = out.get_pixel(2, 10)[0];
+        let bright = out.get_pixel(37, 10)[0];
+        assert!(dark < 110, "原图暗侧应压暗服装，实际 {dark}");
+        assert!(bright > 145, "原图亮侧应提亮服装，实际 {bright}");
+        assert!(bright > dark + 40, "应保留原图明暗起伏 {dark} → {bright}");
+    }
+
+    #[test]
+    fn 光照均匀时服装不变化() {
+        // 人像亮暗均匀（无明暗起伏）→ 光影系数恒为 1.0，服装原色输出
+        let portrait = RgbImage::from_pixel(10, 10, Rgb([0, 0, 255]));
+        let mut clothes = GrayImage::from_pixel(10, 10, Luma([0u8]));
+        for y in 2..6 {
+            for x in 2..6 {
+                clothes.put_pixel(x, y, Luma([255u8]));
+            }
+        }
+        let out = fit_garment(
+            &portrait,
+            &RgbImage::from_pixel(2, 2, Rgb([255, 0, 0])),
+            &clothes,
+        )
+        .unwrap();
+        assert_eq!(
+            *out.get_pixel(3, 3),
+            Rgb([255, 0, 0]),
+            "均匀光照下服装不应被调制"
+        );
+    }
+
+    #[test]
+    fn 原图衣服区全黑不调制() {
+        // 均值近 0（无明暗信息可提取）→ 返回全 1.0，服装保持原色
+        let portrait = RgbImage::from_pixel(6, 6, Rgb([0, 0, 0]));
+        let clothes = GrayImage::from_pixel(6, 6, Luma([255u8]));
+        let factors = shading_factors(&portrait, &clothes, 0, 0, 6, 6);
+        assert!(factors.iter().all(|f| (*f - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn 无衣服像素光影系数为一() {
+        let portrait = RgbImage::from_pixel(4, 4, Rgb([200, 200, 200]));
+        let clothes = GrayImage::from_pixel(4, 4, Luma([0u8]));
+        let factors = shading_factors(&portrait, &clothes, 0, 0, 4, 4);
+        assert!(factors.iter().all(|f| (*f - 1.0).abs() < 1e-6));
     }
 
     #[test]
