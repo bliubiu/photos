@@ -27,7 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 chrono = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "webp"] }
 imageproc = "0.25"
 nalgebra = "0.33"
 sha2 = "0.10"

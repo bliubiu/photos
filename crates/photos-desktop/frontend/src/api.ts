@@ -25,6 +25,7 @@ export interface AppConfig {
   sizes: SizeOption[];
   backgrounds: BackgroundOption[];
   layouts: LayoutOption[];
+  output: { format: string; jpg_quality: number; pdf: boolean };
 }
 
 export interface ModelItem {
@@ -81,6 +82,12 @@ export interface SubmitParams {
   transparent: boolean;
   /** 自定义背景图（服务端本地路径） */
   bg_image: string | null;
+  /** 图片输出格式：jpg | webp */
+  output_format: string;
+  /** JPG 压缩质量 1..=100（webp 为无损，不受此项影响） */
+  jpg_quality: number;
+  /** 排版相纸额外输出 PDF */
+  pdf: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

@@ -2,6 +2,27 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.10] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【输出】新增配置段 `[output]`（`format` = `jpg` | `webp`、`jpg_quality` = 1..=100、`pdf` = 是否额外输出排版 PDF），越界质量在配置校验与请求校验两处均返回中文错误
+- 【输出】新增 **WebP 产物**：`format = "webp"` 时证件照 / 效果图 / 排版图片改以 `.webp` 落盘（透明底仍固定 PNG，因其依赖 alpha 通道）。实现走 `image` 的纯 Rust VP8L 编码器（**无损**，体积通常大于同图 JPG），不引入任何 C/C++ 绑定
+- 【输出】**JPG 压缩质量可调**：原先产物一律按 `image::save` 的默认编码落盘（质量固定），现改为显式 `JpegEncoder::new_with_quality`；质量越低产物体积越小
+- 【输出】**排版结果导出 PDF**：`pdf = true` 时在排版图片之外额外输出 `task_{id}_layout_{相纸}.pdf`。PDF 由 `photos_core::output::layout_pdf` **手写最小单页文档**（不新增第三方依赖）：页面 `/MediaBox` 按相纸物理毫米换算为 pt，整页图像以 `/DCTDecode` 直接内嵌 JPEG（不重采样、不二次压缩），打印店可按原始物理尺寸直接出图
+- 【重构】**产物落盘逻辑集中到 `photos_core::output::save_task_outputs`**（原先 CLI 与 API 各写一份命名规约）：CLI `photos process` 与 API 后台任务共用同一函数，命名规约与格式/质量/PDF 逻辑单点维护
+- 【接口】CLI 新增 `--format <jpg|webp>`、`--quality <1..100>`、`--pdf`；API `params` 新增 `output_format` / `jpg_quality` / `pdf`（非法格式与越界质量返回 `400 INVALID_PARAMS`）；`GET /config` 新增 `output` 段返回三项默认值
+- 【前端】参数面板新增**输出格式下拉**、**JPG 质量滑块**（选 webp 时自动禁用）与**排版 PDF 开关**（未选相纸时禁用），默认值取自 `GET /config` 的 `output` 段
+
+### 🔧 Dependencies 依赖更新
+- `image` 启用 `webp` feature（VP8L 无损编码器与 WebP 解码，纯 Rust）
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：`params` 新增输出三项字段，`GET /config` 响应补充 `output` 段
+- `docs/06-运行使用手册.md`：配置段总览补充 `[output]`，`photos process` 选项表与产物命名表补充格式/质量/PDF
+- `docs/07-能力增强.md`：输出格式（多格式 + 质量参数）与排版 PDF 导出标记为已落地（2026.09.18.10）
+- `docs/01-PRD产品需求说明书.md` §4.1/§4.2 与 `docs/02-架构设计.md` §3/§4.1：补充多格式输出、排版 PDF 与 `[output]` 配置段
+- `docs/examples/application.toml`：新增 `[output]` 段
+
 ## [2026.09.18.9] - 0.1.0
 
 ### ✨ New Features 新增功能

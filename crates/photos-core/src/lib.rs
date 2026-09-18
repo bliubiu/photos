@@ -8,6 +8,7 @@ pub mod error;
 pub mod inference;
 pub mod logging;
 pub mod model;
+pub mod output;
 pub mod pipeline;
 pub mod preprocess;
 pub mod storage;

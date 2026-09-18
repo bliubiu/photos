@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use toml::Value;
 
 use crate::error::{CoreError, CoreResult};
+use crate::output::{DEFAULT_JPG_QUALITY, OutputFormat};
 use crate::vision::mtcnn::{CASCADE_FACE_ID, cascade_model_ids};
 
 /// 全局配置
@@ -39,6 +40,9 @@ pub struct Config {
     /// 美颜参数 `[beauty]`
     #[serde(default)]
     pub beauty: BeautyConfig,
+    /// 输出参数 `[output]`
+    #[serde(default)]
+    pub output: OutputConfig,
     /// 推理资源参数 `[inference]`
     #[serde(default)]
     pub inference: InferenceConfig,
@@ -212,6 +216,30 @@ pub struct BeautyConfig {
     pub whiten: f64,
 }
 
+/// 输出参数 `[output]`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// 证件照/效果图/排版图片格式（jpg | webp）
+    #[serde(default)]
+    pub format: OutputFormat,
+    /// JPG 压缩质量（1..=100；WebP 为无损编码，不受此项影响）
+    #[serde(default = "default_jpg_quality")]
+    pub jpg_quality: u8,
+    /// 排版相纸是否额外输出 PDF（页面按相纸物理尺寸设定，便于打印店直接使用）
+    #[serde(default)]
+    pub pdf: bool,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            format: OutputFormat::Jpg,
+            jpg_quality: default_jpg_quality(),
+            pdf: false,
+        }
+    }
+}
+
 /// 推理资源参数 `[inference]`：约束 ONNX Runtime 的线程与内存行为
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InferenceConfig {
@@ -313,6 +341,12 @@ impl Config {
             return Err(CoreError::ConfigValidate(
                 "[server] max_concurrent_tasks 必须 ≥ 1（设为 0 会导致所有任务永久排队）".into(),
             ));
+        }
+        if !(1..=100).contains(&self.output.jpg_quality) {
+            return Err(CoreError::ConfigValidate(format!(
+                "[output] jpg_quality 需在 1..=100 内，收到 {}",
+                self.output.jpg_quality
+            )));
         }
         for (suite_id, suite) in &self.modes {
             for (role, model_id) in [
@@ -556,6 +590,7 @@ impl Default for Config {
             backgrounds: default_backgrounds(),
             layout: default_layout(),
             beauty: BeautyConfig::default(),
+            output: OutputConfig::default(),
             inference: InferenceConfig::default(),
             server: ServerConfig::default(),
         }
@@ -629,6 +664,9 @@ fn default_whiten() -> f64 {
 }
 fn default_max_concurrent_tasks() -> usize {
     2
+}
+fn default_jpg_quality() -> u8 {
+    DEFAULT_JPG_QUALITY
 }
 
 fn default_models() -> BTreeMap<String, ModelSpec> {
@@ -1263,6 +1301,45 @@ mod tests {
         bad.server.max_concurrent_tasks = 0;
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("max_concurrent_tasks"), "实际 {err}");
+    }
+
+    #[test]
+    fn 输出段默认值与质量校验() {
+        let cfg = Config::default();
+        assert_eq!(cfg.output.format, OutputFormat::Jpg);
+        assert_eq!(cfg.output.jpg_quality, 90);
+        assert!(!cfg.output.pdf);
+        // 质量越界视为非法配置
+        let mut bad = Config::default();
+        bad.output.jpg_quality = 0;
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("jpg_quality"), "实际 {err}");
+        let mut bad = Config::default();
+        bad.output.jpg_quality = 101;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn toml覆盖输出段() {
+        // 与 env 测试串行，避免读到并行测试设置的临时环境变量
+        let _g = with_envs::<&str, &str>(&[], || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("application.toml");
+            std::fs::write(
+                &path,
+                r#"
+[output]
+format = "webp"
+jpg_quality = 60
+pdf = true
+"#,
+            )
+            .unwrap();
+            let cfg = Config::load_from(Some(&path)).unwrap();
+            assert_eq!(cfg.output.format, OutputFormat::Webp);
+            assert_eq!(cfg.output.jpg_quality, 60);
+            assert!(cfg.output.pdf);
+        });
     }
 
     #[test]

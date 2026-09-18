@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
+use photos_core::output::{OutputFormat, OutputOptions, save_task_outputs};
 use photos_core::pipeline::{
     BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine, run_pipeline,
 };
@@ -187,6 +188,18 @@ fn process_one(
         .iter()
         .map(|b| cfg.resolve_background(b).map(|(id, _)| id))
         .collect::<std::result::Result<Vec<String>, _>>()?;
+    // 落盘选项：命令行参数覆盖配置 `[output]` 默认值
+    let mut out_opts = OutputOptions::from_config(cfg);
+    if let Some(f) = args.format.as_deref() {
+        out_opts.format = OutputFormat::parse(f)?;
+    }
+    if let Some(q) = args.quality {
+        out_opts.jpg_quality = q;
+    }
+    if args.pdf {
+        out_opts.pdf = true;
+    }
+    out_opts.validate()?;
     let started = std::time::Instant::now();
     let beauty = if args.beauty {
         "{\"enabled\":true}"
@@ -259,40 +272,20 @@ fn process_one(
     };
     match run_pipeline(cfg, engine, &req) {
         Ok(r) => {
-            // 证件照：task_{id}_{size}_{bg}.jpg
-            let mut outputs = Vec::new();
-            for photo in &r.photos {
-                let out_path = out_dir.join(format!("task_{task_id}_{size}_{}.jpg", photo.bg));
-                photo
-                    .image
-                    .save(&out_path)
-                    .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
-                outputs.push(out_path.display().to_string());
-            }
-            // 效果图：task_{id}_effect_{bg}.jpg
-            for eff in &r.effects {
-                let out_path = out_dir.join(format!("task_{task_id}_effect_{}.jpg", eff.bg));
-                eff.image
-                    .save(&out_path)
-                    .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
-                outputs.push(out_path.display().to_string());
-            }
-            // 排版相纸：task_{id}_layout_{相纸}.jpg
-            if let Some(canvas) = &r.layout {
-                let layout_id = args.layout.as_deref().unwrap_or("layout");
-                let out_path = out_dir.join(format!("task_{task_id}_layout_{layout_id}.jpg"));
-                canvas
-                    .save(&out_path)
-                    .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
-                outputs.push(out_path.display().to_string());
-            }
-            // 透明底证件照：task_{id}_{size}_transparent.png
-            if let Some(rgba) = &r.transparent {
-                let out_path = out_dir.join(format!("task_{task_id}_{size}_transparent.png"));
-                rgba.save(&out_path)
-                    .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
-                outputs.push(out_path.display().to_string());
-            }
+            // 产物落盘：命名规约集中在 photos_core::output（与 API 一致）
+            let layout_id = args.layout.as_deref();
+            let layout_spec = layout_id.and_then(|id| cfg.layout.get(id));
+            let paths = save_task_outputs(
+                out_dir,
+                task_id,
+                &size,
+                layout_spec,
+                layout_id,
+                &r,
+                &out_opts,
+            )
+            .context("保存输出失败")?;
+            let outputs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             let outputs_json = serde_json::to_string(&outputs)?;
             let warnings = serde_json::to_string(&r.warnings)?;
             store.update_task(

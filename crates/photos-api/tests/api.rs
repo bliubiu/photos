@@ -864,6 +864,148 @@ async fn 模型下载_缺失且无下载地址返回失败项() {
     assert!(item["message"].as_str().unwrap().contains("未配置下载地址"));
 }
 
+/// 以自定义 params 创建任务并轮询至终态
+async fn create_custom_and_wait(app: &axum::Router, params: &str) -> (String, Value) {
+    let (body, ctype) = multipart_body(&demo_jpeg(), params);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "创建任务失败：{json}");
+    let id = json["id"].as_str().unwrap().to_string();
+
+    let detail = loop {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (_, d) = send(app, req).await;
+        let st = d["status"].as_str().unwrap();
+        if st == "succeeded" || st == "failed" {
+            break d;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    (id, detail)
+}
+
+/// 产物文件中指定后缀的体积合计
+fn outputs_size(detail: &Value, dir: &std::path::Path, suffix: &str) -> u64 {
+    detail["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["filename"].as_str().unwrap().ends_with(suffix))
+        .map(|a| {
+            std::fs::metadata(dir.join(a["filename"].as_str().unwrap()))
+                .unwrap()
+                .len()
+        })
+        .sum()
+}
+
+#[tokio::test]
+async fn 输出格式可切换为webp() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (_, detail) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"output_format":"webp"}"#,
+    )
+    .await;
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    let artifacts = detail["artifacts"].as_array().unwrap();
+    let webp = artifacts
+        .iter()
+        .find(|a| a["filename"].as_str().unwrap().ends_with(".webp"))
+        .expect("应有 webp 产物");
+    let path = t.out_dir().join(webp["filename"].as_str().unwrap());
+    let bytes = std::fs::read(path).unwrap();
+    // RIFF....WEBP
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+}
+
+#[tokio::test]
+async fn jpg质量参数影响产物体积() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (_, hi) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"jpg_quality":95}"#,
+    )
+    .await;
+    let (_, lo) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"jpg_quality":20}"#,
+    )
+    .await;
+    let hi_bytes = outputs_size(&hi, &t.out_dir(), ".jpg");
+    let lo_bytes = outputs_size(&lo, &t.out_dir(), ".jpg");
+    assert!(hi_bytes > 0 && lo_bytes > 0, "应各有 jpg 产物");
+    assert!(
+        lo_bytes < hi_bytes,
+        "低质量产物应更小：{lo_bytes} vs {hi_bytes}"
+    );
+}
+
+#[tokio::test]
+async fn 排版可额外输出pdf() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (_, detail) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"layout":"6inch","pdf":true}"#,
+    )
+    .await;
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    let artifacts = detail["artifacts"].as_array().unwrap();
+    // 排版图片与 PDF 同时输出
+    assert!(artifacts.iter().any(|a| {
+        let f = a["filename"].as_str().unwrap();
+        f.contains("_layout_") && f.ends_with(".jpg")
+    }));
+    let pdf = artifacts
+        .iter()
+        .find(|a| a["filename"].as_str().unwrap().ends_with(".pdf"))
+        .expect("应有 PDF 产物");
+    let bytes = std::fs::read(t.out_dir().join(pdf["filename"].as_str().unwrap())).unwrap();
+    assert_eq!(&bytes[..8], b"%PDF-1.4");
+}
+
+#[tokio::test]
+async fn 输出参数非法返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    for params in [
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"output_format":"tiff"}"#,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"jpg_quality":0}"#,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"jpg_quality":101}"#,
+    ] {
+        let (body, ctype) = multipart_body(&demo_jpeg(), params);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/tasks")
+            .header(header::CONTENT_TYPE, ctype)
+            .body(Body::from(body))
+            .unwrap();
+        let (status, json) = send(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "应拒绝：{params} → {json}");
+    }
+}
+
 /// 测试用引擎工厂（demo 回放，不入池）
 fn test_factory() -> EngineFactory {
     Arc::new(|w, h| {

@@ -24,6 +24,9 @@ export interface ParamsState {
   bgImage: string | null; // 自定义背景图路径
   customBg: string | null; // 自定义 RGB 底色（#RRGGBB），null = 不启用
   customSize: string | null; // 自定义尺寸标识（mm:宽x高@DPI），null = 用内置尺寸
+  outputFormat: string; // 图片输出格式：jpg | webp
+  jpgQuality: number; // JPG 压缩质量 1..=100
+  pdf: boolean; // 排版相纸额外输出 PDF
 }
 
 /** 批量项状态：上传中 → 处理中 → 成功 / 失败 */
@@ -79,6 +82,9 @@ function toSubmitParams(params: ParamsState): SubmitParams {
     effect_image: params.effect,
     transparent: params.transparent,
     bg_image: params.bgImage,
+    output_format: params.outputFormat,
+    jpg_quality: params.jpgQuality,
+    pdf: params.pdf,
   };
 }
 
@@ -117,6 +123,9 @@ export const useStore = create<AppState>((set, get) => ({
     bgImage: null,
     customBg: null,
     customSize: null,
+    outputFormat: "jpg",
+    jpgQuality: 90,
+    pdf: false,
   },
   batch: [],
   lastPayload: null,
@@ -146,6 +155,9 @@ export const useStore = create<AppState>((set, get) => ({
           bgImage: null,
           customBg: null,
           customSize: null,
+          outputFormat: config.output?.format ?? "jpg",
+          jpgQuality: config.output?.jpg_quality ?? 90,
+          pdf: config.output?.pdf ?? false,
         },
       });
     } catch (e) {

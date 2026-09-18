@@ -51,7 +51,7 @@
 | kind | 额外字段 | 含义 |
 |---|---|---|
 | `id_photo` | `background` | 某底色证件照；`background=transparent` 为透明底 PNG（`params.transparent` 触发），`background=custombg` 为自定义背景图合成结果（`params.bg_image` 触发） |
-| `layout` | `layout`（`6inch`\|`a4`） | 排版相纸 |
+| `layout` | `layout`（`6inch`\|`a4`） | 排版相纸（`params.pdf` 为 true 时同一 kind 下另有 `.pdf` 产物，见 §3.1） |
 | `effect` | — | 通用效果图 |
 | `bundle` | — | 全部产物打包 zip（仅下载侧） |
 
@@ -90,7 +90,10 @@
   "layout": null,
   "effect_image": false,
   "transparent": false,
-  "bg_image": null
+  "bg_image": null,
+  "output_format": "jpg",
+  "jpg_quality": 90,
+  "pdf": false
 }
 ```
 
@@ -106,6 +109,9 @@
 | `effect_image` | bool | 是否输出通用效果图 |
 | `transparent` | bool | 是否额外输出透明底 PNG（RGBA，alpha 取抠图掩膜）；缺省 false |
 | `bg_image` | string\|null | 自定义背景图服务端本地路径；按证件照尺寸 cover 等比铺满并居中裁切后与人像合成，额外出 `background=custombg` 产物；读取失败返回 `400` |
+| `output_format` | string\|null | `jpg`\|`webp`（大小写不敏感，`jpeg` 等价 `jpg`）；缺省用 `[output].format`；非法值返回 `400` |
+| `jpg_quality` | number\|null | JPG 压缩质量 `1..=100`，缺省用 `[output].jpg_quality`；越界返回 `400`；对 `webp`（VP8L 无损）无效 |
+| `pdf` | bool\|null | 是否在排版图片之外额外输出 `task_{id}_layout_{相纸}.pdf`；需同时指定 `layout` 才产出；缺省用 `[output].pdf` |
 
 #### 成功响应
 
@@ -251,7 +257,8 @@
   ],
   "sizes": [{ "id": "one_inch", "name": "一寸", "width_px": 295, "height_px": 413 }],
   "backgrounds": [{ "id": "white", "name": "白", "rgb": [255, 255, 255] }],
-  "layouts": [{ "id": "6inch", "name": "6寸相纸" }, { "id": "a4", "name": "A4" }]
+  "layouts": [{ "id": "6inch", "name": "6寸相纸" }, { "id": "a4", "name": "A4" }],
+  "output": { "format": "jpg", "jpg_quality": 90, "pdf": false }
 }
 ```
 

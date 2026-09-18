@@ -117,7 +117,9 @@ pub fn content_type(filename: &str) -> &'static str {
     match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
+        "webp" => "image/webp",
         "bmp" => "image/bmp",
+        "pdf" => "application/pdf",
         "zip" => "application/zip",
         _ => "application/octet-stream",
     }

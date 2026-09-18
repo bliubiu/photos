@@ -43,7 +43,7 @@
 - 底色列表支持 1..N 个，一次处理出齐（红/白/蓝/灰/自定义 RGB）。
 - 美颜：磨皮、美白、提亮（开关 + 强度可调）。
 - 智能换装：正装替换（实验性功能，默认关闭）。
-- 结果输出：通用效果图（可选）+ 每底色各一张证件照（可选）+ 排版相纸（可选）。
+- 结果输出：通用效果图（可选）+ 每底色各一张证件照（可选）+ 排版相纸（可选）+ 排版 PDF（可选，按相纸物理尺寸）+ 透明底 PNG（可选，供用户自行合成）；图片格式支持 `jpg` / `webp`，JPG 压缩质量可调。
 
 ### 4.2 CLI 命令行模式
 
@@ -51,7 +51,7 @@
 
 | 子命令 | 用途 | 关键参数 |
 |---|---|---|
-| `photos process` | 单图 / 文件夹批量处理 | `-m/--mode speed|balanced|quality`、`-s/--size 一寸`、`-b/--backgrounds red,blue`、`--beauty 开关+强度`、`--rotate 手动纠偏角度`、`--layout 6inch|a4`、`-o/--out 目录` |
+| `photos process` | 单图 / 文件夹批量处理 | `-m/--mode speed|balanced|quality`、`-s/--size 一寸`、`-b/--backgrounds red,blue`、`--beauty 开关+强度`、`--rotate 手动纠偏角度`、`--layout 6inch|a4`、`--format jpg|webp`、`--quality 1..100`、`--pdf`、`-o/--out 目录` |
 | `photos serve` | 启动本地 HTTP 服务（复用 `photos-api`） | `--host 127.0.0.1`、`--port 随机` |
 | `photos models` | 列出模型清单与校验状态 | 无 |
 

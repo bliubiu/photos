@@ -14,6 +14,7 @@ use serde_json::json;
 
 use photos_core::config::Config;
 use photos_core::model::{CheckStatus, check_models, download_model, resolve_model_path};
+use photos_core::output::{OutputFormat, save_task_outputs};
 use photos_core::pipeline::{ProcessRequest, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
@@ -84,6 +85,12 @@ pub struct TaskParams {
     pub transparent: Option<bool>,
     /// 自定义背景图路径（服务端本地路径，cover 缩放裁切后与人像合成）
     pub bg_image: Option<String>,
+    /// 图片输出格式（jpg | webp；缺省取全局配置 `[output].format`）
+    pub output_format: Option<String>,
+    /// JPG 压缩质量 1..=100（缺省取全局配置 `[output].jpg_quality`；WebP 为无损不受影响）
+    pub jpg_quality: Option<u8>,
+    /// 排版相纸是否额外输出 PDF（缺省取全局配置 `[output].pdf`）
+    pub pdf: Option<bool>,
 }
 
 /// 美颜参数（enabled 开关；强度缺省取全局配置 `[beauty]` 默认值）
@@ -139,6 +146,21 @@ fn validate_beauty(beauty: &Option<BeautyParams>) -> Result<(), ApiError> {
                     )));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// 校验输出参数（格式合法、JPG 压缩质量 1..=100）
+fn validate_output(params: &TaskParams) -> Result<(), ApiError> {
+    if let Some(f) = params.output_format.as_deref() {
+        OutputFormat::parse(f).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+    }
+    if let Some(q) = params.jpg_quality {
+        if !(1..=100).contains(&q) {
+            return Err(ApiError::InvalidParams(format!(
+                "JPG 压缩质量需在 1..=100 内，收到 {q}"
+            )));
         }
     }
     Ok(())
@@ -245,6 +267,11 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Response {
         "sizes": cfg.sizes.iter().map(|(id, s)| json!({ "id": id, "name": s.name, "width_px": s.width_px, "height_px": s.height_px })).collect::<Vec<_>>(),
         "backgrounds": cfg.backgrounds.iter().map(|(id, b)| json!({ "id": id, "name": b.name, "rgb": b.rgb })).collect::<Vec<_>>(),
         "layouts": cfg.layout.iter().map(|(id, l)| json!({ "id": id, "name": l.name })).collect::<Vec<_>>(),
+        "output": {
+            "format": cfg.output.format,
+            "jpg_quality": cfg.output.jpg_quality,
+            "pdf": cfg.output.pdf,
+        },
     }))
     .into_response()
 }
@@ -445,6 +472,7 @@ async fn create_task_inner(
     let effect = params.effect_image.unwrap_or(false);
     validate_beauty(&params.beauty)?;
     validate_dress(&params.dress)?;
+    validate_output(&params)?;
 
     // 4. 模型预检（就绪才受理；缺失返回 503，不自动下载以免阻塞）
     if state.model_precheck {
@@ -554,6 +582,9 @@ async fn create_task_inner(
             dress: params.dress,
             transparent: params.transparent,
             bg_image: params.bg_image,
+            output_format: params.output_format,
+            jpg_quality: params.jpg_quality,
+            pdf: params.pdf,
         },
         input_path,
     );
@@ -595,6 +626,17 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         let effect = params.effect_image.unwrap_or(false);
         let layout = params.layout.clone();
         let rotate = params.rotate;
+        // 落盘选项：请求参数覆盖配置 `[output]` 默认值（格式与质量已在受理处校验）
+        let mut out_opts = photos_core::output::OutputOptions::from_config(&state.cfg);
+        if let Some(f) = params.output_format.as_deref() {
+            out_opts.format = OutputFormat::parse(f).unwrap_or(out_opts.format);
+        }
+        if let Some(q) = params.jpg_quality {
+            out_opts.jpg_quality = q;
+        }
+        if let Some(p) = params.pdf {
+            out_opts.pdf = p;
+        }
         let beauty = params
             .beauty
             .clone()
@@ -647,55 +689,25 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         let elapsed = started.elapsed().as_millis() as i64;
         let outcome = match result {
             Ok(Ok(r)) => {
-                // 产物落盘（命名规约与 CLI 一致）
-                let mut outputs: Vec<String> = Vec::new();
-                let mut save_err: Option<String> = None;
-                std::fs::create_dir_all(&state.out_dir).ok();
-                for photo in &r.photos {
-                    let out_path = state
-                        .out_dir
-                        .join(format!("task_{task_id}_{size}_{}.jpg", photo.bg));
-                    if let Err(e) = photo.image.save(&out_path) {
-                        save_err = Some(format!("保存证件照失败：{e}"));
-                        break;
-                    }
-                    outputs.push(out_path.display().to_string());
-                }
-                for eff in &r.effects {
-                    let out_path = state
-                        .out_dir
-                        .join(format!("task_{task_id}_effect_{}.jpg", eff.bg));
-                    if let Err(e) = eff.image.save(&out_path) {
-                        save_err = Some(format!("保存效果图失败：{e}"));
-                        break;
-                    }
-                    outputs.push(out_path.display().to_string());
-                }
-                if let Some(canvas) = &r.layout {
-                    let layout_id = layout.as_deref().unwrap_or("layout");
-                    let out_path = state
-                        .out_dir
-                        .join(format!("task_{task_id}_layout_{layout_id}.jpg"));
-                    if let Err(e) = canvas.save(&out_path) {
-                        save_err = Some(format!("保存排版失败：{e}"));
-                    } else {
-                        outputs.push(out_path.display().to_string());
-                    }
-                }
-                if let Some(rgba) = &r.transparent {
-                    let out_path = state
-                        .out_dir
-                        .join(format!("task_{task_id}_{size}_transparent.png"));
-                    if let Err(e) = rgba.save(&out_path) {
-                        save_err = Some(format!("保存透明底证件照失败：{e}"));
-                    } else {
-                        outputs.push(out_path.display().to_string());
-                    }
-                }
-                if let Some(err) = save_err {
-                    Err(err)
-                } else {
-                    Ok((outputs, r.warnings))
+                // 产物落盘（命名规约集中在 photos_core::output，与 CLI 一致）
+                let layout_spec = layout.as_deref().and_then(|id| state.cfg.layout.get(id));
+                match save_task_outputs(
+                    &state.out_dir,
+                    task_id,
+                    &size,
+                    layout_spec,
+                    layout.as_deref(),
+                    &r,
+                    &out_opts,
+                ) {
+                    Ok(paths) => Ok((
+                        paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>(),
+                        r.warnings,
+                    )),
+                    Err(e) => Err(e.to_string()),
                 }
             }
             Ok(Err(e)) => Err(e.to_string()),

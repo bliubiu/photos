@@ -249,6 +249,42 @@ export default function ParamsPanel() {
         输出透明底 PNG（带 alpha 通道）
       </label>
 
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">输出格式</label>
+          <select
+            value={params.outputFormat}
+            onChange={(e) => setParams({ outputFormat: e.target.value })}
+            className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+          >
+            <option value="jpg">JPG（有损）</option>
+            <option value="webp">WebP（无损）</option>
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">JPG 质量：{params.jpgQuality}</label>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            value={params.jpgQuality}
+            disabled={params.outputFormat !== "jpg"}
+            onChange={(e) => setParams({ jpgQuality: Number(e.target.value) })}
+            className="w-full"
+          />
+        </div>
+      </div>
+
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input
+          type="checkbox"
+          checked={params.pdf}
+          disabled={!params.layout}
+          onChange={(e) => setParams({ pdf: e.target.checked })}
+        />
+        排版结果额外输出 PDF（页面按相纸物理尺寸）
+      </label>
+
       <div>
         <label className="mb-1 block text-xs text-gray-500">自定义背景图（本地路径，可选）</label>
         <input

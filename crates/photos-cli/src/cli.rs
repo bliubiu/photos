@@ -126,6 +126,15 @@ pub struct ProcessArgs {
     /// 自定义背景图路径（按证件照尺寸 cover 缩放裁切后合成，额外出 custombg 产物）
     #[arg(long, value_name = "背景图")]
     pub bg_image: Option<PathBuf>,
+    /// 图片输出格式：jpg | webp（默认取配置 [output].format）
+    #[arg(long, value_name = "格式")]
+    pub format: Option<String>,
+    /// JPG 压缩质量 1..=100（默认取配置 [output].jpg_quality；WebP 为无损编码不受此项影响）
+    #[arg(long, value_name = "质量")]
+    pub quality: Option<u8>,
+    /// 排版相纸额外输出 PDF（页面按相纸物理尺寸设定，便于打印店直接使用）
+    #[arg(long)]
+    pub pdf: bool,
     /// 输出目录（默认 data/out）
     #[arg(short, long, value_name = "目录")]
     pub out: Option<PathBuf>,
