@@ -117,7 +117,8 @@ pub fn rotate_translate_image_same(
         shift_y,
     );
     let rotated_img = warp(img, &m, Interpolation::Bilinear, Rgb([0, 0, 0]));
-    let rotated_mask = warp(mask, &m, Interpolation::Nearest, Luma([0u8]));
+    // mask 也须双线性插值：最近邻会把半透明发丝断成硬边锯齿；双线性保持 alpha 连续性
+    let rotated_mask = warp(mask, &m, Interpolation::Bilinear, Luma([0u8]));
     Ok((rotated_img, rotated_mask))
 }
 

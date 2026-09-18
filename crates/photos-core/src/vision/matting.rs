@@ -9,6 +9,9 @@ use imageproc::morphology::close;
 
 /// 距离场羽化前的形态学闭运算半径（填充 mask 内部小孔）
 const CLOSE_RADIUS: u32 = 1;
+/// 距离场骨架的 alpha 存在阈值：低于该值的 alpha 视为背景噪声，不多保留；
+/// 高于该值（如淡发丝、薄纱的半透明像素）即纳入前景骨架，避免被距离场当背景压灭。
+const SKELETON_EXIST_ALPHA: u8 = 16;
 
 /// 概率 mask（[0,255] 灰度）阈值化得到二值 mask
 pub fn threshold_mask(mask: &GrayImage, threshold: u8) -> GrayImage {
@@ -59,9 +62,11 @@ pub fn levelset_alpha(prob: &GrayImage, threshold: u8, soft_range: u8) -> GrayIm
 /// 主体内部恒 255、外部恒 0，仅过渡带（约 ±`feather_px`）内渐降并与输入软 alpha 取较小值。
 ///
 /// 过渡带形状贴合骨架（各向异性），不会像整图高斯那样把细发丝糊穿。
-pub fn distance_feather(alpha: &GrayImage, threshold: u8, feather_px: f32) -> GrayImage {
+/// 骨架阈值必须取「存在阈值」而非主阈值：软阈值过渡带产出的淡发丝 alpha 常低于
+/// 主阈值（如 128），若以此划骨架会被当背景压灭（发丝细节丢失）。
+pub fn distance_feather(alpha: &GrayImage, feather_px: f32) -> GrayImage {
     let (w, h) = alpha.dimensions();
-    let bin = morph_close(&threshold_mask(alpha, threshold), CLOSE_RADIUS);
+    let bin = morph_close(&threshold_mask(alpha, SKELETON_EXIST_ALPHA), CLOSE_RADIUS);
     // 补图：非零像素为源，故原前景像素得到「到最近背景像素的距离」
     let mut inv = GrayImage::new(w, h);
     for (x, y, p) in bin.enumerate_pixels() {
@@ -169,7 +174,7 @@ mod tests {
                 px[y * 16 + x] = 255;
             }
         }
-        let a = distance_feather(&gray(&px, 16, 16), 128, 2.0);
+        let a = distance_feather(&gray(&px, 16, 16), 2.0);
         assert_eq!(a.get_pixel(8, 8)[0], 255, "主体内部应恒为 255");
         assert_eq!(a.get_pixel(0, 0)[0], 0, "外部应恒为 0");
         // 沿边界法线：由外向内单调不减（0 → 过渡带 → 主体 255）
@@ -190,9 +195,42 @@ mod tests {
         for y in 2..14 {
             px[y * 16 + 8] = 255;
         }
-        let a = distance_feather(&gray(&px, 16, 16), 128, 2.0);
+        let a = distance_feather(&gray(&px, 16, 16), 2.0);
         let v = a.get_pixel(8, 8)[0];
         assert!(v > 0, "细发丝不应被删除");
         assert!(v < 255, "1px 细结构应呈半透明过渡");
+    }
+
+    #[test]
+    fn 距离场保留淡发丝低alpha() {
+        // 主体 + 距边界 2px 外的 1px 淡发丝（prob≈0.47 → soft alpha 约 66）：
+        // 淡发丝 alpha 低于骨架阈值，若用 128 标记背景会被距离场压灭。
+        // 先经软阈值，再距离场羽化，淡发丝应保留为半透明而非归零。
+        let mut px = vec![0u8; 640]; // 16x40
+        for y in 0..16 {
+            for x in 0..28 {
+                px[y * 40 + x] = 255; // 主体
+            }
+        }
+        for y in 0..16 {
+            px[y * 40 + 30] = 120; // 淡发丝，距主体边界 2px
+        }
+        let soft = levelset_alpha(&gray(&px, 40, 16), 128, 48);
+        let a = distance_feather(&soft, 2.0);
+        let v = a.get_pixel(30, 8)[0];
+        assert!(v > 30, "淡发丝不应被距离场压灭，实际 {v}");
+        assert!(v < 255, "淡发丝应保留半透明，实际 {v}");
+    }
+
+    #[test]
+    fn 软阈值过渡带下界保留淡发丝() {
+        // prob 120（≈0.47）处于软阈值过渡带下缘：应产出非零半透明 alpha，
+        // 而不是被硬阈值直接清零（此为发丝/半透明衣物丢细节的根因之一）。
+        let m = gray(&[120, 111, 105, 104], 4, 1);
+        let a = levelset_alpha(&m, 128, 48);
+        let vals: Vec<u8> = a.pixels().map(|p| p[0]).collect();
+        assert!(vals[0] > 40, "prob=120 应保留可见 alpha，实际 {}", vals[0]);
+        assert!(vals[1] > 0, "prob=111 应保留非零 alpha，实际 {}", vals[1]);
+        assert_eq!(vals[3], 0, "prob=104（过渡带下界）应恰好为零");
     }
 }

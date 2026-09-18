@@ -84,8 +84,9 @@ const FACE_SCORE_THRESHOLD: f32 = 0.5;
 const NMS_IOU_THRESHOLD: f32 = 0.4;
 /// 抠图概率 mask 阈值（[0,1] 输出按 ×255 后阈值化）
 const MASK_THRESHOLD: u8 = 128;
-/// 软阈值（level-set）过渡带宽：保留发丝等亚像素半透明像素
-const MASK_SOFT_RANGE: u8 = 48;
+/// 软阈值（level-set）过渡带宽：保留发丝等亚像素半透明像素。
+/// 下界 = 阈值 - 带宽/2(96)，兼顾 0.38 概率的淡发丝；上界 160 不引入 0.63 背景噪声。
+const MASK_SOFT_RANGE: u8 = 64;
 /// 距离场羽化过渡带宽度（像素）
 const MASK_FEATHER_PX: f32 = 2.0;
 /// 头顶留白 = 0.2 × 脸高
@@ -870,7 +871,7 @@ fn step_background(ctx: &mut PipelineCtx) -> CoreResult<()> {
     let alpha = ctx
         .rot_mask
         .as_ref()
-        .map(|m| distance_feather(m, MASK_THRESHOLD, MASK_FEATHER_PX));
+        .map(|m| distance_feather(m, MASK_FEATHER_PX));
     if alpha.is_none() {
         ctx.warn("未启用人像抠图步骤，跳过换底合成并直接裁切当前图像");
     }
@@ -1024,7 +1025,7 @@ fn probability_mask(
 ) -> CoreResult<GrayImage> {
     let prob = probability_map(out, w, h, letterbox)?;
     let soft = levelset_alpha(&prob, MASK_THRESHOLD, MASK_SOFT_RANGE);
-    Ok(distance_feather(&soft, MASK_THRESHOLD, MASK_FEATHER_PX))
+    Ok(distance_feather(&soft, MASK_FEATHER_PX))
 }
 
 /// 五官保护掩膜：输入 `face` 已处于纠偏后坐标系（由 `step_rotate` 变换），
