@@ -71,10 +71,14 @@ pub fn detect_mtcnn_cascade(
         let sw = ((img_w as f32 * scale).ceil() as u32).max(12);
         let sh = ((img_h as f32 * scale).ceil() as u32).max(12);
         let scaled = image::imageops::resize(img, sw, sh, FilterType::Triangle);
-        // Keras 导出的 P-Net 输入为 NHWC [1,H,W,3]（图内首层 Transpose NCHW）
-        let input = mtcnn_nhwc(&scaled);
-        let tensor = TensorData::new(vec![1, sh as i64, sw as i64, 3], input)?;
+        // 该 Keras 导出的 P-Net 约定输入为 [1,W,H,3]（上游 mtcnn-opencv 在喂图前
+        // `np.transpose(img_x, (0,2,1,3))` 交换宽高；实测 argmax 位置亦证实），
+        // 故按宽度优先展平、张量形状声明 [1,sw,sh,3]
+        let input = mtcnn_nhwc_wmajor(&scaled);
+        let tensor = TensorData::new(vec![1, sw as i64, sh as i64, 3], input)?;
         let outs = engine.run(PNET_ID, &tensor)?;
+        // 模型输出空间维为 [1,W',H',C]，转回 [1,H',W',C] 再解码
+        let outs = pnet_transpose_out(outs);
         let proposals = pnet_decode(&outs, scale, THRESHOLDS[0])?;
         let kept = nms_boxes(&proposals, 0.5);
         total.extend(kept);
@@ -163,12 +167,12 @@ fn pyramid_scales(w: u32, h: u32) -> Vec<f32> {
     scales
 }
 
-/// RGB → (x-127.5)/128 NHWC（Keras MTCNN 输入布局）
-fn mtcnn_nhwc(img: &RgbImage) -> Vec<f32> {
+/// P-Net 专用：按宽度优先展平（[1,W,H,3]，与上游 `np.transpose(img_x,(0,2,1,3))` 等价）
+fn mtcnn_nhwc_wmajor(img: &RgbImage) -> Vec<f32> {
     let (w, h) = img.dimensions();
     let mut out = Vec::with_capacity((w * h * 3) as usize);
-    for y in 0..h {
-        for x in 0..w {
+    for x in 0..w {
+        for y in 0..h {
             let p = img.get_pixel(x, y);
             for c in 0..3 {
                 out.push((p[c] as f32 - 127.5) * 0.0078125);
@@ -178,15 +182,42 @@ fn mtcnn_nhwc(img: &RgbImage) -> Vec<f32> {
     out
 }
 
+/// P-Net 输出空间维 [1,W',H',C] → [1,H',W',C]（等价上游 `np.transpose(out,(0,2,1,3))`）
+fn pnet_transpose_out(outs: Vec<TensorData>) -> Vec<TensorData> {
+    outs.into_iter()
+        .map(|t| {
+            if t.shape.len() != 4 {
+                return t;
+            }
+            let (a, b, c) = (t.shape[1] as usize, t.shape[2] as usize, t.shape[3] as usize);
+            let mut v = Vec::with_capacity(t.data.len());
+            for bi in 0..b {
+                for ai in 0..a {
+                    for ci in 0..c {
+                        v.push(t.data[(ai * b + bi) * c + ci]);
+                    }
+                }
+            }
+            match TensorData::new(vec![1, b as i64, a as i64, c as i64], v) {
+                Ok(nt) => nt,
+                Err(_) => t,
+            }
+        })
+        .collect()
+}
+
 /// 从输出张量识别 heatmap(2ch) / bbox(4ch)（按通道数，不依赖输出顺序）
 fn split_hm_reg(outs: &[TensorData]) -> CoreResult<(&TensorData, &TensorData)> {
     let mut hm = None;
     let mut reg = None;
     for t in outs {
         let c = if t.shape.len() >= 2 {
-            // [1,2,H,W] → dims[1]；[2,H,W] → dims[0]；[1,N,2] 时最后维 2
+            // NCHW [1,2,H,W] → dims[1]；[2,H,W] → dims[0]；NHWC [1,H,W,2] → 末维；
+            // [1,N,2] 时最后维 2
             if t.shape.len() == 4 && (t.shape[1] == 2 || t.shape[1] == 4) {
                 t.shape[1] as usize
+            } else if t.shape.len() == 4 && (t.shape[3] == 2 || t.shape[3] == 4) {
+                t.shape[3] as usize
             } else if t.shape.len() == 3 && (t.shape[0] == 2 || t.shape[0] == 4) {
                 t.shape[0] as usize
             } else if t.data.len() % 4 == 0 && t.data.len() % 2 == 0 && t.shape.len() == 2 {
@@ -218,8 +249,9 @@ fn split_hm_reg(outs: &[TensorData]) -> CoreResult<(&TensorData, &TensorData)> {
     match (hm, reg) {
         (Some(h), Some(r)) => Ok((h, r)),
         _ => Err(CoreError::Image(format!(
-            "MTCNN 输出无法识别 heatmap/bbox（收到 {} 个张量）",
-            outs.len()
+            "MTCNN 输出无法识别 heatmap/bbox（收到 {} 个张量，形状 {:?}）",
+            outs.len(),
+            outs.iter().map(|t| &t.shape).collect::<Vec<_>>()
         ))),
     }
 }
@@ -245,18 +277,34 @@ fn chw_shape(t: &TensorData) -> Option<(usize, usize, usize)> {
 /// P-Net 解码：特征图坐标 → 原缩放图像素 → 原图像素（/scale）
 fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5>> {
     let (hm, reg) = split_hm_reg(outs)?;
-    let (h, w) = {
-        let (_, h, w) =
-            chw_shape(hm).ok_or_else(|| CoreError::Image("P-Net heatmap 布局非法".into()))?;
-        (h, w)
+    // 布局感知的空间维解析：NHWC [1,H,W,2] → (shape[1],shape[2])；
+    // NCHW [1,2,H,W] → (shape[2],shape[3])。此前统一走 chw_shape，
+    // 把 NHWC 的末维通道数 2 当成空间宽，导致扫描窗只有 2 列、永远检不出
+    let (h, w, hm_is_nchw) = if hm.shape.len() == 4 && hm.shape[3] == 2 && hm.shape[1] != 2 {
+        // NHWC [1,H,W,2]
+        (hm.shape[1] as usize, hm.shape[2] as usize, false)
+    } else if hm.shape.len() == 4 {
+        // NCHW [1,2,H,W]
+        (
+            hm.shape[2] as usize,
+            hm.shape[3] as usize,
+            hm.shape[1] == 2,
+        )
+    } else if hm.shape.len() == 3 {
+        // [H,W,2] 或 [2,H,W]
+        if hm.shape[2] == 2 {
+            (hm.shape[0] as usize, hm.shape[1] as usize, false)
+        } else {
+            (hm.shape[1] as usize, hm.shape[2] as usize, true)
+        }
+    } else {
+        return Err(CoreError::Image("P-Net heatmap 布局非法".into()));
     };
     if h == 0 || w == 0 {
         return Ok(Vec::new());
     }
     let hm_data = &hm.data;
     let reg_data = &reg.data;
-    // 兼容 [1,2,H,W] 与 NHWC [1,H,W,2]
-    let hm_is_nchw = chw_shape(hm).map(|(c, _, _)| c == 2).unwrap_or(false);
     let stride = 2.0f32;
     let cell = 12.0f32;
     let mut out = Vec::new();
@@ -274,7 +322,18 @@ fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5
             if score < thr {
                 continue;
             }
-            let (r0, r1, r2, r3) = if reg_data.len() >= 4 * h * w {
+            // bbox 回归：按 reg 实际布局取值（NCHW [1,4,H,W] 通道优先；
+            // NHWC [1,H,W,4] 像素连续——linxiaohui/mtcnn-opencv 导出即此布局）
+            let reg_is_nhwc = reg.shape.len() == 4 && reg.shape[3] == 4 && reg.shape[1] != 4;
+            let (r0, r1, r2, r3) = if reg_is_nhwc {
+                let b = (y * w + x) * 4;
+                (
+                    reg_data[b],
+                    reg_data[b + 1],
+                    reg_data[b + 2],
+                    reg_data[b + 3],
+                )
+            } else if reg_data.len() >= 4 * h * w {
                 // NCHW 4 通道
                 let n = h * w;
                 (
@@ -282,14 +341,6 @@ fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5
                     reg_data[n + y * w + x],
                     reg_data[n * 2 + y * w + x],
                     reg_data[n * 3 + y * w + x],
-                )
-            } else if reg_data.len() >= h * w * 4 {
-                let b = (y * w + x) * 4;
-                (
-                    reg_data[b],
-                    reg_data[b + 1],
-                    reg_data[b + 2],
-                    reg_data[b + 3],
                 )
             } else {
                 (0.0, 0.0, 0.0, 0.0)
@@ -418,8 +469,10 @@ fn crop_batch_mtcnn(img: &RgbImage, boxes: &[Box5], side: u32) -> CoreResult<Vec
         let ch = y2.saturating_sub(y1).max(1);
         let crop = image::imageops::crop_imm(img, x1, y1, cw, ch).to_image();
         let resized = image::imageops::resize(&crop, side, side, FilterType::Triangle);
-        for y in 0..side {
-            for x in 0..side {
+        // 宽度优先展平（[N,W,H,3]，上游 `np.transpose(tempimg,(3,1,0,2))` 等价）；
+        // 按高度优先喂入等价于把人脸旋转 90°，R/ONet 打分与回归会系统性失真
+        for x in 0..side {
+            for y in 0..side {
                 let p = resized.get_pixel(x, y);
                 for c in 0..3 {
                     out.push((p[c] as f32 - 127.5) * 0.0078125);

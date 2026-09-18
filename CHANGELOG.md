@@ -2,6 +2,19 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.28] - 0.1.0
+
+### 🐛 Bug Fixes  问题修复
+- 【人脸检测】修复 speed 模式 MTCNN 级联在真机 ONNX 上完全失效的三个缺陷（此前 speed 套件从未在真机跑通）：
+  - P-Net 输出解析不识别该 Keras 导出的 **NHWC** 布局 `[1,H,W,2]/[1,H,W,4]`，报「输出无法识别」；
+  - **宽高语义颠倒**：上游 mtcnn-opencv 喂图前 `np.transpose(img_x,(0,2,1,3))`，模型约定输入 `[1,W,H,3]`——本项目按 `[1,H,W,3]` 直喂等于把人脸旋转 90°（R-Net/ONet 裁剪批同理，已一并改为宽度优先），并用 `pnet_transpose_out` 把输出 `[1,W',H',C]` 转回 `[1,H',W',C]` 再解码；实测 argmax 坐标与上游 Python 包检出框 (300,97)-(400,223) 对齐验证通过；
+  - `pnet_decode` 的 `chw_shape` 把 NHWC 末维通道数 2 当成空间宽（扫描窗仅 2 列），改为布局感知的空间维解析；
+  - bbox 回归按 NHWC `[1,H,W,4]` 像素连续取值（原第二分支条件与 NCHW 相同，属死代码）
+- 【错误信息】MTCNN 输出识别失败时报错附带各张量形状，便于定位导出布局差异
+
+### ✨ New Features 新增功能
+- 【真机验证】`models download` 一键下载 + `photos models` 状态报告 + `process` 双模式真机出图闭环验证通过：balanced（BiRefNet-portrait，41s/张）与 speed（hivision_modnet，7.9s/张）；模型状态 12/12 就绪，新增权重的 sha256 已回填 `application.toml` 与 docs/04 定版表
+
 ## [2026.09.18.27] - 0.1.0
 
 ### ⚠️ Breaking Changes  破坏性变更

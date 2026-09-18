@@ -372,10 +372,11 @@ mod tests {
         let mut hm = vec![0.0f32; 2 * fh * fw];
         let reg = vec![0.0f32; 4 * fh * fw];
         // 单个高置信 cell：解码得框 (9,9)-(20,20)，落在 30x30 图内
-        hm[fh * fw + 4 * fw + 4] = 0.99;
+        // NHWC [1,H,W,2]（真实导出布局）：face 通道在末维 index 1
+        hm[(4 * fw + 4) * 2 + 1] = 0.99;
         let pnet_out = vec![
-            TensorData::new(vec![1, 2, fh as i64, fw as i64], hm).unwrap(),
-            TensorData::new(vec![1, 4, fh as i64, fw as i64], reg).unwrap(),
+            TensorData::new(vec![1, fh as i64, fw as i64, 2], hm).unwrap(),
+            TensorData::new(vec![1, fh as i64, fw as i64, 4], reg).unwrap(),
         ];
         // R-Net 单框：score 过阈值，回归 0
         let rnet_out = vec![
@@ -857,6 +858,51 @@ mod tests {
         );
         // 效果图尺寸保持全图
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 用户真实服装图透明通道贴合() {
+        // 用户提供透明背景 RGB 服装图：透明区不覆盖原人像，不透明区覆盖衣服区
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        // 透明背景红色上衣图（外围透明、中心不透明红）
+        let garment_path = dir.path().join("garment.png");
+        let gw = 24u32;
+        let gh = 36u32;
+        let mut g = RgbaImage::new(gw, gh);
+        for (p, o) in g.pixels_mut().enumerate() {
+            let (x, y) = ((p % gw as usize) as u32, (p / gw as usize) as u32);
+            let opaque = (4..20).contains(&x) && (6..30).contains(&y);
+            *o = image::Rgba([200, 30, 30, if opaque { 255 } else { 0 }]);
+        }
+        g.save(&garment_path).unwrap();
+
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: true,
+            layout: None,
+            beauty: None,
+            dress: Some(DressParams {
+                enabled: true,
+                garment: Some(garment_path),
+                style: None,
+                garments: None,
+            }),
+            transparent: false,
+            bg_image: None,
+            steps: None,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        let px = result.effects[0].image.get_pixel(50, 60);
+        assert!(px[0] > 150 && px[2] < 80, "衣服区应为服装红，实际 {px:?}");
     }
 
     #[test]
