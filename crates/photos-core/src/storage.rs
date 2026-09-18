@@ -8,9 +8,14 @@
 use std::path::Path;
 
 use chrono::Local;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::error::{CoreError, CoreResult};
+
+/// task_history 查询列序（SELECT 列表与 [`row_to_task`] 的下标必须一致）
+const TASK_COLUMNS: &str = "id, input_path, mode, size, backgrounds, beauty, dress, rotate, params, \
+     outputs, status, message, warnings, created_at, elapsed_ms";
 
 /// 存储句柄（内部持有 sqlite 连接）
 #[derive(Debug)]
@@ -29,6 +34,8 @@ pub struct TaskRecord {
     pub beauty: String,
     pub dress: String,
     pub rotate: Option<f64>,
+    /// 提交参数（JSON，供前端「复用参数」回填）
+    pub params: String,
     pub outputs: String,
     pub status: String,
     pub message: String,
@@ -47,11 +54,55 @@ pub struct NewTask {
     pub beauty: String,
     pub dress: String,
     pub rotate: Option<f64>,
+    pub params: String,
     pub outputs: String,
     pub status: String,
     pub message: String,
     pub warnings: String,
     pub elapsed_ms: Option<i64>,
+}
+
+/// 历史任务筛选条件（`GET /tasks` 查询参数；字段为 `None` 表示该条件不过滤）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskFilter {
+    pub status: Option<String>,
+    pub mode: Option<String>,
+    pub size: Option<String>,
+    /// 底色 id（按逗号分隔的 backgrounds 列做精确匹配）
+    pub background: Option<String>,
+    /// 起始创建时间（`YYYY-MM-DD` 或完整时间戳，按文本比较）
+    pub since: Option<String>,
+}
+
+impl TaskFilter {
+    /// 生成 WHERE 子句与绑定参数（无条件时 WHERE 为空串）
+    fn where_clause(&self) -> (String, Vec<Value>) {
+        let mut conds: Vec<String> = Vec::new();
+        let mut args: Vec<Value> = Vec::new();
+        for (sql, v) in [
+            ("status = ?", &self.status),
+            ("mode = ?", &self.mode),
+            ("size = ?", &self.size),
+        ] {
+            if let Some(v) = v {
+                conds.push(sql.into());
+                args.push(Value::Text(v.clone()));
+            }
+        }
+        if let Some(v) = &self.background {
+            conds.push("(',' || backgrounds || ',') LIKE ?".into());
+            args.push(Value::Text(format!("%,{v},%")));
+        }
+        if let Some(v) = &self.since {
+            conds.push("created_at >= ?".into());
+            args.push(Value::Text(v.clone()));
+        }
+        if conds.is_empty() {
+            (String::new(), args)
+        } else {
+            (format!(" WHERE {}", conds.join(" AND ")), args)
+        }
+    }
 }
 
 impl Store {
@@ -86,6 +137,7 @@ impl Store {
                     beauty      TEXT NOT NULL DEFAULT '',
                     dress       TEXT NOT NULL DEFAULT '',
                     rotate      REAL NULL,
+                    params      TEXT NOT NULL DEFAULT '',
                     outputs     TEXT NOT NULL DEFAULT '',
                     status      TEXT NOT NULL DEFAULT 'queued',
                     message     TEXT NOT NULL DEFAULT '',
@@ -122,6 +174,14 @@ impl Store {
             self.conn
                 .execute_batch("ALTER TABLE task_history ADD COLUMN dress TEXT NOT NULL DEFAULT ''")
                 .map_err(|e| CoreError::Storage(format!("迁移任务表新增 dress 列失败：{e}")))?;
+        }
+        // 旧库迁移：v3 新增 params 列（提交参数 JSON，供历史记录「复用参数」）
+        if !has_dress.iter().any(|c| c == "params") {
+            self.conn
+                .execute_batch(
+                    "ALTER TABLE task_history ADD COLUMN params TEXT NOT NULL DEFAULT ''",
+                )
+                .map_err(|e| CoreError::Storage(format!("迁移任务表新增 params 列失败：{e}")))?;
         }
         Ok(())
     }
@@ -197,8 +257,8 @@ impl Store {
         self.conn
             .execute(
                 "INSERT INTO task_history
-                 (input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 (input_path, mode, size, backgrounds, beauty, dress, rotate, params, outputs, status, message, warnings, created_at, elapsed_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     t.input_path,
                     t.mode,
@@ -207,6 +267,7 @@ impl Store {
                     t.beauty,
                     t.dress,
                     t.rotate,
+                    t.params,
                     t.outputs,
                     t.status,
                     t.message,
@@ -244,8 +305,7 @@ impl Store {
     pub fn get_task(&self, id: i64) -> CoreResult<Option<TaskRecord>> {
         self.conn
             .query_row(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
-                 FROM task_history WHERE id = ?1",
+                &format!("SELECT {TASK_COLUMNS} FROM task_history WHERE id = ?1"),
                 params![id],
                 row_to_task,
             )
@@ -257,10 +317,9 @@ impl Store {
     pub fn list_tasks(&self, limit: i64) -> CoreResult<Vec<TaskRecord>> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
-                 FROM task_history ORDER BY id DESC LIMIT ?1",
-            )
+            .prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task_history ORDER BY id DESC LIMIT ?1"
+            ))
             .map_err(|e| CoreError::Storage(format!("准备任务列表查询失败：{e}")))?;
         let rows = stmt
             .query_map(params![limit], row_to_task)
@@ -271,25 +330,76 @@ impl Store {
 
     /// 任务总数
     pub fn count_tasks(&self) -> CoreResult<i64> {
+        self.count_tasks_filtered(&TaskFilter::default())
+    }
+
+    /// 按条件统计任务数（与 [`Store::list_tasks_filtered`] 条件一致，供分页 total 使用）
+    pub fn count_tasks_filtered(&self, f: &TaskFilter) -> CoreResult<i64> {
+        let (where_sql, args) = f.where_clause();
         self.conn
-            .query_row("SELECT COUNT(*) FROM task_history", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM task_history{where_sql}"),
+                params_from_iter(args.iter()),
+                |r| r.get(0),
+            )
             .map_err(|e| CoreError::Storage(format!("统计任务数失败：{e}")))
     }
 
     /// 任务分页列表（按 id 倒序，`limit`/`offset` 分页；供 GET /tasks 使用）
     pub fn list_tasks_paged(&self, limit: i64, offset: i64) -> CoreResult<Vec<TaskRecord>> {
+        self.list_tasks_filtered(&TaskFilter::default(), limit, offset)
+    }
+
+    /// 按条件分页查询任务（按 id 倒序；筛选条件为空时等价于 [`Store::list_tasks_paged`]）
+    pub fn list_tasks_filtered(
+        &self,
+        f: &TaskFilter,
+        limit: i64,
+        offset: i64,
+    ) -> CoreResult<Vec<TaskRecord>> {
+        let (where_sql, mut args) = f.where_clause();
+        args.push(Value::Integer(limit));
+        args.push(Value::Integer(offset));
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, input_path, mode, size, backgrounds, beauty, dress, rotate, outputs, status, message, warnings, created_at, elapsed_ms
-                 FROM task_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
-            )
+            .prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task_history{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+            ))
             .map_err(|e| CoreError::Storage(format!("准备任务分页查询失败：{e}")))?;
         let rows = stmt
-            .query_map(params![limit, offset], row_to_task)
+            .query_map(params_from_iter(args.iter()), row_to_task)
             .map_err(|e| CoreError::Storage(format!("查询任务分页失败：{e}")))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| CoreError::Storage(format!("读取任务分页失败：{e}")))
+    }
+
+    /// 全部任务（供清空历史时逐个删除磁盘产物）
+    pub fn list_all_tasks(&self) -> CoreResult<Vec<TaskRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {TASK_COLUMNS} FROM task_history"))
+            .map_err(|e| CoreError::Storage(format!("准备任务全量查询失败：{e}")))?;
+        let rows = stmt
+            .query_map([], row_to_task)
+            .map_err(|e| CoreError::Storage(format!("查询全部任务失败：{e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(format!("读取全部任务失败：{e}")))
+    }
+
+    /// 删除单个任务记录（返回是否删除了记录，产物文件由调用方按需清理）
+    pub fn delete_task(&self, id: i64) -> CoreResult<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM task_history WHERE id = ?1", params![id])
+            .map_err(|e| CoreError::Storage(format!("删除任务失败：{e}")))?;
+        Ok(n > 0)
+    }
+
+    /// 清空任务历史（返回删除的记录数，产物文件由调用方按需清理）
+    pub fn clear_tasks(&self) -> CoreResult<usize> {
+        self.conn
+            .execute("DELETE FROM task_history", [])
+            .map_err(|e| CoreError::Storage(format!("清空任务历史失败：{e}")))
     }
 }
 
@@ -303,12 +413,13 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         beauty: row.get(5)?,
         dress: row.get(6)?,
         rotate: row.get(7)?,
-        outputs: row.get(8)?,
-        status: row.get(9)?,
-        message: row.get(10)?,
-        warnings: row.get(11)?,
-        created_at: row.get(12)?,
-        elapsed_ms: row.get(13)?,
+        params: row.get(8)?,
+        outputs: row.get(9)?,
+        status: row.get(10)?,
+        message: row.get(11)?,
+        warnings: row.get(12)?,
+        created_at: row.get(13)?,
+        elapsed_ms: row.get(14)?,
     })
 }
 
@@ -331,6 +442,7 @@ mod tests {
             beauty: String::new(),
             dress: String::new(),
             rotate: Some(2.5),
+            params: r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"]}"#.into(),
             outputs: r#"[{"kind":"证件照","path":"data/out/task_1_one_inch_white.jpg"}]"#.into(),
             status: "succeeded".into(),
             message: "处理成功".into(),
@@ -440,5 +552,113 @@ mod tests {
         let page3 = store.list_tasks_paged(2, 4).unwrap();
         assert_eq!(page3.len(), 1);
         assert_eq!(page3[0].id, 1);
+    }
+
+    #[test]
+    fn 提交参数随任务落库() {
+        let (_d, store) = open_temp();
+        let id = store.insert_task(&new_task()).unwrap();
+        let t = store.get_task(id).unwrap().unwrap();
+        assert!(t.params.contains("\"size\":\"one_inch\""));
+        // 分页/全量查询同样带回 params 列
+        assert_eq!(store.list_tasks_paged(1, 0).unwrap()[0].params, t.params);
+        assert_eq!(store.list_all_tasks().unwrap()[0].params, t.params);
+    }
+
+    #[test]
+    fn 按条件筛选任务() {
+        let (_d, store) = open_temp();
+        // 三个任务：白底/蓝底、不同模式与尺寸
+        let mut a = new_task();
+        a.status = "succeeded".into();
+        store.insert_task(&a).unwrap();
+        let mut b = new_task();
+        b.mode = "quality".into();
+        b.size = "two_inch".into();
+        b.backgrounds = "blue".into();
+        b.status = "failed".into();
+        store.insert_task(&b).unwrap();
+        let mut c = new_task();
+        c.backgrounds = "white,blue".into();
+        c.status = "queued".into();
+        store.insert_task(&c).unwrap();
+
+        let filter = |f: TaskFilter| {
+            (
+                store.count_tasks_filtered(&f).unwrap(),
+                store.list_tasks_filtered(&f, 10, 0).unwrap().len(),
+            )
+        };
+        // 无条件 → 全部
+        assert_eq!(filter(TaskFilter::default()), (3, 3));
+        // 状态 / 模式 / 尺寸
+        assert_eq!(
+            filter(TaskFilter {
+                status: Some("succeeded".into()),
+                ..Default::default()
+            }),
+            (1, 1)
+        );
+        assert_eq!(
+            filter(TaskFilter {
+                mode: Some("quality".into()),
+                ..Default::default()
+            }),
+            (1, 1)
+        );
+        assert_eq!(
+            filter(TaskFilter {
+                size: Some("two_inch".into()),
+                ..Default::default()
+            }),
+            (1, 1)
+        );
+        // 底色精确匹配：blue 命中 b、c；white 命中 a、c（不会误配 white 之外的前缀）
+        assert_eq!(
+            filter(TaskFilter {
+                background: Some("blue".into()),
+                ..Default::default()
+            }),
+            (2, 2)
+        );
+        assert_eq!(
+            filter(TaskFilter {
+                background: Some("white".into()),
+                ..Default::default()
+            }),
+            (2, 2)
+        );
+        // 组合条件
+        let combo = TaskFilter {
+            mode: Some("balanced".into()),
+            background: Some("blue".into()),
+            ..Default::default()
+        };
+        assert_eq!(filter(combo.clone()), (1, 1));
+        assert_eq!(store.list_tasks_filtered(&combo, 10, 0).unwrap()[0].id, 3);
+        // 起始时间（未来时间 → 无命中）
+        assert_eq!(
+            filter(TaskFilter {
+                since: Some("2999-01-01".into()),
+                ..Default::default()
+            }),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn 删除与清空任务() {
+        let (_d, store) = open_temp();
+        let id1 = store.insert_task(&new_task()).unwrap();
+        store.insert_task(&new_task()).unwrap();
+
+        assert!(store.delete_task(id1).unwrap());
+        assert!(!store.delete_task(id1).unwrap(), "重复删除应返回 false");
+        assert_eq!(store.count_tasks().unwrap(), 1);
+        assert!(store.get_task(id1).unwrap().is_none());
+
+        assert_eq!(store.clear_tasks().unwrap(), 1);
+        assert_eq!(store.count_tasks().unwrap(), 0);
+        assert!(store.list_all_tasks().unwrap().is_empty());
     }
 }

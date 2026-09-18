@@ -1,10 +1,14 @@
 import { create } from "zustand";
 import {
   AppConfig,
+  EMPTY_TASK_FILTER,
   ModelItem,
   SubmitParams,
   TaskDetail,
+  TaskFilter,
   TaskItem,
+  clearTasks as requestClearTasks,
+  deleteTask as requestDeleteTask,
   downloadModels as requestModelDownload,
   fetchConfig,
   fetchModels,
@@ -46,6 +50,8 @@ interface AppState {
   config: AppConfig | null;
   models: { id: string; ready: boolean; check_status: string; message: string }[];
   tasks: TaskItem[];
+  /** 历史列表筛选条件 */
+  taskFilter: TaskFilter;
   selectedId: string | null;
   detail: TaskDetail | null;
   files: File[];
@@ -63,7 +69,12 @@ interface AppState {
   setFiles: (files: File[]) => void;
   setParams: (patch: Partial<ParamsState>) => void;
   setSelected: (id: string | null) => void;
+  setTaskFilter: (patch: Partial<TaskFilter>) => void;
   refreshTasks: () => Promise<void>;
+  /** 把历史任务的提交参数回填到参数面板 */
+  reuseParams: (id: string) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
+  clearTasks: () => Promise<void>;
   refreshDetail: () => Promise<void>;
   refreshBatch: () => Promise<void>;
   submit: () => Promise<void>;
@@ -88,6 +99,11 @@ function toSubmitParams(params: ParamsState): SubmitParams {
   };
 }
 
+/** 归一化底色 id（`rgb-ff0000`）→ 参数面板用 `#RRGGBB`；内置 id 原样返回 */
+function bgIdToHex(id: string): string {
+  return id.startsWith("rgb-") ? `#${id.slice(4)}` : id;
+}
+
 /** 任务终态判定（queued/running 视为处理中） */
 function toBatchStatus(status: string): BatchStatus {
   if (status === "succeeded") return "succeeded";
@@ -109,6 +125,7 @@ export const useStore = create<AppState>((set, get) => ({
   config: null,
   models: [],
   tasks: [],
+  taskFilter: EMPTY_TASK_FILTER,
   selectedId: null,
   detail: null,
   files: [],
@@ -181,8 +198,68 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   async refreshTasks() {
-    const list = await fetchTasks();
+    const list = await fetchTasks(50, 0, get().taskFilter);
     set({ tasks: list.items });
+  },
+
+  setTaskFilter(patch) {
+    set({ taskFilter: { ...get().taskFilter, ...patch } });
+    void get().refreshTasks();
+  },
+
+  /** 回填历史任务的提交参数：尺寸/底色的内置项与自定义项分流到对应控件 */
+  async reuseParams(id) {
+    try {
+      const detail = await fetchTaskDetail(id);
+      const p = detail.params;
+      if (!p) return;
+      const { config, params } = get();
+      const size = p.size ?? "";
+      const builtinSize = config?.sizes.some((s) => s.id === size) ?? false;
+      const bgs = p.backgrounds ?? [];
+      const builtinBgs = bgs.filter((b) => config?.backgrounds.some((x) => x.id === b));
+      const customBg = bgs.find((b) => !config?.backgrounds.some((x) => x.id === b));
+      set({
+        params: {
+          ...params,
+          mode: p.mode ?? params.mode,
+          size: builtinSize ? size : params.size,
+          customSize: !builtinSize && size ? size : null,
+          backgrounds: builtinBgs,
+          customBg: customBg ? bgIdToHex(customBg) : null,
+          layout: p.layout ?? null,
+          effect: p.effect_image ?? false,
+          rotate: p.rotate ?? null,
+          transparent: p.transparent ?? false,
+          bgImage: p.bg_image ?? null,
+          outputFormat: p.output_format ?? params.outputFormat,
+          jpgQuality: p.jpg_quality ?? params.jpgQuality,
+          pdf: p.pdf ?? false,
+        },
+      });
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
+  },
+
+  async deleteTask(id) {
+    try {
+      await requestDeleteTask(id);
+      if (get().selectedId === id) set({ selectedId: null, detail: null });
+      await get().refreshTasks();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
+  },
+
+  async clearTasks() {
+    try {
+      await requestClearTasks();
+      set({ selectedId: null, detail: null });
+      await get().refreshTasks();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
   },
 
   async refreshDetail() {

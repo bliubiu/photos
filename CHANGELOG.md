@@ -2,6 +2,27 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.12] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【历史记录】**后端筛选与分页**：`GET /tasks` 新增 `status` / `mode` / `size` / `background` / `since` 查询参数（AND 组合，在 SQL 层过滤），`total` 为筛选后总条数、与分页一致；非法筛选值统一返回 `400 INVALID_PARAMS`（`status` 白名单、`mode` 走配置校验、`size`/`background` 受理时归一化后比较，`background` 按逗号分隔列做元素精确匹配）
+- 【历史记录】**提交参数快照与一键复用**：`task_history` 新增 `params` 列（v3 幂等迁移，旧库 `ALTER TABLE` 补列），API/CLI 受理时把归一化后的提交参数以 JSON 落库；`GET /tasks/{id}` 响应新增 `mode` / `size` / `backgrounds` / `rotate` / `params` 字段。前端历史列表新增**「复用参数」**：拉取详情后按 `GET /config` 分流内置尺寸/底色与自定义尺寸/RGB，一键回填模式、尺寸、底色、排版、纠偏角、美颜换装、输出格式等参数
+- 【历史记录】**删除与清空**：新增 `DELETE /tasks/{id}`（返回 `deleted_outputs`）与 `DELETE /tasks`（返回 `deleted`），删除记录时**连带删除磁盘产物与上传原图**（`purge_task_files` 仅删除位于输出目录 / 上传目录内的文件，路径越界一律跳过）；前端行内「删除」与顶部「清空历史」均带二次确认
+- 【历史记录】**原图对比**：新增 `GET /tasks/{id}/input`（返回上传原图字节流与按扩展名推断的 `Content-Type`，非上传目录内文件返回 `404 ARTIFACT_NOT_FOUND`）；预览面板新增**「对比原图」**开关，与处理结果并排展示
+- 【存储】`photos-core::storage` 新增 `TaskFilter` 与 `count_tasks_filtered` / `list_tasks_filtered` / `list_all_tasks` / `delete_task` / `clear_tasks`；查询列序收敛为 `TASK_COLUMNS` 常量，SELECT 与行映射下标单点维护
+
+### 🐛 Bug Fixes 问题修复
+- 【前端】修复 `api.ts::submitTask` 请求体漏传 `output_format` / `jpg_quality` / `pdf` 的缺陷——此前后端已支持三项输出参数，但前端提交时未携带，导致参数面板选择的输出格式与 PDF 开关实际不生效
+
+### 🔧 Dependencies 依赖更新
+- `photos-core` 新增 `rusqlite` 动态查询所需用法（`rusqlite::types::Value` 与 `params_from_iter`），无新增第三方依赖
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：端点总表新增 `DELETE /tasks/{id}`、`GET /tasks/{id}/input`、`DELETE /tasks`；`GET /tasks` 补充筛选参数表，新增 3.5–3.7 三个端点小节（原 3.5–3.8 顺延为 3.8–3.11）；`GET /tasks/{id}` 响应补充 `mode`/`size`/`backgrounds`/`rotate`/`params` 与说明
+- `docs/06-运行使用手册.md`：WebUI 章节补充历史筛选、复用参数、对比原图与删除/清空说明；API 端点表与数据章节同步新增/删除端点及连带清理规则
+- `docs/07-能力增强.md`：历史记录管理（参数复用 / 前后对比 / 搜索筛选 / 清理）标记为已落地（2026.09.18.12）
+- `docs/02-架构设计.md`：`task_history` 表结构补充 `params` 列，历史任务列表与存储边界同步筛选、复用、对比与连带清理说明
+
 ## [2026.09.18.11] - 0.1.0
 
 ### 📈 Improvements 性能/体验优化

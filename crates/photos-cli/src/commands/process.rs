@@ -233,6 +233,21 @@ fn process_one(
         None
     };
     let dress_json = serde_json::to_string(&dress).unwrap_or_else(|_| "{}".into());
+    // 提交参数快照（供历史记录「复用参数」，与 API 落库同结构）
+    let params_json = serde_json::json!({
+        "mode": mode,
+        "size": size,
+        "backgrounds": bgs,
+        "layout": args.layout,
+        "effect_image": args.effect,
+        "rotate": args.rotate,
+        "transparent": args.transparent,
+        "bg_image": args.bg_image,
+        "output_format": args.format,
+        "jpg_quality": args.quality,
+        "pdf": args.pdf,
+    })
+    .to_string();
     let task_id = store.insert_task(&NewTask {
         input_path: input.display().to_string(),
         mode: mode.clone(),
@@ -241,6 +256,7 @@ fn process_one(
         beauty: beauty.into(),
         dress: dress_json,
         rotate: args.rotate,
+        params: params_json,
         outputs: String::new(),
         status: "running".into(),
         message: "开始处理".into(),

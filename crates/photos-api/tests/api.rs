@@ -1006,6 +1006,184 @@ async fn 输出参数非法返回400() {
     }
 }
 
+/// GET 请求
+fn get_request(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+/// DELETE 请求
+fn delete_request(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// 查询列表并返回（total, 本页条数）
+async fn list_total(app: &axum::Router, uri: &str) -> (i64, usize) {
+    let (status, json) = send(app, get_request(uri)).await;
+    assert_eq!(status, StatusCode::OK, "列表查询失败：{json}");
+    (
+        json["total"].as_i64().unwrap(),
+        json["items"].as_array().unwrap().len(),
+    )
+}
+
+#[tokio::test]
+async fn 历史任务筛选与非法条件() {
+    let t = TestApp::new();
+    let app = t.app();
+    create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"]}"#,
+    )
+    .await;
+    create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"two_inch","backgrounds":["blue"]}"#,
+    )
+    .await;
+
+    // 无筛选 → 全部
+    assert_eq!(list_total(&app, "/tasks").await, (2, 2));
+    // 状态 / 模式 / 尺寸 / 底色
+    assert_eq!(list_total(&app, "/tasks?status=succeeded").await, (2, 2));
+    assert_eq!(list_total(&app, "/tasks?status=failed").await, (0, 0));
+    assert_eq!(list_total(&app, "/tasks?mode=balanced").await, (2, 2));
+    assert_eq!(list_total(&app, "/tasks?mode=quality").await, (0, 0));
+    assert_eq!(list_total(&app, "/tasks?size=one_inch").await, (1, 1));
+    assert_eq!(list_total(&app, "/tasks?size=two_inch").await, (1, 1));
+    assert_eq!(list_total(&app, "/tasks?background=white").await, (1, 1));
+    assert_eq!(list_total(&app, "/tasks?background=blue").await, (1, 1));
+    // 组合条件与自定义底色（归一化后无命中）
+    assert_eq!(
+        list_total(&app, "/tasks?size=one_inch&background=white").await,
+        (1, 1)
+    );
+    assert_eq!(
+        list_total(&app, "/tasks?background=%23ff0000").await,
+        (0, 0)
+    );
+    // 起始时间（文本比较）
+    assert_eq!(list_total(&app, "/tasks?since=2020-01-01").await, (2, 2));
+    assert_eq!(list_total(&app, "/tasks?since=2999-01-01").await, (0, 0));
+    // 筛选后仍可分页
+    assert_eq!(
+        list_total(&app, "/tasks?size=one_inch&limit=1&offset=1").await,
+        (1, 0)
+    );
+
+    // 非法筛选条件 → 400 INVALID_PARAMS
+    for uri in [
+        "/tasks?status=unknown",
+        "/tasks?mode=unknown",
+        "/tasks?size=unknown",
+        "/tasks?background=%23ff00",
+    ] {
+        let (status, json) = send(&app, get_request(uri)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 应被拒绝");
+        assert_eq!(json["code"], "INVALID_PARAMS");
+    }
+}
+
+#[tokio::test]
+async fn 删除任务连带清理磁盘产物() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (id, detail) = create_and_wait(&app, &t.out_dir()).await;
+    let files: Vec<std::path::PathBuf> = detail["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| t.out_dir().join(a["filename"].as_str().unwrap()))
+        .collect();
+    assert!(files.iter().all(|p| p.exists()), "产物应先落盘");
+    // 上传原图路径来自列表
+    let (_, list) = send(&app, get_request("/tasks")).await;
+    let input = std::path::PathBuf::from(list["items"][0]["input_path"].as_str().unwrap());
+    assert!(input.exists(), "上传原图应留存");
+
+    let (status, json) = send(&app, delete_request(&format!("/tasks/{id}"))).await;
+    assert_eq!(status, StatusCode::OK, "删除失败：{json}");
+    assert_eq!(json["id"], id);
+    // 2 个产物 + 1 张原图
+    assert_eq!(json["deleted_outputs"].as_i64().unwrap(), 3);
+    assert!(files.iter().all(|p| !p.exists()), "产物文件应被删除");
+    assert!(!input.exists(), "上传原图应被删除");
+
+    // 记录已删除：查询与重复删除均 404
+    let (status, json) = send(&app, get_request(&format!("/tasks/{id}"))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["code"], "TASK_NOT_FOUND");
+    let (status, _) = send(&app, delete_request(&format!("/tasks/{id}"))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn 清空历史连带清理磁盘产物() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (_, d1) = create_and_wait(&app, &t.out_dir()).await;
+    let (_, d2) = create_and_wait(&app, &t.out_dir()).await;
+
+    let (status, json) = send(&app, delete_request("/tasks")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["deleted"], 2);
+    assert_eq!(list_total(&app, "/tasks").await, (0, 0));
+    for d in [d1, d2] {
+        for a in d["artifacts"].as_array().unwrap() {
+            let p = t.out_dir().join(a["filename"].as_str().unwrap());
+            assert!(!p.exists(), "产物应被清理：{}", p.display());
+        }
+    }
+}
+
+#[tokio::test]
+async fn 任务详情含提交参数与原图可访问() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (id, detail) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"rotate":3.5,"effect_image":true,"output_format":"webp"}"#,
+    )
+    .await;
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    // 详情补全回显字段
+    assert_eq!(detail["mode"], "balanced");
+    assert_eq!(detail["size"], "one_inch");
+    assert_eq!(detail["backgrounds"], json!(["white"]));
+    assert_eq!(detail["rotate"], 3.5);
+    // 提交参数快照（供前端「复用参数」）
+    let params = &detail["params"];
+    assert_eq!(params["output_format"], "webp");
+    assert_eq!(params["effect_image"], true);
+    assert_eq!(params["transparent"], false);
+
+    // 上传原图可访问（jpeg 魔数）
+    let res = app
+        .clone()
+        .oneshot(get_request(&format!("/tasks/{id}/input")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+
+    // 不存在的任务 → 404
+    let (status, json) = send(&app, get_request("/tasks/task_999999/input")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["code"], "TASK_NOT_FOUND");
+}
+
 /// 测试用引擎工厂（demo 回放，不入池）
 fn test_factory() -> EngineFactory {
     Arc::new(|w, h| {

@@ -1,5 +1,6 @@
-//! 8 个端点处理器（契约 docs/05-API契约.md §2）：
-//! POST /tasks、GET /tasks、GET /tasks/{id}、GET /tasks/{id}/output、
+//! 端点处理器（契约 docs/05-API契约.md §2）：
+//! POST /tasks、GET /tasks、DELETE /tasks、GET /tasks/{id}、DELETE /tasks/{id}、
+//! GET /tasks/{id}/output、GET /tasks/{id}/input、
 //! GET /models、POST /models/download、GET /config、GET /ping。
 
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use photos_core::config::Config;
 use photos_core::model::{CheckStatus, check_models, download_model, resolve_model_path};
 use photos_core::output::{OutputFormat, save_task_outputs};
 use photos_core::pipeline::{ProcessRequest, run_pipeline};
-use photos_core::storage::{NewTask, Store};
+use photos_core::storage::{NewTask, Store, TaskFilter, TaskRecord};
 
 use crate::artifact;
 use crate::engine_pool::EngineLease;
@@ -506,6 +507,21 @@ async fn create_task_inner(
     }
 
     // 5. 保存上传文件 + 落库 queued
+    // 提交参数快照（尺寸/底色为归一化 id，前端可直接回传复用）
+    let params_json = json!({
+        "mode": mode,
+        "size": size,
+        "backgrounds": bgs,
+        "layout": params.layout,
+        "effect_image": effect,
+        "rotate": params.rotate,
+        "transparent": params.transparent.unwrap_or(false),
+        "bg_image": params.bg_image,
+        "output_format": params.output_format,
+        "jpg_quality": params.jpg_quality,
+        "pdf": params.pdf,
+    })
+    .to_string();
     let upload_name = format!(
         "{}_{}",
         std::time::SystemTime::now()
@@ -553,6 +569,7 @@ async fn create_task_inner(
                 beauty: beauty_json,
                 dress: dress_json,
                 rotate: params.rotate,
+                params: params_json,
                 outputs: String::new(),
                 status: "queued".into(),
                 message: "已入队，等待处理".into(),
@@ -742,11 +759,79 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
     });
 }
 
-/// GET /tasks：历史任务分页列表
+/// GET /tasks：历史任务分页列表（支持状态/模式/尺寸/底色/起始时间筛选）
 #[derive(Debug, Deserialize)]
 pub struct PageQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// 任务状态：queued | running | succeeded | failed
+    pub status: Option<String>,
+    /// 运行模式 id
+    pub mode: Option<String>,
+    /// 尺寸 id（内置 id 或自定义形式 `px:宽x高` / `mm:宽x高@DPI`）
+    pub size: Option<String>,
+    /// 底色 id（内置 id 或自定义形式 `#RRGGBB` / `rgb:R,G,B`）
+    pub background: Option<String>,
+    /// 起始创建时间（`YYYY-MM-DD`，按文本比较）
+    pub since: Option<String>,
+}
+
+/// 逗号分隔列 → 字符串数组（空串 → 空数组）
+fn split_csv(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
+
+/// 解析并校验筛选条件（非法取值返回 400；尺寸/底色归一化为落库 id 后再比较）
+fn parse_filter(cfg: &Config, q: &PageQuery) -> Result<TaskFilter, ApiError> {
+    let opt = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let status = match opt(&q.status).as_deref() {
+        Some(s @ ("queued" | "running" | "succeeded" | "failed")) => Some(s.to_string()),
+        Some(other) => {
+            return Err(ApiError::InvalidParams(format!(
+                "未知任务状态“{other}”，可选：queued、running、succeeded、failed"
+            )));
+        }
+        None => None,
+    };
+    let mode = match opt(&q.mode) {
+        Some(m) => {
+            cfg.mode(&m)
+                .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+            Some(m)
+        }
+        None => None,
+    };
+    let size = match opt(&q.size) {
+        Some(s) => Some(
+            cfg.resolve_size(&s)
+                .map_err(|e| ApiError::InvalidParams(e.to_string()))?
+                .0,
+        ),
+        None => None,
+    };
+    let background = match opt(&q.background) {
+        Some(b) => Some(
+            cfg.resolve_background(&b)
+                .map_err(|e| ApiError::InvalidParams(e.to_string()))?
+                .0,
+        ),
+        None => None,
+    };
+    Ok(TaskFilter {
+        status,
+        mode,
+        size,
+        background,
+        since: opt(&q.since),
+    })
 }
 
 pub async fn list_tasks(
@@ -755,24 +840,22 @@ pub async fn list_tasks(
 ) -> Response {
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
     let offset = q.offset.unwrap_or(0).max(0);
+    let filter = match parse_filter(&state.cfg, &q) {
+        Ok(f) => f,
+        Err(e) => return e.into_response(),
+    };
     let store = state.store.lock().unwrap();
-    let total = match store.count_tasks() {
+    let total = match store.count_tasks_filtered(&filter) {
         Ok(t) => t,
         Err(e) => return ApiError::from(e).into_response(),
     };
-    let rows = match store.list_tasks_paged(limit, offset) {
+    let rows = match store.list_tasks_filtered(&filter, limit, offset) {
         Ok(r) => r,
         Err(e) => return ApiError::from(e).into_response(),
     };
     let items: Vec<serde_json::Value> = rows
         .iter()
         .map(|t| {
-            let backgrounds: Vec<String> = t
-                .backgrounds
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
             let outputs: Vec<String> = artifact::parse_outputs(&t.outputs)
                 .into_iter()
                 .map(|a| a.filename)
@@ -782,7 +865,7 @@ pub async fn list_tasks(
                 "input_path": t.input_path,
                 "mode": t.mode,
                 "size": t.size,
-                "backgrounds": backgrounds,
+                "backgrounds": split_csv(&t.backgrounds),
                 "status": t.status,
                 "message": if t.message.is_empty() { serde_json::Value::Null } else { json!(t.message) },
                 "created_at": t.created_at,
@@ -794,7 +877,7 @@ pub async fn list_tasks(
     Json(json!({ "total": total, "items": items })).into_response()
 }
 
-/// GET /tasks/{id}：轮询状态、告警、产物清单
+/// GET /tasks/{id}：轮询状态、告警、产物清单与提交参数
 pub async fn get_task(
     State(state): State<Arc<AppState>>,
     AxumPath(task_public): AxumPath<String>,
@@ -820,11 +903,19 @@ pub async fn get_task(
             })
         })
         .collect();
+    // 提交参数（JSON 文本；历史库为空时返回 null）
+    let params: serde_json::Value =
+        serde_json::from_str(&record.params).unwrap_or(serde_json::Value::Null);
     Json(json!({
         "id": public_task_id(record.id),
         "status": record.status,
         "message": if record.message.is_empty() { serde_json::Value::Null } else { json!(record.message) },
         "warnings": serde_json::from_str::<Vec<String>>(&record.warnings).unwrap_or_default(),
+        "mode": record.mode,
+        "size": record.size,
+        "backgrounds": split_csv(&record.backgrounds),
+        "rotate": record.rotate,
+        "params": params,
         "beauty": record.beauty,
         "dress": record.dress,
         "elapsed_ms": record.elapsed_ms,
@@ -832,6 +923,119 @@ pub async fn get_task(
         "artifacts": artifacts,
     }))
     .into_response()
+}
+
+/// 删除任务占用的磁盘文件（仅限 out/tmp 目录内，防越界删除）；返回实际删除的文件数
+fn purge_task_files(state: &AppState, record: &TaskRecord) -> usize {
+    let mut paths: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(&record.outputs)
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    if !record.input_path.is_empty() {
+        paths.push(PathBuf::from(&record.input_path));
+    }
+    let mut removed = 0;
+    for p in paths {
+        if (p.starts_with(&state.out_dir) || p.starts_with(&state.upload_dir))
+            && std::fs::remove_file(&p).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// DELETE /tasks/{id}：删除任务记录，并连带删除磁盘产物与上传原图
+pub async fn delete_task(
+    State(state): State<Arc<AppState>>,
+    AxumPath(task_public): AxumPath<String>,
+) -> Response {
+    let id = match parse_task_id(&task_public) {
+        Some(id) => id,
+        None => return ApiError::TaskNotFound.into_response(),
+    };
+    let record = {
+        let store = state.store.lock().unwrap();
+        match store.get_task(id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return ApiError::TaskNotFound.into_response(),
+            Err(e) => return ApiError::from(e).into_response(),
+        }
+    };
+    let deleted_outputs = purge_task_files(&state, &record);
+    let store = state.store.lock().unwrap();
+    match store.delete_task(id) {
+        Ok(_) => Json(json!({
+            "id": public_task_id(id),
+            "deleted_outputs": deleted_outputs,
+        }))
+        .into_response(),
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
+/// DELETE /tasks：清空历史（连带删除全部磁盘产物与原图）
+pub async fn clear_tasks(State(state): State<Arc<AppState>>) -> Response {
+    let records = {
+        let store = state.store.lock().unwrap();
+        match store.list_all_tasks() {
+            Ok(r) => r,
+            Err(e) => return ApiError::from(e).into_response(),
+        }
+    };
+    for r in &records {
+        purge_task_files(&state, r);
+    }
+    let store = state.store.lock().unwrap();
+    match store.clear_tasks() {
+        Ok(n) => Json(json!({ "deleted": n })).into_response(),
+        Err(e) => ApiError::from(e).into_response(),
+    }
+}
+
+/// GET /tasks/{id}/input：读取上传原图（供历史记录「原图/结果」对比）
+pub async fn task_input(
+    State(state): State<Arc<AppState>>,
+    AxumPath(task_public): AxumPath<String>,
+) -> Response {
+    let id = match parse_task_id(&task_public) {
+        Some(id) => id,
+        None => return ApiError::TaskNotFound.into_response(),
+    };
+    let path = {
+        let store = state.store.lock().unwrap();
+        match store.get_task(id) {
+            Ok(Some(r)) => PathBuf::from(r.input_path),
+            Ok(None) => return ApiError::TaskNotFound.into_response(),
+            Err(e) => return ApiError::from(e).into_response(),
+        }
+    };
+    // 仅允许读取上传目录内的文件
+    if !path.starts_with(&state.upload_dir) {
+        return ApiError::ArtifactNotFound("原图不存在".into()).into_response();
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            return ApiError::ArtifactNotFound(format!("原图文件缺失：{e}")).into_response();
+        }
+    };
+    let filename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(artifact::content_type(&filename)),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("inline; filename=\"{filename}\""))
+            .unwrap_or_else(|_| HeaderValue::from_static("inline")),
+    );
+    (headers, bytes).into_response()
 }
 
 /// GET /tasks/{id}/output：下载指定产物 / bundle zip

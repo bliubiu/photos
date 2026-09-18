@@ -165,7 +165,13 @@ pub fn decode_retinaface(
     iou_threshold: f32,
     transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
-    let DecodeTransform { image_size, scale_x, scale_y, pad_x, pad_y } = transform;
+    let DecodeTransform {
+        image_size,
+        scale_x,
+        scale_y,
+        pad_x,
+        pad_y,
+    } = transform;
     if boxes.data.len() % 4 != 0 {
         return Err(CoreError::Image(format!(
             "检测框张量长度 {} 不是 4 的倍数",
@@ -385,7 +391,13 @@ fn decode_fused_mtcnn(
     iou_threshold: f32,
     transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
-    let DecodeTransform { image_size, scale_x, scale_y, pad_x, pad_y } = transform;
+    let DecodeTransform {
+        image_size,
+        scale_x,
+        scale_y,
+        pad_x,
+        pad_y,
+    } = transform;
     let n = boxes.data.len() / 4;
     if n == 0 {
         return Err(CoreError::Image("MTCNN 融合输出无检测框".into()));
@@ -502,7 +514,13 @@ pub fn decode_mtcnn(
     iou_threshold: f32,
     transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
-    let DecodeTransform { image_size: input_size, scale_x, scale_y, pad_x, pad_y } = transform;
+    let DecodeTransform {
+        image_size: input_size,
+        scale_x,
+        scale_y,
+        pad_x,
+        pad_y,
+    } = transform;
     if outputs.is_empty() {
         return Err(CoreError::Image("MTCNN 输出为空".into()));
     }
@@ -714,22 +732,22 @@ mod tests {
         let b = TensorData::new(vec![2, 4], vec![0.0; 8]).unwrap();
         let lm = TensorData::new(vec![2, 10], vec![0.0; 20]).unwrap();
         assert!(
-        decode_retinaface(
-            &s,
-            &b,
-            &lm,
-            0.5,
-            0.5,
-            DecodeTransform {
-                image_size: (64, 64),
-                scale_x: 1.0,
-                scale_y: 1.0,
-                pad_x: 0.0,
-                pad_y: 0.0
-            }
-        )
-        .is_err()
-    );
+            decode_retinaface(
+                &s,
+                &b,
+                &lm,
+                0.5,
+                0.5,
+                DecodeTransform {
+                    image_size: (64, 64),
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    pad_x: 0.0,
+                    pad_y: 0.0
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -43,11 +43,31 @@ export interface Artifact {
   filename: string;
 }
 
+/** 提交参数快照（GET /tasks/{id} 的 params 字段，供历史记录「复用参数」） */
+export interface TaskParamsSnapshot {
+  mode?: string;
+  size?: string;
+  backgrounds?: string[];
+  layout?: string | null;
+  effect_image?: boolean;
+  rotate?: number | null;
+  transparent?: boolean;
+  bg_image?: string | null;
+  output_format?: string | null;
+  jpg_quality?: number | null;
+  pdf?: boolean | null;
+}
+
 export interface TaskDetail {
   id: string;
   status: "queued" | "running" | "succeeded" | "failed";
   message: string | null;
   warnings: string[];
+  mode: string;
+  size: string;
+  backgrounds: string[];
+  rotate: number | null;
+  params: TaskParamsSnapshot | null;
   elapsed_ms: number | null;
   created_at: string;
   artifacts: Artifact[];
@@ -134,12 +154,51 @@ export async function downloadModels(ids?: string[]): Promise<{ items: DownloadR
   });
 }
 
-export async function fetchTasks(limit = 50, offset = 0): Promise<TaskList> {
-  return request<TaskList>(`/tasks?limit=${limit}&offset=${offset}`);
+/** 历史筛选条件（空串表示该条件不过滤） */
+export interface TaskFilter {
+  status: string;
+  mode: string;
+  size: string;
+  background: string;
+  /** 起始创建日期（YYYY-MM-DD） */
+  since: string;
+}
+
+/** 默认筛选（全部不过滤） */
+export const EMPTY_TASK_FILTER: TaskFilter = {
+  status: "",
+  mode: "",
+  size: "",
+  background: "",
+  since: "",
+};
+
+export async function fetchTasks(
+  limit = 50,
+  offset = 0,
+  filter?: TaskFilter,
+): Promise<TaskList> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (filter) {
+    for (const [key, value] of Object.entries(filter)) {
+      if (value) params.set(key, value);
+    }
+  }
+  return request<TaskList>(`/tasks?${params.toString()}`);
 }
 
 export async function fetchTaskDetail(id: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/tasks/${id}`);
+}
+
+/** 删除单个历史任务（连带删除磁盘产物与上传原图） */
+export async function deleteTask(id: string): Promise<{ id: string; deleted_outputs: number }> {
+  return request<{ id: string; deleted_outputs: number }>(`/tasks/${id}`, { method: "DELETE" });
+}
+
+/** 清空全部历史任务（连带删除磁盘产物与上传原图） */
+export async function clearTasks(): Promise<{ deleted: number }> {
+  return request<{ deleted: number }>("/tasks", { method: "DELETE" });
 }
 
 /** 提交单个任务：上传一个文件，返回任务 id（批量逐个调用，便于逐项展示进度与失败重试） */
@@ -157,6 +216,9 @@ export async function submitTask(file: File, params: SubmitParams): Promise<stri
       effect_image: params.effect_image,
       transparent: params.transparent,
       bg_image: params.bg_image,
+      output_format: params.output_format,
+      jpg_quality: params.jpg_quality,
+      pdf: params.pdf,
     }),
   );
   const created = await request<{ id: string; status: string }>("/tasks", {
@@ -176,4 +238,9 @@ export function outputUrl(id: string, kind: string, background?: string, layout?
 
 export function bundleUrl(id: string): string {
   return `/tasks/${id}/output?artifact=bundle`;
+}
+
+/** 上传原图地址（供历史记录「原图/结果」对比） */
+export function inputUrl(id: string): string {
+  return `/tasks/${id}/input`;
 }

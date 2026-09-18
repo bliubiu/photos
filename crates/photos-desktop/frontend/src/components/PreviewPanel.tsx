@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useStore } from "../store";
-import { bundleUrl, outputUrl } from "../api";
+import { bundleUrl, inputUrl, outputUrl } from "../api";
 import type { Artifact } from "../api";
 
 function StatusBadge({ status }: { status: string }) {
@@ -33,6 +33,8 @@ function bgLabel(id?: string | null): string {
 export default function PreviewPanel() {
   const { detail, selectedId, files } = useStore();
   const [tab, setTab] = useState<Artifact | null>(null);
+  // 是否并排显示上传原图（前后对比）
+  const [compare, setCompare] = useState(false);
 
   if (!selectedId) {
     return (
@@ -61,6 +63,16 @@ export default function PreviewPanel() {
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-gray-700">3. 预览与下载</h2>
         <div className="flex items-center gap-2 text-xs text-gray-500">
+          {detail.artifacts.length > 0 && (
+            <label className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={compare}
+                onChange={(e) => setCompare(e.target.checked)}
+              />
+              对比原图
+            </label>
+          )}
           <StatusBadge status={detail.status} />
           <span>耗时 {elapsed}s</span>
         </div>
@@ -126,17 +138,34 @@ export default function PreviewPanel() {
 
       {active && (
         <div className="flex flex-col items-center">
-          <img
-            src={outputUrl(
-              selectedId,
-              active.kind,
-              active.background ?? undefined,
-              active.layout ?? undefined,
+          <div className="flex flex-wrap items-start justify-center gap-4">
+            {compare && (
+              <figure className="flex flex-col items-center">
+                <img
+                  src={inputUrl(selectedId)}
+                  alt="上传原图"
+                  className="max-h-[520px] rounded-md border border-gray-200"
+                />
+                <figcaption className="mt-1 text-xs text-gray-500">上传原图</figcaption>
+              </figure>
             )}
-            alt={active.filename}
-            className="max-h-[520px] rounded-md border border-gray-200 bg-checker"
-            style={{ backgroundImage: "conic-gradient(#eee 25%, #fff 0 50%, #eee 0 75%, #fff 0)" }}
-          />
+            <figure className="flex flex-col items-center">
+              <img
+                src={outputUrl(
+                  selectedId,
+                  active.kind,
+                  active.background ?? undefined,
+                  active.layout ?? undefined,
+                )}
+                alt={active.filename}
+                className="max-h-[520px] rounded-md border border-gray-200 bg-checker"
+                style={{ backgroundImage: "conic-gradient(#eee 25%, #fff 0 50%, #eee 0 75%, #fff 0)" }}
+              />
+              <figcaption className="mt-1 text-xs text-gray-500">
+                {compare ? "处理结果" : active.filename}
+              </figcaption>
+            </figure>
+          </div>
           <div className="mt-3 flex items-center gap-3">
             <a
               href={outputUrl(

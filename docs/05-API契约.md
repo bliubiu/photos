@@ -60,9 +60,12 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/tasks` | multipart 提交，立即返回任务 id（202 语义） |
-| GET | `/tasks/{id}` | 轮询状态、告警、产物清单 |
+| GET | `/tasks/{id}` | 轮询状态、告警、产物清单与提交参数 |
+| DELETE | `/tasks/{id}` | 删除任务记录，并连带删除磁盘产物与上传原图 |
 | GET | `/tasks/{id}/output` | 下载指定产物 |
-| GET | `/tasks` | 历史列表（读 `task_history`） |
+| GET | `/tasks/{id}/input` | 读取上传原图（供「原图/结果」对比） |
+| GET | `/tasks` | 历史列表（读 `task_history`，支持筛选与分页） |
+| DELETE | `/tasks` | 清空历史任务（连带删除磁盘产物与上传原图） |
 | GET | `/models` | 模型注册表与校验状态 |
 | POST | `/models/download` | 一键下载指定（缺省为全部缺失）模型 |
 | GET | `/config` | 驱动前端下拉的选项集 |
@@ -134,6 +137,23 @@
   "status": "succeeded",
   "message": null,
   "warnings": ["角度超限，本次未自动纠偏（测量角 25.3°）"],
+  "mode": "balanced",
+  "size": "one_inch",
+  "backgrounds": ["white", "blue"],
+  "rotate": null,
+  "params": {
+    "mode": "balanced",
+    "size": "one_inch",
+    "backgrounds": ["white", "blue"],
+    "layout": null,
+    "effect_image": false,
+    "rotate": null,
+    "transparent": false,
+    "bg_image": null,
+    "output_format": "jpg",
+    "jpg_quality": 90,
+    "pdf": false
+  },
   "beauty": "{ \"enabled\": true, \"skin_smooth\": 0.8, \"brighten\": 0.2, \"whiten\": null }",
   "dress": "{ \"enabled\": true, \"garment_path\": null, \"style\": \"suit_navy\", \"garments\": { \"top\": \"/data/demo_top.jpg\", \"bottom\": \"/data/demo_bottom.jpg\", \"shoes\": null } }",
   "elapsed_ms": 2345,
@@ -152,6 +172,8 @@
   ]
 }
 ```
+
+`mode`/`size`/`backgrounds`/`rotate` 为受理时归一化后的落库值；`params` 为**提交参数快照**（与受理时一致，尺寸/底色为归一化 id，可原样回传复用），历史库无该列（旧数据）时为 `null`。
 
 | 情况 | 行为 |
 |---|---|
@@ -172,7 +194,19 @@
 
 ### 3.4 GET `/tasks`
 
-查询：`?limit=20&offset=0`（默认 limit=20，最大建议 100）。
+查询：`?limit=20&offset=0`（默认 limit=20，最大建议 100），可叠加筛选条件：
+
+| query | 类型 | 含义 |
+|---|---|---|
+| `limit` | number | 每页条数，默认 20（上限 100） |
+| `offset` | number | 偏移，默认 0 |
+| `status` | string | `queued`\|`running`\|`succeeded`\|`failed`；非法值返回 `400` |
+| `mode` | string | `speed`\|`balanced`\|`quality`；非法值返回 `400` |
+| `size` | string | 尺寸 id（内置 id 或自定义形式，同 §3.1 `size`），受理时归一化后比较 |
+| `background` | string | 底色 id（按逗号分隔的 `backgrounds` 列做精确元素匹配，形式同 §3.1 `backgrounds` 元素） |
+| `since` | string | 起始创建时间 `YYYY-MM-DD`（按文本比较 `created_at >= since`） |
+
+筛选条件按 AND 组合，且在**后端 SQL 完成**：`total` 为筛选后的总条数，与分页一致。任一筛选值非法统一返回 `400` + `code=INVALID_PARAMS`。
 
 ```json
 {
@@ -198,7 +232,39 @@
 
 自定义尺寸/底色在受理时归一化为文件名安全 id 后落库与命名：`px:295x413` → `px_295x413`、`mm:35x45@300` → `mm_35x45_300`、`#ff0000` → `rgb-ff0000`（产物如 `task_17c0f0a2_px_295x413_rgb-ff0000.jpg`）。归一化 id 可再次提交，解析幂等。
 
-### 3.5 GET `/models`
+### 3.5 DELETE `/tasks/{id}`
+
+删除任务记录，并**连带删除磁盘产物与上传原图**（仅删除位于输出目录 / 上传目录内的文件，路径越界一律跳过）。
+
+```json
+{ "id": "task_17c0f0a2", "deleted_outputs": 3 }
+```
+
+| 情况 | 状态码 |
+|---|---|
+| 删除成功 | `200` + 已删除的磁盘文件数（`deleted_outputs`） |
+| 任务不存在 | `404` + `code=TASK_NOT_FOUND` |
+
+### 3.6 DELETE `/tasks`
+
+清空全部历史任务，并连带删除磁盘产物与上传原图。
+
+```json
+{ "deleted": 5 }
+```
+
+`deleted` 为删除的任务记录数；无记录时返回 `{"deleted": 0}`（仍为 `200`）。
+
+### 3.7 GET `/tasks/{id}/input`
+
+返回该任务**上传原图**的二进制流（`Content-Type` 依扩展名推断），供 WebUI「原图 / 结果」对比展示。
+
+| 情况 | 状态码 |
+|---|---|
+| 成功 | `200` + 原图字节流 |
+| 任务不存在，或原图不在上传目录内（如 CLI 记录的本地任意路径） | `404` + `code=ARTIFACT_NOT_FOUND` |
+
+### 3.8 GET `/models`
 
 ```json
 {
@@ -216,7 +282,7 @@
 
 `check_status`：`ready` | `missing` | `hash_mismatch` | `cached_ok`（与 `04-模型清单.md` §5 一致）。
 
-### 3.6 POST `/models/download`
+### 3.9 POST `/models/download`
 
 `Content-Type: application/json`，请求体可省略：
 
@@ -245,7 +311,7 @@
 
 说明：模型体积较大（单个可达数百 MB），本端点同步等待下载完成后返回，**耗时较长且无进度推送**；前端以「下载中」状态提示，完成后重新拉取 `GET /models` 刷新就绪状态。
 
-### 3.7 GET `/config`
+### 3.10 GET `/config`
 
 ```json
 {
@@ -264,7 +330,7 @@
 
 选项来源：`application.toml` + 默认值；驱动前端下拉，前端不硬编码尺寸表。
 
-### 3.8 GET `/ping`
+### 3.11 GET `/ping`
 
 ```json
 { "status": "ok" }
