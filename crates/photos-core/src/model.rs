@@ -60,6 +60,131 @@ pub struct ModelStatus {
     pub message: String,
 }
 
+/// 激活版本在 sqlite `prefs` 中的键前缀
+pub const MODEL_VERSION_PREFIX: &str = "model_version:";
+
+/// 模型版本目录：`<models_dir>/<id>`（各版本为其下的子目录）
+pub fn model_version_dir(cfg: &Config, id: &str) -> PathBuf {
+    Path::new(&cfg.general.models_dir).join(id)
+}
+
+/// 版本目录内的模型文件名（取注册表 `path` 的文件名，如 `retinaface_r50.onnx`）
+pub fn version_file_name(spec_path: &Path) -> String {
+    spec_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "model.onnx".to_string())
+}
+
+/// 指定版本对应的模型文件路径：`<models_dir>/<id>/<版本>/<文件名>`
+pub fn version_path(cfg: &Config, id: &str, version: &str, spec_path: &Path) -> PathBuf {
+    model_version_dir(cfg, id)
+        .join(version)
+        .join(version_file_name(spec_path))
+}
+
+/// 版本号比较：按 `.` 分段数值比较，非数值段回退字典序（避免 `1.10.0` 排在 `1.9.0` 之前）
+fn compare_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let pa: Vec<&str> = a.split('.').collect();
+    let pb: Vec<&str> = b.split('.').collect();
+    for i in 0..pa.len().max(pb.len()) {
+        let sa = pa.get(i).copied().unwrap_or("");
+        let sb = pb.get(i).copied().unwrap_or("");
+        let ord = match (sa.parse::<u64>(), sb.parse::<u64>()) {
+            (Ok(na), Ok(nb)) => na.cmp(&nb),
+            _ => sa.cmp(sb),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// 某模型已下载的版本列表（升序；仅统计含对应模型文件的目录）
+pub fn list_versions(cfg: &Config, id: &str) -> Vec<String> {
+    let spec = match cfg.models.get(id) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let dir = model_version_dir(cfg, id);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|v| version_path(cfg, id, v, Path::new(&spec.path)).exists())
+        .collect();
+    out.sort_by(|a, b| compare_version(a, b));
+    out
+}
+
+/// 读取 sqlite 记录的激活版本（无记录返回 None；目录已不存在时视为无效）
+pub fn active_version(cfg: &Config, store: &Store, id: &str) -> CoreResult<Option<String>> {
+    let key = format!("{MODEL_VERSION_PREFIX}{id}");
+    let Some(v) = store.get_pref(&key)? else {
+        return Ok(None);
+    };
+    let spec = cfg.model_spec(id)?;
+    if version_path(cfg, id, &v, Path::new(&spec.path)).exists() {
+        Ok(Some(v))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 激活指定版本：校验版本文件存在、sha256 与注册表一致（注册表未定版时跳过），并记录到 prefs
+pub fn activate_version(cfg: &Config, store: &Store, id: &str, version: &str) -> CoreResult<()> {
+    let spec = cfg.model_spec(id)?;
+    let path = version_path(cfg, id, version, Path::new(&spec.path));
+    if !path.exists() {
+        return Err(CoreError::Model(format!(
+            "模型“{id}”的版本“{version}”不存在：{}；请先下载或用一键下载补齐",
+            path.display()
+        )));
+    }
+    if !spec.sha256.chars().all(|c| c == '0') {
+        let actual = sha256_file(&path)?;
+        if actual != spec.sha256 {
+            return Err(CoreError::Model(format!(
+                "模型“{id}”版本“{version}”sha256 校验失败：预期 {}，实际 {actual}",
+                spec.sha256
+            )));
+        }
+    }
+    store.set_pref(&format!("{MODEL_VERSION_PREFIX}{id}"), version)?;
+    Ok(())
+}
+
+/// 解析模型路径（多版本优先）：
+/// 1. 注册表 `path` 指向的文件存在 → 直接使用（旧布局、旧库零迁移）
+/// 2. 否则若 prefs 记录的激活版本文件存在 → 使用该版本
+/// 3. 否则若版本目录下存在版本 → 取最高版本并回写 prefs
+/// 4. 都没有 → 返回注册表路径（由调用方判定为缺失）
+pub fn resolve_model_path_versioned(
+    cfg: &Config,
+    store: &Store,
+    id: &str,
+    spec_path: &Path,
+) -> CoreResult<PathBuf> {
+    let direct = resolve_model_path(cfg, spec_path);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    if let Some(v) = active_version(cfg, store, id)? {
+        return Ok(version_path(cfg, id, &v, spec_path));
+    }
+    if let Some(v) = list_versions(cfg, id).last() {
+        // 首次发现版本目录：记录为激活版本，便于后续切换与展示
+        store.set_pref(&format!("{MODEL_VERSION_PREFIX}{id}"), v)?;
+        return Ok(version_path(cfg, id, v, spec_path));
+    }
+    Ok(direct)
+}
+
 /// 校验全部启用模型，返回状态报告列表
 pub fn check_models(cfg: &Config, store: &Store) -> CoreResult<Vec<ModelStatus>> {
     let mut out = Vec::new();
@@ -67,7 +192,7 @@ pub fn check_models(cfg: &Config, store: &Store) -> CoreResult<Vec<ModelStatus>>
         if !spec.enabled {
             continue;
         }
-        out.push(check_one(cfg, store, id, spec.path.as_ref(), &spec.sha256)?);
+        out.push(check_one(cfg, store, id, spec)?);
     }
     Ok(out)
 }
@@ -77,10 +202,10 @@ fn check_one(
     cfg: &Config,
     store: &Store,
     id: &str,
-    spec_path: &Path,
-    expected: &str,
+    spec: &crate::config::ModelSpec,
 ) -> CoreResult<ModelStatus> {
-    let path = resolve_model_path(cfg, spec_path);
+    let expected = spec.sha256.as_str();
+    let path = resolve_model_path_versioned(cfg, store, id, Path::new(&spec.path))?;
 
     if !path.exists() {
         return Ok(ModelStatus {
@@ -270,6 +395,66 @@ pub fn download_model(cfg: &Config, model_id: &str) -> CoreResult<()> {
     Ok(())
 }
 
+/// 按显式地址下载指定版本到 `models/<id>/<版本>/`，校验 sha256 后原子替换，
+/// 并记录为该模型的激活版本（市场清单下载入口；`expected_sha256` 必填且非占位）
+pub fn download_version(
+    cfg: &Config,
+    store: &Store,
+    id: &str,
+    version: &str,
+    url: &str,
+    expected_sha256: &str,
+) -> CoreResult<PathBuf> {
+    if url.trim().is_empty() {
+        return Err(CoreError::Download(format!(
+            "模型“{id}”版本“{version}”未提供下载地址"
+        )));
+    }
+    if expected_sha256.len() != 64 || expected_sha256.chars().all(|c| c == '0') {
+        return Err(CoreError::Download(format!(
+            "模型“{id}”版本“{version}”缺少有效 sha256，拒绝下载（无法校验文件完整性）"
+        )));
+    }
+    let spec = cfg.model_spec(id)?;
+    let path = version_path(cfg, id, version, Path::new(&spec.path));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let timeout = std::time::Duration::from_secs(cfg.models_download.timeout_secs.max(1));
+    let tmp = path.with_extension("onnx.downloading");
+
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_MAX_RETRIES {
+        match download_to(url, &tmp, timeout) {
+            Ok(()) => {
+                last_err.clear();
+                break;
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                let _ = std::fs::remove_file(&tmp);
+                if attempt < DOWNLOAD_MAX_RETRIES {
+                    continue;
+                }
+                return Err(CoreError::Download(format!(
+                    "模型“{id}”版本“{version}”下载失败（已重试 {DOWNLOAD_MAX_RETRIES} 次）：{last_err}"
+                )));
+            }
+        }
+    }
+
+    let actual = sha256_file(&tmp)?;
+    if actual != expected_sha256 {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(CoreError::Download(format!(
+            "模型“{id}”版本“{version}”sha256 校验失败：预期 {expected_sha256}，实际 {actual}"
+        )));
+    }
+    std::fs::rename(&tmp, &path)?;
+    store.set_pref(&format!("{MODEL_VERSION_PREFIX}{id}"), version)?;
+    Ok(path)
+}
+
 /// 单次流式下载：HTTP GET 响应体写入临时文件（覆盖写入，保证重试幂等）
 fn download_to(url: &str, tmp: &Path, timeout: std::time::Duration) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new().timeout(timeout).build();
@@ -329,6 +514,131 @@ mod tests {
         let mut h = Sha256::new();
         h.update(content);
         hex_encode(&h.finalize())
+    }
+
+    /// 在 `<models_dir>/<id>/<版本>/` 下写入模型文件，返回其路径
+    fn write_version(dir: &Path, cfg: &Config, id: &str, version: &str, content: &[u8]) -> PathBuf {
+        let spec_path = Path::new(&cfg.models[id].path).to_path_buf();
+        let path = version_path(cfg, id, version, &spec_path);
+        let abs = dir.join(&path);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, content).unwrap();
+        abs
+    }
+
+    #[test]
+    fn 版本目录列表按数值升序且忽略无文件目录() {
+        let (dir, mut cfg, _store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        write_version(dir.path(), &cfg, "rmbg", "1.9.0", b"a");
+        write_version(dir.path(), &cfg, "rmbg", "1.10.0", b"b");
+        write_version(dir.path(), &cfg, "rmbg", "2.0.0", b"c");
+        // 空目录（无模型文件）不计入
+        std::fs::create_dir_all(dir.path().join("rmbg").join("3.0.0")).unwrap();
+
+        assert_eq!(
+            list_versions(&cfg, "rmbg"),
+            vec![
+                "1.9.0".to_string(),
+                "1.10.0".to_string(),
+                "2.0.0".to_string()
+            ]
+        );
+        // 未知模型返回空
+        assert!(list_versions(&cfg, "不存在").is_empty());
+    }
+
+    #[test]
+    fn 注册表路径存在时优先于版本目录() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        // 注册表指向的文件存在（旧布局）
+        let direct = dir.path().join("retinaface_r50.onnx");
+        std::fs::write(&direct, b"legacy").unwrap();
+        cfg.models.get_mut("retinaface").unwrap().path = direct.to_string_lossy().to_string();
+        write_version(dir.path(), &cfg, "retinaface", "2.0.0", b"v2");
+
+        let got = resolve_model_path_versioned(
+            &cfg,
+            &store,
+            "retinaface",
+            Path::new(&cfg.models["retinaface"].path),
+        )
+        .unwrap();
+        assert_eq!(got, direct, "旧布局存在时应优先使用注册表路径");
+    }
+
+    #[test]
+    fn 无记录时取最高版本并回写激活项() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        write_version(dir.path(), &cfg, "rmbg", "1.4.0", b"old");
+        let newest = write_version(dir.path(), &cfg, "rmbg", "2.0.0", b"new");
+
+        let got =
+            resolve_model_path_versioned(&cfg, &store, "rmbg", Path::new(&cfg.models["rmbg"].path))
+                .unwrap();
+        assert_eq!(got, newest, "应取最高版本");
+        assert_eq!(
+            active_version(&cfg, &store, "rmbg").unwrap().as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    #[test]
+    fn 激活已记录版本且目录缺失时视为无效() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        write_version(dir.path(), &cfg, "rmbg", "1.4.0", b"old");
+        activate_version(&cfg, &store, "rmbg", "1.4.0").unwrap();
+        assert_eq!(
+            active_version(&cfg, &store, "rmbg").unwrap().as_deref(),
+            Some("1.4.0")
+        );
+
+        // 移除版本目录后激活项失效
+        std::fs::remove_dir_all(dir.path().join("rmbg")).unwrap();
+        assert!(active_version(&cfg, &store, "rmbg").unwrap().is_none());
+    }
+
+    #[test]
+    fn 激活不存在的版本给出中文报错() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        let err = activate_version(&cfg, &store, "rmbg", "9.9.9")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("版本“9.9.9”不存在"), "实际：{err}");
+    }
+
+    #[test]
+    fn 无版本目录时回退注册表路径() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        let expected = dir.path().join("rmbg-1.4.onnx");
+        let got =
+            resolve_model_path_versioned(&cfg, &store, "rmbg", Path::new(&cfg.models["rmbg"].path))
+                .unwrap();
+        assert_eq!(
+            got, expected,
+            "无版本目录应回退注册表路径（供上层判定缺失）"
+        );
+    }
+
+    #[test]
+    fn 校验时命中版本目录内的模型文件() {
+        let (dir, mut cfg, store) = setup();
+        cfg.general.models_dir = dir.path().to_string_lossy().to_string();
+        let content = b"versioned-model";
+        write_version(dir.path(), &cfg, "rmbg", "1.4.0", content);
+        // 注册表给出该版本的 sha256
+        let sha = expected_of(content);
+        cfg.models.get_mut("rmbg").unwrap().sha256 = sha.clone();
+
+        let statuses = check_models(&cfg, &store).unwrap();
+        let rmbg = statuses.iter().find(|s| s.id == "rmbg").unwrap();
+        assert_eq!(rmbg.check_status, CheckStatus::Ready);
+        assert!(rmbg.path.to_string_lossy().contains("1.4.0"));
     }
 
     #[test]

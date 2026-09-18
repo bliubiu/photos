@@ -119,6 +119,141 @@ pub struct ModelSpec {
     /// 单模型下载地址（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download: Option<ModelDownload>,
+    /// 模型角色（插件化注册时声明用途；内置条目按 id 推断）
+    #[serde(default, skip_serializing_if = "ModelRole::is_auto")]
+    pub role: ModelRole,
+    /// 预处理约定（布局 / 归一化 / 通道序；默认沿用内置约定）
+    #[serde(default, skip_serializing_if = "Preprocess::is_default")]
+    pub preprocess: Preprocess,
+}
+
+/// 模型角色：声明该模型在流水线中承担的任务
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelRole {
+    /// 未声明（按内置 id 推断或用户自定义步骤使用）
+    #[default]
+    Auto,
+    /// 人脸检测
+    Face,
+    /// 人体关键点
+    Keypoint,
+    /// 人像抠图 / 分割
+    Matting,
+    /// 人像解析（语义分割，换装用）
+    Parsing,
+}
+
+impl ModelRole {
+    /// 是否未声明（用于 serde 跳过序列化）
+    pub fn is_auto(&self) -> bool {
+        *self == ModelRole::Auto
+    }
+
+    /// 文本表示（落库 / 接口回显）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelRole::Auto => "auto",
+            ModelRole::Face => "face",
+            ModelRole::Keypoint => "keypoint",
+            ModelRole::Matting => "matting",
+            ModelRole::Parsing => "parsing",
+        }
+    }
+
+    /// 从文本解析（供注册入口校验；非法值给出中文错误；空串视为未声明）
+    pub fn parse(s: &str) -> CoreResult<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(ModelRole::Auto),
+            "face" => Ok(ModelRole::Face),
+            "keypoint" => Ok(ModelRole::Keypoint),
+            "matting" => Ok(ModelRole::Matting),
+            "parsing" => Ok(ModelRole::Parsing),
+            other => Err(CoreError::ConfigValidate(format!(
+                "未知模型角色“{other}”，可选：auto、face、keypoint、matting、parsing"
+            ))),
+        }
+    }
+}
+
+/// 输入张量布局
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    /// 由 `input_dims` 推断（通道在第二维 → NCHW，在最后一维 → NHWC）
+    #[default]
+    Auto,
+    /// `[N,C,H,W]`，等比缩放 + 灰边填充（letterbox）
+    Nchw,
+    /// `[N,H,W,C]`，直接 resize
+    Nhwc,
+}
+
+/// 归一化方式
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Norm {
+    /// RGB ÷ 255 → [0,1]（内置约定）
+    #[default]
+    Unit,
+    /// 不做归一化（保留 0-255 原始值）
+    None,
+    /// 减均值、不缩放（如 RetinaFace 的 (104,117,123)）
+    Mean([f32; 3]),
+    /// 减均值除标准差
+    #[serde(rename = "mean_std")]
+    MeanStd { mean: [f32; 3], std: [f32; 3] },
+}
+
+/// 通道顺序
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelOrder {
+    /// RGB（内置约定）
+    #[default]
+    Rgb,
+    /// BGR
+    Bgr,
+}
+
+/// 模型预处理约定 `[models.<id>.preprocess]`
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct Preprocess {
+    /// 输入布局
+    #[serde(default)]
+    pub layout: Layout,
+    /// 归一化方式
+    #[serde(default)]
+    pub norm: Norm,
+    /// 通道顺序
+    #[serde(default)]
+    pub channel: ChannelOrder,
+}
+
+impl Preprocess {
+    /// 是否全为默认值（用于 serde 跳过序列化）
+    pub fn is_default(&self) -> bool {
+        *self == Preprocess::default()
+    }
+
+    /// 依据 `input_dims` 推断实际布局（`Auto` 时按通道维位置判断）
+    pub fn effective_layout(&self, dims: &[i64]) -> CoreResult<Layout> {
+        match self.layout {
+            Layout::Nchw | Layout::Nhwc => Ok(self.layout),
+            Layout::Auto => {
+                let n = dims.len();
+                if n >= 4 && dims[1] == 3 {
+                    Ok(Layout::Nchw)
+                } else if n >= 4 && dims[n - 1] == 3 {
+                    Ok(Layout::Nhwc)
+                } else {
+                    Err(CoreError::ConfigValidate(format!(
+                        "无法从输入维度 {dims:?} 推断布局：需 NCHW（通道在第二维）或 NHWC（通道在最后一维）且通道数为 3；请在 preprocess.layout 显式声明"
+                    )))
+                }
+            }
+        }
+    }
 }
 
 /// 单模型下载配置
@@ -287,6 +422,8 @@ impl Config {
     }
 
     /// 从指定配置文件加载（文件不存在则仅用默认值 + 环境变量）
+    ///
+    /// 覆盖层级：默认值 → `application.toml` → `<data_dir>/models.custom.toml` → 环境变量。
     pub fn load_from(path: Option<&Path>) -> CoreResult<Self> {
         let mut root = toml::Value::try_from(Self::default())
             .map_err(|e| CoreError::ConfigParse(e.to_string()))?;
@@ -298,6 +435,21 @@ impl Config {
                     .map_err(|e| CoreError::ConfigParse(format!("{}：{e}", p.display())))?;
                 merge_value(&mut root, file_value);
             }
+        }
+
+        // 第二层覆盖：WebUI 注册的自定义模型（<data_dir>/models.custom.toml，重启生效）
+        let data_dir = root
+            .get("general")
+            .and_then(|g| g.get("data_dir"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(default_data_dir);
+        let custom = Path::new(&data_dir).join(CUSTOM_MODELS_FILE);
+        if custom.exists() {
+            let content = std::fs::read_to_string(&custom)?;
+            let file_value: Value = toml::from_str(&content)
+                .map_err(|e| CoreError::ConfigParse(format!("{}：{e}", custom.display())))?;
+            merge_value(&mut root, file_value);
         }
 
         // 提取 [models.download] 到独立字段（避免与注册表 id 冲突）
@@ -347,6 +499,35 @@ impl Config {
                 "[output] jpg_quality 需在 1..=100 内，收到 {}",
                 self.output.jpg_quality
             )));
+        }
+        // 模型预处理声明校验（插件化注册的合法性入口）
+        for (id, spec) in &self.models {
+            let dims = &spec.input_dims;
+            let n = dims.len();
+            match spec.preprocess.layout {
+                Layout::Nchw if !(n >= 4 && dims[1] == 3) => {
+                    return Err(CoreError::ConfigValidate(format!(
+                        "模型“{id}”的 preprocess.layout 声明为 nchw，但 input_dims {dims:?} 的第二维不是 3"
+                    )));
+                }
+                Layout::Nhwc if !(n >= 4 && dims[n - 1] == 3) => {
+                    return Err(CoreError::ConfigValidate(format!(
+                        "模型“{id}”的 preprocess.layout 声明为 nhwc，但 input_dims {dims:?} 的最后一维不是 3"
+                    )));
+                }
+                Layout::Auto => {
+                    // 未显式声明时按通道维位置推断；两者都不满足即无法接入
+                    spec.preprocess.effective_layout(dims)?;
+                }
+                _ => {}
+            }
+            if let Norm::MeanStd { std, .. } = spec.preprocess.norm {
+                if std.iter().any(|v| *v <= 0.0) {
+                    return Err(CoreError::ConfigValidate(format!(
+                        "模型“{id}”的 preprocess.norm.std 必须全为正数，收到 {std:?}"
+                    )));
+                }
+            }
         }
         for (suite_id, suite) in &self.modes {
             for (role, model_id) in [
@@ -670,43 +851,74 @@ fn default_jpg_quality() -> u8 {
 
 fn default_models() -> BTreeMap<String, ModelSpec> {
     let mut m = BTreeMap::new();
-    for (id, path, dims) in [
+    for (id, path, dims, role) in [
         // MTCNN 完整三级联（逻辑 speed 套件 face 仍叫 mtcnn）
-        ("mtcnn_pnet", "models/pnet.onnx", vec![1, 12, 12, 3]),
-        ("mtcnn_rnet", "models/rnet.onnx", vec![1, 24, 24, 3]),
-        ("mtcnn_onet", "models/onet.onnx", vec![1, 48, 48, 3]),
+        (
+            "mtcnn_pnet",
+            "models/pnet.onnx",
+            vec![1, 12, 12, 3],
+            ModelRole::Face,
+        ),
+        (
+            "mtcnn_rnet",
+            "models/rnet.onnx",
+            vec![1, 24, 24, 3],
+            ModelRole::Face,
+        ),
+        (
+            "mtcnn_onet",
+            "models/onet.onnx",
+            vec![1, 48, 48, 3],
+            ModelRole::Face,
+        ),
         (
             "retinaface",
             "models/retinaface_r50.onnx",
             vec![1, 3, 640, 640],
+            ModelRole::Face,
         ),
         (
             "movnet_light",
             "models/movenet_lightning.onnx",
             vec![1, 192, 192, 3],
+            ModelRole::Keypoint,
         ),
         (
             "movnet_thunder",
             "models/movenet_thunder.onnx",
             vec![1, 256, 256, 3],
+            ModelRole::Keypoint,
         ),
-        ("rmbg", "models/rmbg-1.4.onnx", vec![1, 3, 1024, 1024]),
+        (
+            "rmbg",
+            "models/rmbg-1.4.onnx",
+            vec![1, 3, 1024, 1024],
+            ModelRole::Matting,
+        ),
         (
             "birefnet_lite",
             "models/birefnet-lite.onnx",
             vec![1, 3, 1024, 1024],
+            ModelRole::Matting,
         ),
         (
             "birefnet_full",
             "models/birefnet-full.onnx",
             vec![1, 3, 1024, 1024],
+            ModelRole::Matting,
         ),
-        ("modnet", "models/modnet.onnx", vec![1, 3, 512, 512]),
+        (
+            "modnet",
+            "models/modnet.onnx",
+            vec![1, 3, 512, 512],
+            ModelRole::Matting,
+        ),
         // 人像解析（LIP 20 类语义分割）：虚拟试衣换装用，独立于三模式套件
         (
             "parsing_lip",
             "models/parsing_lip.onnx",
             vec![1, 3, 473, 473],
+            ModelRole::Parsing,
         ),
     ] {
         m.insert(
@@ -718,6 +930,17 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
                 input_dims: dims,
                 enabled: true,
                 download: default_download_url(id),
+                role,
+                // RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)、不归一化
+                preprocess: if id == "retinaface" {
+                    Preprocess {
+                        layout: Layout::Nchw,
+                        norm: Norm::Mean([104.0, 117.0, 123.0]),
+                        channel: ChannelOrder::Rgb,
+                    }
+                } else {
+                    Preprocess::default()
+                },
             },
         );
     }
@@ -1035,8 +1258,11 @@ pub fn default_config_path() -> Option<PathBuf> {
     p.exists().then(|| p.to_path_buf())
 }
 
+/// 自定义模型注册表文件名（`<data_dir>/models.custom.toml`，WebUI 注册落盘位置）
+pub const CUSTOM_MODELS_FILE: &str = "models.custom.toml";
+
 /// 深度合并：overlay 覆盖 base（表递归合并，标量/数组整体覆盖）
-fn merge_value(base: &mut Value, overlay: Value) {
+pub(crate) fn merge_value(base: &mut Value, overlay: Value) {
     match (base, overlay) {
         (Value::Table(b), Value::Table(o)) => {
             for (k, v) in o {
@@ -1163,6 +1389,163 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn 角色文本解析与非法值中文报错() {
+        assert_eq!(ModelRole::parse("matting").unwrap(), ModelRole::Matting);
+        assert_eq!(ModelRole::parse("").unwrap(), ModelRole::Auto);
+        let err = ModelRole::parse("unknown").unwrap_err().to_string();
+        assert!(err.contains("未知模型角色"), "实际：{err}");
+    }
+
+    #[test]
+    fn 自定义模型注册表作为第二层覆盖生效() {
+        let _g = with_envs::<&str, &str>(&[], || {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            std::fs::create_dir_all(&data).unwrap();
+            let app = dir.path().join("application.toml");
+            std::fs::write(
+                &app,
+                format!(
+                    "[general]\ndata_dir = \"{}\"\n",
+                    data.display().to_string().replace('\\', "/")
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                data.join(CUSTOM_MODELS_FILE),
+                r#"
+[models.my_matting]
+path = "models/my_matting.onnx"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+input_dims = [1, 512, 512, 3]
+role = "matting"
+preprocess = { layout = "nhwc", norm = "none", channel = "bgr" }
+"#,
+            )
+            .unwrap();
+
+            let cfg = Config::load_from(Some(&app)).unwrap();
+            let got = cfg
+                .models
+                .get("my_matting")
+                .expect("第二层覆盖应加载自定义模型");
+            assert_eq!(got.role, ModelRole::Matting);
+            assert_eq!(got.input_dims, vec![1, 512, 512, 3]);
+            assert_eq!(got.preprocess.norm, Norm::None);
+        });
+    }
+
+    #[test]
+    fn 内置模型声明角色与预处理() {
+        let cfg = Config::default();
+        assert_eq!(cfg.models["retinaface"].role, ModelRole::Face);
+        assert_eq!(cfg.models["movnet_light"].role, ModelRole::Keypoint);
+        assert_eq!(cfg.models["birefnet_lite"].role, ModelRole::Matting);
+        assert_eq!(cfg.models["parsing_lip"].role, ModelRole::Parsing);
+        // RetinaFace 声明为减均值不归一化
+        assert_eq!(
+            cfg.models["retinaface"].preprocess.norm,
+            Norm::Mean([104.0, 117.0, 123.0])
+        );
+        assert_eq!(cfg.models["retinaface"].preprocess.layout, Layout::Nchw);
+        // 其余模型沿用内置约定（默认值）
+        assert!(cfg.models["rmbg"].preprocess.is_default());
+    }
+
+    #[test]
+    fn 旧配置无新字段仍可解析并保持默认() {
+        // 旧版 application.toml 的 [models.<id>] 只有原有字段
+        let _g = with_envs::<&str, &str>(&[], || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("application.toml");
+            std::fs::write(
+                &path,
+                r#"
+[models.my_face]
+path = "models/custom_face.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 320, 320]
+
+[modes.custom]
+face = "my_face"
+keypoint = "movnet_light"
+matting = "rmbg"
+"#,
+            )
+            .unwrap();
+            let cfg = Config::load_from(Some(&path)).unwrap();
+            let spec = &cfg.models["my_face"];
+            assert_eq!(spec.role, ModelRole::Auto);
+            assert!(spec.preprocess.is_default());
+            assert!(spec.enabled);
+            spec.preprocess.effective_layout(&spec.input_dims).unwrap();
+        });
+    }
+
+    #[test]
+    fn 预处理布局与输入维度矛盾时中文报错() {
+        let mut cfg = Config::default();
+        cfg.models.get_mut("rmbg").unwrap().preprocess.layout = Layout::Nhwc;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("声明为 nhwc"), "实际：{err}");
+
+        let mut cfg2 = Config::default();
+        cfg2.models.get_mut("rmbg").unwrap().preprocess.layout = Layout::Nchw;
+        cfg2.models.get_mut("rmbg").unwrap().input_dims = vec![1, 192, 192, 3];
+        let err2 = cfg2.validate().unwrap_err().to_string();
+        assert!(err2.contains("声明为 nchw"), "实际：{err2}");
+    }
+
+    #[test]
+    fn 无法推断布局的维度给出中文报错() {
+        let mut cfg = Config::default();
+        let spec = cfg.models.get_mut("rmbg").unwrap();
+        spec.input_dims = vec![1, 4, 128, 128];
+        spec.preprocess.layout = Layout::Auto;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("无法从输入维度"), "实际：{err}");
+    }
+
+    #[test]
+    fn 均方差归一化标准差必须为正() {
+        let mut cfg = Config::default();
+        cfg.models.get_mut("rmbg").unwrap().preprocess.norm = Norm::MeanStd {
+            mean: [0.485, 0.456, 0.406],
+            std: [1.0, 0.0, 1.0],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("必须全为正数"), "实际：{err}");
+    }
+
+    #[test]
+    fn 自定义模型可按id覆盖内置条目() {
+        // 覆盖内置 rmbg 的路径与预处理（深合并语义，未覆盖字段保持内置默认）
+        let _g = with_envs::<&str, &str>(&[], || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("application.toml");
+            std::fs::write(
+                &path,
+                r#"
+[models.rmbg]
+path = "models/my_rmbg.onnx"
+role = "matting"
+
+[models.rmbg.preprocess]
+layout = "nchw"
+norm = "unit"
+channel = "bgr"
+"#,
+            )
+            .unwrap();
+            let cfg = Config::load_from(Some(&path)).unwrap();
+            let spec = &cfg.models["rmbg"];
+            assert_eq!(spec.path, "models/my_rmbg.onnx");
+            assert_eq!(spec.preprocess.channel, ChannelOrder::Bgr);
+            assert_eq!(spec.input_dims, vec![1, 3, 1024, 1024]);
+        });
     }
 
     #[test]

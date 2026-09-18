@@ -66,8 +66,12 @@
 | GET | `/tasks/{id}/input` | 读取上传原图（供「原图/结果」对比） |
 | GET | `/tasks` | 历史列表（读 `task_history`，支持筛选与分页） |
 | DELETE | `/tasks` | 清空历史任务（连带删除磁盘产物与上传原图） |
-| GET | `/models` | 模型注册表与校验状态 |
-| POST | `/models/download` | 一键下载指定（缺省为全部缺失）模型 |
+| GET | `/models` | 模型注册表与校验状态（含角色、版本与内置标记） |
+| POST | `/models/download` | 一键下载指定（缺省为全部缺失）模型；可指定 `version` 走市场清单版本化下载 |
+| GET | `/models/market` | 模型市场清单（内置 + 用户覆盖），标注可下载与本地已下载/激活状态 |
+| POST | `/models/register` | 注册自定义模型（写入 `<data_dir>/models.custom.toml`，重启生效） |
+| GET | `/models/versions` | 指定模型的已下载版本与当前激活版本 |
+| POST | `/models/activate` | 切换 / 回滚模型激活版本 |
 | GET | `/config` | 驱动前端下拉的选项集 |
 | GET | `/metrics` | 可观测性指标：任务统计、平均耗时、各阶段平均耗时、错误总数 |
 | GET | `/errors` | 可观测性错误上报记录（倒序，`limit` 钳制 1..=200，默认 20） |
@@ -285,13 +289,28 @@
       "path": "models/birefnet-lite.onnx",
       "ready": false,
       "check_status": "missing",
-      "message": "模型文件不存在"
+      "message": "模型文件不存在",
+      "role": "matting",
+      "version": null,
+      "versions": ["1.0.0", "1.1.0"],
+      "active_version": "1.1.0",
+      "builtin": true
     }
   ]
 }
 ```
 
 `check_status`：`ready` | `missing` | `hash_mismatch` | `cached_ok`（与 `04-模型清单.md` §5 一致）。
+
+插件化扩展字段：
+
+| 字段 | 含义 |
+|---|---|
+| `role` | 模型角色：`auto` \| `face` \| `keypoint` \| `matting` \| `parsing`（注册表未声明时为 `auto`） |
+| `version` | **当前实际解析到的版本目录名**；注册表 `path` 直连单文件（旧布局）时为 `null` |
+| `versions` | 本地已下载版本列表（`models/<id>/` 下的目录名，升序；无则空数组） |
+| `active_version` | sqlite `prefs` 中记录的激活版本；无记录时取最高版本并回写，目录为空时为 `null` |
+| `builtin` | 是否属内置注册表（`Config::default().models`）；false 表示来自 `models.custom.toml` 的自定义注册 |
 
 ### 3.9 POST `/models/download`
 
@@ -304,8 +323,11 @@
 | 字段 | 类型 | 约束 |
 |---|---|---|
 | `ids` | string[] | 可选；缺省或空数组时下载全部「文件缺失」（`check_status=missing`）的模型；含未注册 id 返回 `400` |
+| `version` | string\|null | 可选；指定时走**市场清单版本化下载**（落到 `models/<id>/<version>/`），此时 `ids` 必填 |
 
 逐个模型下载到注册表路径（`[models.<id>].path`），下载地址取 `[models.<id>].download.url`。已存在的文件直接跳过视为成功；单个模型失败**不阻断**其余，逐项返回中文原因。
+
+`version` 分支的额外约束：条目须在市场清单中且满足 `downloadable`（`enabled = true` 且 `url`、`sha256` 齐备、`sha256` 非占位），否则该项 `ok = false`（内置条目默认如此，原因形如「条目未启用下载或缺少直链/sha256」）；下载后走完整 sha256 校验，成功后**自动切换激活该版本**。该版本已存在时跳过下载（不改变激活版本），逐项结果附 `version` 字段。
 
 ```json
 {
@@ -319,6 +341,7 @@
 |---|---|
 | 处理完成（含部分失败） | `200` + 逐项结果 |
 | `ids` 含未注册 id | `400` + `code=INVALID_PARAMS` |
+| 指定 `version` 但 `ids` 为空 | `400` + `code=INVALID_PARAMS` |
 
 说明：模型体积较大（单个可达数百 MB），本端点同步等待下载完成后返回，**耗时较长且无进度推送**；前端以「下载中」状态提示，完成后重新拉取 `GET /models` 刷新就绪状态。
 
@@ -394,10 +417,132 @@
 - `code` 沿用错误码枚举（如 `INTERNAL`、`MODEL_MISSING`）；`stage` 为失败时最后完成的流水线阶段（非流水线场景为业务动作名，如「模型下载」「删除任务」）。
 - `task_id` 无关联任务时为 `null`。
 
+### 3.14 GET `/models/market`
+
+模型市场清单：内置清单（随二进制内嵌）+ 用户覆盖文件（`<data_dir>/model_market.toml`）合并后的全部条目，并标注本地状态。
+
+```json
+{
+  "items": [
+    {
+      "id": "birefnet_lite",
+      "version": "1.0.0",
+      "role": "matting",
+      "url": "",
+      "sha256": "",
+      "size": 0,
+      "license": "MIT",
+      "source": "BiRefNet general（bb_swin_v1_tiny）",
+      "enabled": false,
+      "downloadable": false,
+      "registered": true,
+      "downloaded": false,
+      "active_version": null
+    }
+  ]
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `version` / `role` / `url` / `sha256` / `size` / `license` / `source` / `enabled` | 清单条目原始字段（见 `04-模型清单.md` §7.1） |
+| `downloadable` | 是否具备下载条件：`enabled` 且 `url` 非空且 `sha256` 为 64 位非占位 |
+| `registered` | 该 id 是否已存在于模型注册表（`[models.<id>]` / 自定义注册表） |
+| `downloaded` | 本地 `models/<id>/<version>/` 是否已存在该版本 |
+| `active_version` | 该模型当前激活版本（同 `GET /models`） |
+
+说明：内置条目**默认 `enabled=false`、`url`/`sha256` 留空**，故 `downloadable` 为 `false`，前端展示但禁用下载按钮；解析失败（清单格式非法）返回 `500`，并上报错误码 `MODEL_MARKET_INVALID`。
+
+### 3.15 POST `/models/register`
+
+注册自定义模型：写入 `<data_dir>/models.custom.toml`（同 id 覆盖），配置加载时作为第二层覆盖合并。
+
+```json
+{
+  "id": "my_matting",
+  "path": "models/my_matting.onnx",
+  "input_dims": [1, 3, 512, 512],
+  "role": "matting",
+  "sha256": null,
+  "preprocess": {
+    "layout": "nchw",
+    "norm": { "mean_std": { "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5] } },
+    "channel": "rgb"
+  }
+}
+```
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `id` | string | 必填；非空、非 `.`/`..`，仅允许字母、数字与 `_ - .` |
+| `path` | string | 必填；非空，`.onnx` 路径（相对项目根或绝对路径） |
+| `input_dims` | int[] | 必填；非空 |
+| `role` | string\|null | 可选；`auto`\|`face`\|`keypoint`\|`matting`\|`parsing`，缺省 `auto`；非法值返回 `400` |
+| `sha256` | string\|null | 可选；64 位十六进制。缺省时：文件已存在则自动计算，文件不存在则返回 `400` |
+| `preprocess` | object\|null | 可选；`{ layout, norm, channel }`（缺省 `auto`/`unit`/`rgb`），见 `04-模型清单.md` §2 |
+
+```json
+{
+  "id": "my_matting",
+  "registered": true,
+  "replaced": false,
+  "restart_required": true,
+  "message": "模型“my_matting”已写入 data/models.custom.toml，重启服务后生效"
+}
+```
+
+| 情况 | 状态码 |
+|---|---|
+| 注册成功 | `200` + `registered=true` |
+| 请求体非法 / id、路径、维度非法 / sha256 非法或缺失且文件不存在 / `role` 或 `preprocess` 声明非法 | `400` + `code=MODEL_REGISTER_INVALID` |
+
+说明：
+
+- `replaced` 表示是否覆盖了同 id 的既有条目；
+- 写入前会用「默认配置 + 当前生效模型表 + 候选文件」完整反序列化并 `validate()`，**校验失败不落盘**；
+- **`restart_required` 恒为 true**：`AppState.cfg` 为 `Arc<Config>` 不可变，注册结果需重启进程生效。
+
+### 3.16 GET `/models/versions`
+
+| query | 含义 |
+|---|---|
+| `id` | 模型 id（须已注册） |
+
+```json
+{ "id": "birefnet_lite", "versions": ["1.0.0", "1.1.0"], "active_version": "1.1.0" }
+```
+
+`versions` 为 `models/<id>/` 下的版本目录名（升序，同一 id 多版本共存）；`active_version` 为 sqlite `prefs` 记录值（无记录时取最高版本并回写，目录为空时为 `null`）。
+
+| 情况 | 状态码 |
+|---|---|
+| 成功 | `200` |
+| 未知模型 id | `400` + `code=MODEL_VERSION_UNKNOWN` |
+
+### 3.17 POST `/models/activate`
+
+切换 / 回滚模型激活版本（`prefs` 键 `model_version:<id>`）。
+
+```json
+{ "id": "birefnet_lite", "version": "1.0.0" }
+```
+
+```json
+{ "id": "birefnet_lite", "active_version": "1.0.0", "message": "已切换激活版本（校验通过）" }
+```
+
+| 情况 | 状态码 |
+|---|---|
+| 切换成功 | `200` |
+| 未知模型 id，或该版本未下载（`versions` 不含目标版本） | `400` + `code=MODEL_VERSION_UNKNOWN` |
+| 版本目录存在但文件校验失败（缺失 / sha256 不符） | `503` + `code=MODEL_MISSING` |
+
+说明：先判定版本目录是否存在（否则模型类错误会被统一映射为 `503`，语义不符），再读注册表**目标版本文件**做 sha256 校验，**校验通过才写 `prefs`**——校验失败不切换，激活版本保持不变。
+
 ## 4. 实现约束
 
 - 契约变更须同步：本文件、`02-架构设计.md` 存储字段（若涉及）、`03-实施计划.md` M3、CHANGELOG。
-- 错误码建议枚举（持续扩充）：`INVALID_PARAMS`、`MODEL_MISSING`、`FILE_TOO_LARGE`、`UNSUPPORTED_MEDIA`、`TASK_NOT_FOUND`、`ARTIFACT_NOT_FOUND`、`INTERNAL`。
+- 错误码建议枚举（持续扩充）：`INVALID_PARAMS`、`MODEL_MISSING`、`MODEL_REGISTER_INVALID`、`MODEL_VERSION_UNKNOWN`、`FILE_TOO_LARGE`、`UNSUPPORTED_MEDIA`、`TASK_NOT_FOUND`、`ARTIFACT_NOT_FOUND`、`INTERNAL`。
 - 多任务并发上限与队列策略实现期确定；契约层先保证单任务状态机正确。
 - 安全与脱敏见 [`06-安全设计.md`](06-安全设计.md)。
 

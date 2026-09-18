@@ -4,11 +4,18 @@
 //! - NCHW `[1,3,H,W]`：RetinaFace / MTCNN / RMBG / BiRefNet / MODNet
 //! - NHWC `[1,H,W,3]`：MoveNet（RGB 归一化 [0,1]，坐标输出相对输入归一化）
 //!
-//! 归一化统一按 **RGB 除以 255 → [0,1]**；模型定版后若实际约定不同（如 BGR、均值方差
-//! 归一化），只需调整本模块的通道顺序与归一化函数，pipeline 侧无需改动。
+//! 布局与归一化由模型注册表声明（`[models.<id>.preprocess]`）驱动：
+//! - `layout`：`auto`（按通道维位置推断，默认）| `nchw` | `nhwc`
+//! - `norm`：`unit`（RGB÷255→[0,1]，默认）| `none` | `mean` | `mean_std`
+//! - `channel`：`rgb`（默认）| `bgr`
+//!
+//! 内置模型的默认声明等价于旧行为：NCHW 走 letterbox + RGB÷255；NHWC 直接 resize；
+//! RetinaFace 由 `[models.retinaface.preprocess]` 声明为 RGB 0-255 减均值 (104,117,123)。
+//! 插件化注册的模型只需在配置中声明预处理，pipeline 侧无需改动。
 
 use image::{GrayImage, RgbImage};
 
+use crate::config::{ChannelOrder, Layout, Norm, Preprocess};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::TensorData;
 
@@ -37,41 +44,54 @@ pub struct ModelInput {
 /// - NHWC（通道在最后一维）：直接 resize（MoveNet 官方约定），坐标为归一化，无需逆变换
 ///
 /// `retinaface` 为 true 时采用 RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)，不归一化
-/// （见 HivisionIDPhotos/hivision/creator/retinaface/inference.py）
+/// （见 HivisionIDPhotos/hivision/creator/retinaface/inference.py）。
+///
+/// 该函数为兼容入口，等价于 [`build_input_with`] 传入 `retinaface` 对应的预处理声明；
+/// 需要自定义归一化/通道序（插件化注册的模型）请改用 [`build_input_with`]。
 pub fn build_input(img: &RgbImage, dims: &[i64], retinaface: bool) -> CoreResult<ModelInput> {
-    let n = dims.len();
-    let channel_first = n >= 4 && dims[1] == 3;
-    let channel_last = n >= 4 && dims[n - 1] == 3;
-    if channel_first {
-        let (tw, th) = (dims[2] as u32, dims[3] as u32);
-        if tw == 0 || th == 0 {
-            return Err(CoreError::Inference(format!("模型输入尺寸非法：{dims:?}")));
+    let pp = if retinaface {
+        Preprocess {
+            layout: Layout::Auto,
+            norm: Norm::Mean([104.0, 117.0, 123.0]),
+            channel: ChannelOrder::Rgb,
         }
-        let (canvas, lb) = letterbox(img, tw, th);
-        let data = if retinaface {
-            rgb_to_nchw_retinaface(&canvas)
-        } else {
-            rgb_to_nchw(&canvas)
-        };
-        Ok(ModelInput {
-            tensor: TensorData::new(dims.to_vec(), data)?,
-            letterbox: Some(lb),
-        })
-    } else if channel_last {
-        let (tw, th) = (dims[1] as u32, dims[2] as u32);
-        if tw == 0 || th == 0 {
-            return Err(CoreError::Inference(format!("模型输入尺寸非法：{dims:?}")));
-        }
-        let resized = image::imageops::resize(img, tw, th, image::imageops::FilterType::Triangle);
-        let data = rgb_to_nhwc(&resized);
-        Ok(ModelInput {
-            tensor: TensorData::new(dims.to_vec(), data)?,
-            letterbox: None,
-        })
     } else {
-        Err(CoreError::Inference(format!(
+        Preprocess::default()
+    };
+    build_input_with(img, dims, &pp)
+}
+
+/// 依据模型注册表声明的预处理约定构造推理输入（插件化模型接入点）
+pub fn build_input_with(img: &RgbImage, dims: &[i64], pp: &Preprocess) -> CoreResult<ModelInput> {
+    match pp.effective_layout(dims)? {
+        Layout::Nchw => {
+            let (tw, th) = (dims[2] as u32, dims[3] as u32);
+            if tw == 0 || th == 0 {
+                return Err(CoreError::Inference(format!("模型输入尺寸非法：{dims:?}")));
+            }
+            let (canvas, lb) = letterbox(img, tw, th);
+            let data = rgb_to_nchw_with(&canvas, pp.norm, pp.channel);
+            Ok(ModelInput {
+                tensor: TensorData::new(dims.to_vec(), data)?,
+                letterbox: Some(lb),
+            })
+        }
+        Layout::Nhwc => {
+            let (tw, th) = (dims[1] as u32, dims[2] as u32);
+            if tw == 0 || th == 0 {
+                return Err(CoreError::Inference(format!("模型输入尺寸非法：{dims:?}")));
+            }
+            let resized =
+                image::imageops::resize(img, tw, th, image::imageops::FilterType::Triangle);
+            let data = rgb_to_nhwc_with(&resized, pp.norm, pp.channel);
+            Ok(ModelInput {
+                tensor: TensorData::new(dims.to_vec(), data)?,
+                letterbox: None,
+            })
+        }
+        Layout::Auto => Err(CoreError::Inference(format!(
             "不支持的输入布局 {dims:?}：需 NCHW（通道在第二维）或 NHWC（通道在最后一维）且通道数为 3"
-        )))
+        ))),
     }
 }
 
@@ -103,43 +123,49 @@ pub fn letterbox(img: &RgbImage, target_w: u32, target_h: u32) -> (RgbImage, Let
     )
 }
 
-/// RGB 图像 → NCHW 行主序 f32（C,H,W），除以 255 归一化到 [0,1]
-fn rgb_to_nchw(img: &RgbImage) -> Vec<f32> {
+/// 单通道值 → 归一化后的 f32（按声明方式处理；`channel` 决定取 R/G/B 哪一路）
+#[inline]
+fn normalize_channel(v: u8, norm: Norm, idx: usize) -> f32 {
+    let raw = v as f32;
+    match norm {
+        Norm::Unit => raw / 255.0,
+        Norm::None => raw,
+        Norm::Mean(mean) => raw - mean[idx],
+        Norm::MeanStd { mean, std } => (raw - mean[idx]) / std[idx],
+    }
+}
+
+/// 取出像素的通道值（支持 RGB / BGR 通道序）
+#[inline]
+fn channel_value(p: &image::Rgb<u8>, channel: ChannelOrder, idx: usize) -> u8 {
+    match channel {
+        ChannelOrder::Rgb => p[idx],
+        ChannelOrder::Bgr => p[2 - idx],
+    }
+}
+
+/// 图像 → NCHW 行主序 f32（C,H,W），按声明的归一化与通道序处理
+fn rgb_to_nchw_with(img: &RgbImage, norm: Norm, channel: ChannelOrder) -> Vec<f32> {
     let (w, h) = img.dimensions();
     let n = (w * h) as usize;
     let mut data = vec![0.0f32; n * 3];
     for (i, p) in img.pixels().enumerate() {
-        data[i] = p[0] as f32 / 255.0;
-        data[n + i] = p[1] as f32 / 255.0;
-        data[2 * n + i] = p[2] as f32 / 255.0;
+        for c in 0..3 {
+            data[c * n + i] = normalize_channel(channel_value(p, channel, c), norm, c);
+        }
     }
     data
 }
 
-/// RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)，CHW 行主序，不归一化
-fn rgb_to_nchw_retinaface(img: &RgbImage) -> Vec<f32> {
-    let (w, h) = img.dimensions();
-    let n = (w * h) as usize;
-    let mut data = vec![0.0f32; n * 3];
-    for (i, p) in img.pixels().enumerate() {
-        data[i] = p[0] as f32 - 104.0;
-        data[n + i] = p[1] as f32 - 117.0;
-        data[2 * n + i] = p[2] as f32 - 123.0;
+/// 图像 → NHWC 行主序 f32（H,W,C），按声明的归一化与通道序处理
+fn rgb_to_nhwc_with(img: &RgbImage, norm: Norm, channel: ChannelOrder) -> Vec<f32> {
+    let mut data = Vec::with_capacity((img.width() * img.height() * 3) as usize);
+    for p in img.pixels() {
+        for c in 0..3 {
+            data.push(normalize_channel(channel_value(p, channel, c), norm, c));
+        }
     }
     data
-}
-
-/// RGB 图像 → NHWC 行主序 f32（H,W,C），除以 255 归一化到 [0,1]
-fn rgb_to_nhwc(img: &RgbImage) -> Vec<f32> {
-    img.pixels()
-        .flat_map(|p| {
-            [
-                p[0] as f32 / 255.0,
-                p[1] as f32 / 255.0,
-                p[2] as f32 / 255.0,
-            ]
-        })
-        .collect()
 }
 
 /// 概率 mask 张量 `[1,1,H,W]`（行主序，值域 [0,1]）→ 原图尺寸灰度概率图。
@@ -334,5 +360,90 @@ mod tests {
         assert_eq!(m.dimensions(), (100, 50));
         // 逆变换后前景应铺满原图（内容区 50x50 还原到 100x50）
         assert!(m.pixels().all(|p| p[0] >= 250), "前景未铺满原图");
+    }
+
+    /// 4x1 纯色图 letterbox 到 1x4：内容像素落在第 1 行，灰边落在第 0 行
+    fn 小图输入(pp: &Preprocess) -> ModelInput {
+        let img = solid(4, 1);
+        build_input_with(&img, &[1, 3, 1, 4], pp).unwrap()
+    }
+
+    #[test]
+    fn 声明式bgr通道序() {
+        let pp = Preprocess {
+            layout: Layout::Auto,
+            norm: Norm::Unit,
+            channel: ChannelOrder::Bgr,
+        };
+        let mi = 小图输入(&pp);
+        // BGR：通道 0 取原图蓝(50)，通道 2 取原图红(200)
+        assert!((mi.tensor.data[1] - 50.0 / 255.0).abs() < 1e-6);
+        assert!((mi.tensor.data[5] - 100.0 / 255.0).abs() < 1e-6);
+        assert!((mi.tensor.data[9] - 200.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 声明式不归一化保留原始值() {
+        let pp = Preprocess {
+            layout: Layout::Auto,
+            norm: Norm::None,
+            channel: ChannelOrder::Rgb,
+        };
+        let mi = 小图输入(&pp);
+        assert!((mi.tensor.data[1] - 200.0).abs() < 1e-6);
+        assert!((mi.tensor.data[5] - 100.0).abs() < 1e-6);
+        assert!((mi.tensor.data[9] - 50.0).abs() < 1e-6);
+        // 灰边填充色 114 同样不做归一化
+        assert!((mi.tensor.data[0] - 114.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 声明式减均值除标准差() {
+        let pp = Preprocess {
+            layout: Layout::Auto,
+            norm: Norm::MeanStd {
+                mean: [104.0, 117.0, 123.0],
+                std: [58.0, 58.0, 58.0],
+            },
+            channel: ChannelOrder::Rgb,
+        };
+        let mi = 小图输入(&pp);
+        assert!((mi.tensor.data[1] - (200.0 - 104.0) / 58.0).abs() < 1e-6);
+        assert!((mi.tensor.data[5] - (100.0 - 117.0) / 58.0).abs() < 1e-6);
+        assert!((mi.tensor.data[9] - (50.0 - 123.0) / 58.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 声明式nhwc按最后一维通道处理() {
+        let pp = Preprocess {
+            layout: Layout::Nhwc,
+            norm: Norm::Unit,
+            channel: ChannelOrder::Bgr,
+        };
+        let img = solid(200, 100);
+        let mi = build_input_with(&img, &[1, 192, 192, 3], &pp).unwrap();
+        assert_eq!(mi.tensor.shape, vec![1, 192, 192, 3]);
+        assert!(mi.letterbox.is_none());
+        // NHWC 直接 resize，不产生灰边；单像素 BGR 顺序
+        assert!((mi.tensor.data[0] - 50.0 / 255.0).abs() < 1e-6);
+        assert!((mi.tensor.data[1] - 100.0 / 255.0).abs() < 1e-6);
+        assert!((mi.tensor.data[2] - 200.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 声明式布局与维度矛盾时报错() {
+        // nhwc 声明配 NCHW 维度：按 dims[1]/dims[2] 当宽高会产出与 shape 不符的数据
+        let img = solid(10, 10);
+        let pp_nhwc = Preprocess {
+            layout: Layout::Nhwc,
+            ..Preprocess::default()
+        };
+        assert!(build_input_with(&img, &[1, 3, 640, 640], &pp_nhwc).is_err());
+        // nchw 声明配 NHWC 维度同理
+        let pp_nchw = Preprocess {
+            layout: Layout::Nchw,
+            ..Preprocess::default()
+        };
+        assert!(build_input_with(&img, &[1, 192, 192, 3], &pp_nchw).is_err());
     }
 }

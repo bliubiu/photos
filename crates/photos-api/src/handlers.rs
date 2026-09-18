@@ -1,7 +1,8 @@
 //! 端点处理器（契约 docs/05-API契约.md §2）：
 //! POST /tasks、GET /tasks、DELETE /tasks、GET /tasks/{id}、DELETE /tasks/{id}、
 //! GET /tasks/{id}/output、GET /tasks/{id}/input、
-//! GET /models、POST /models/download、GET /config、GET /ping、
+//! GET /models、POST /models/download、GET /models/market、POST /models/register、
+//! GET /models/versions、POST /models/activate、GET /config、GET /ping、
 //! GET /metrics、GET /errors（可观测性）。
 
 use std::path::{Path, PathBuf};
@@ -14,9 +15,13 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use photos_core::config::Config;
+use photos_core::config::{Config, ModelRole, ModelSpec, Preprocess};
+use photos_core::market;
 use photos_core::metrics::TaskMetrics;
-use photos_core::model::{CheckStatus, check_models, download_model, resolve_model_path};
+use photos_core::model::{
+    CheckStatus, active_version, check_models, download_model, download_version, list_versions,
+    model_version_dir, resolve_model_path, sha256_file, version_path,
+};
 use photos_core::output::{OutputFormat, save_task_outputs};
 use photos_core::pipeline::{ProcessRequest, run_pipeline_with_metrics};
 use photos_core::storage::{NewTask, Store, TaskFilter, TaskRecord};
@@ -297,33 +302,292 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
-/// GET /models：模型注册表与校验状态
+/// GET /models：模型注册表与校验状态（含角色、版本与内置标记）
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
     let store = state.store.lock().unwrap();
     let statuses = match check_models(&state.cfg, &store) {
         Ok(s) => s,
         Err(e) => return ApiError::from(e).into_response(),
     };
+    let builtin = Config::default().models;
     Json(json!({
-        "items": statuses.iter().map(|s| json!({
-            "id": s.id,
-            "path": s.path.display().to_string(),
-            "ready": matches!(s.check_status, CheckStatus::Ready | CheckStatus::CachedOk),
-            "check_status": s.check_status.code(),
-            "message": s.message,
-        })).collect::<Vec<_>>(),
+        "items": statuses.iter().map(|s| {
+            let spec = state.cfg.models.get(&s.id);
+            let versions = list_versions(&state.cfg, &s.id);
+            let active = active_version(&state.cfg, &store, &s.id).ok().flatten();
+            json!({
+                "id": s.id,
+                "path": s.path.display().to_string(),
+                "ready": matches!(s.check_status, CheckStatus::Ready | CheckStatus::CachedOk),
+                "check_status": s.check_status.code(),
+                "message": s.message,
+                "role": spec.map(|sp| sp.role.as_str()).unwrap_or("auto"),
+                "version": path_version(&state.cfg, &s.id, &s.path),
+                "versions": versions,
+                "active_version": active,
+                "builtin": builtin.contains_key(&s.id),
+            })
+        }).collect::<Vec<_>>(),
     }))
     .into_response()
 }
 
-/// POST `/models/download` 请求体：`ids` 缺省（或空数组）表示下载全部「缺失」模型
+/// 从解析出的模型路径反推版本目录名（旧布局 / 注册表直连路径返回 None）
+fn path_version(cfg: &Config, id: &str, path: &Path) -> Option<String> {
+    let sub = path
+        .parent()?
+        .strip_prefix(model_version_dir(cfg, id))
+        .ok()?;
+    let text = sub.to_string_lossy().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// GET /models/market：模型市场清单（内置 + 用户覆盖），标注可下载与本地已下载/激活状态
+pub async fn list_market(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = &state.cfg;
+    let entries = match market::load(Some(&market::overlay_path(cfg))) {
+        Ok(e) => e,
+        Err(e) => {
+            let msg = e.to_string();
+            state.report_error("MODEL_MARKET_INVALID", "模型市场", &msg, None);
+            return ApiError::Internal(msg).into_response();
+        }
+    };
+    let store = state.store.lock().unwrap();
+    let items = entries
+        .iter()
+        .map(|e| {
+            let versions = list_versions(cfg, &e.id);
+            json!({
+                "id": e.id,
+                "version": e.version,
+                "role": e.role.as_str(),
+                "url": e.url,
+                "sha256": e.sha256,
+                "size": e.size,
+                "license": e.license,
+                "source": e.source,
+                "enabled": e.enabled,
+                "downloadable": e.downloadable(),
+                "registered": cfg.models.contains_key(&e.id),
+                "downloaded": versions.contains(&e.version),
+                "active_version": active_version(cfg, &store, &e.id).ok().flatten(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "items": items })).into_response()
+}
+
+/// POST /models/register 请求体（插件化注册：任意 ONNX + 声明式预处理）
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    /// 模型 id（注册表键名，仅允许字母数字与 `_ - .`）
+    pub id: String,
+    /// onnx 文件路径（相对项目根或绝对路径）
+    pub path: String,
+    /// 输入张量约定
+    pub input_dims: Vec<i64>,
+    /// 模型角色（缺省 auto）
+    #[serde(default)]
+    pub role: Option<String>,
+    /// 文件 sha256（缺省时若文件已存在则自动计算，否则报错）
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// 预处理声明（缺省沿用内置约定）
+    #[serde(default)]
+    pub preprocess: Option<Preprocess>,
+}
+
+/// 模型 id 合法性：非空且不含路径分隔符（版本目录由其拼接，避免路径穿越）
+fn valid_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// POST /models/register：注册自定义模型到 `<data_dir>/models.custom.toml`（重启后生效）
+pub async fn register_model(
+    State(state): State<Arc<AppState>>,
+    body: Json<serde_json::Value>,
+) -> Response {
+    let cfg = state.cfg.clone();
+    let req: RegisterRequest = match serde_json::from_value(body.0) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("注册请求体非法：{e}");
+            state.report_error("MODEL_REGISTER_INVALID", "模型注册", &msg, None);
+            return ApiError::ModelRegisterInvalid(msg).into_response();
+        }
+    };
+    if !valid_model_id(&req.id) {
+        return ApiError::ModelRegisterInvalid(format!(
+            "模型 id“{}”非法：需非空且仅含字母、数字、下划线、连字符与点",
+            req.id
+        ))
+        .into_response();
+    }
+    if req.path.trim().is_empty() {
+        return ApiError::ModelRegisterInvalid("模型文件路径不能为空".into()).into_response();
+    }
+    if req.input_dims.is_empty() {
+        return ApiError::ModelRegisterInvalid("input_dims 不能为空".into()).into_response();
+    }
+    let role = match ModelRole::parse(req.role.as_deref().unwrap_or("")) {
+        Ok(r) => r,
+        Err(e) => return ApiError::ModelRegisterInvalid(e.to_string()).into_response(),
+    };
+
+    // sha256：显式提供则校验格式；缺省时文件已存在则自动计算，否则拒绝（无法校验完整性）
+    let target = resolve_model_path(&cfg, Path::new(&req.path));
+    let sha256 = match req
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => {
+            let s = s.to_ascii_lowercase();
+            if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return ApiError::ModelRegisterInvalid(
+                    "sha256 非法：需 64 位十六进制字符串".into(),
+                )
+                .into_response();
+            }
+            s
+        }
+        None => {
+            if !target.exists() {
+                return ApiError::ModelRegisterInvalid(format!(
+                    "未提供 sha256 且模型文件不存在：{}；请先放入文件或显式提供 sha256",
+                    target.display()
+                ))
+                .into_response();
+            }
+            match sha256_file(&target) {
+                Ok(v) => v,
+                Err(e) => return ApiError::from(e).into_response(),
+            }
+        }
+    };
+
+    let spec = ModelSpec {
+        path: req.path.clone(),
+        sha256,
+        input_dims: req.input_dims.clone(),
+        enabled: true,
+        download: None,
+        role,
+        preprocess: req.preprocess.unwrap_or_default(),
+    };
+    match market::register_custom(&cfg, &req.id, &spec) {
+        Ok(replaced) => Json(json!({
+            "id": req.id,
+            "registered": true,
+            "replaced": replaced,
+            "restart_required": true,
+            "message": format!(
+                "模型“{}”已写入 {}，重启服务后生效",
+                req.id,
+                market::custom_registry_path(&cfg).display()
+            ),
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            state.report_error("MODEL_REGISTER_INVALID", "模型注册", &msg, None);
+            ApiError::ModelRegisterInvalid(msg).into_response()
+        }
+    }
+}
+
+/// GET /models/versions 查询参数
+#[derive(Debug, Deserialize)]
+pub struct VersionsQuery {
+    pub id: String,
+}
+
+/// GET /models/versions：指定模型已下载版本与当前激活版本
+pub async fn list_model_versions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VersionsQuery>,
+) -> Response {
+    let cfg = &state.cfg;
+    if !cfg.models.contains_key(&q.id) {
+        return ApiError::ModelVersionUnknown(format!("未知模型 id“{}”", q.id)).into_response();
+    }
+    let store = state.store.lock().unwrap();
+    Json(json!({
+        "id": q.id,
+        "versions": list_versions(cfg, &q.id),
+        "active_version": active_version(cfg, &store, &q.id).ok().flatten(),
+    }))
+    .into_response()
+}
+
+/// POST /models/activate 请求体
+#[derive(Debug, Deserialize)]
+pub struct ActivateRequest {
+    pub id: String,
+    pub version: String,
+}
+
+/// POST /models/activate：切换 / 回滚到指定已下载版本（校验文件存在与 sha256）
+pub async fn activate_model(
+    State(state): State<Arc<AppState>>,
+    body: Json<ActivateRequest>,
+) -> Response {
+    let cfg = state.cfg.clone();
+    if !cfg.models.contains_key(&body.id) {
+        return ApiError::ModelVersionUnknown(format!("未知模型 id“{}”", body.id)).into_response();
+    }
+    // 先判定版本是否存在：否则 CoreError::Model 会被映射为 503，语义不符
+    if !list_versions(&cfg, &body.id).contains(&body.version) {
+        let msg = format!(
+            "模型“{}”未下载版本“{}”；已下载版本：{}",
+            body.id,
+            body.version,
+            if list_versions(&cfg, &body.id).is_empty() {
+                "无".to_string()
+            } else {
+                list_versions(&cfg, &body.id).join("、")
+            }
+        );
+        state.report_error("MODEL_VERSION_UNKNOWN", "模型版本切换", &msg, None);
+        return ApiError::ModelVersionUnknown(msg).into_response();
+    }
+    let result = {
+        let store = state.store.lock().unwrap();
+        photos_core::model::activate_version(&cfg, &store, &body.id, &body.version)
+    };
+    match result {
+        Ok(()) => Json(json!({
+            "id": body.id,
+            "active_version": body.version,
+            "message": "已切换激活版本（校验通过）",
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            state.report_error("MODEL_VERSION_UNKNOWN", "模型版本切换", &msg, None);
+            ApiError::ModelMissing(msg).into_response()
+        }
+    }
+}
+
+/// POST `/models/download` 请求体：`ids` 缺省（或空数组）表示下载全部「缺失」模型；
+/// `version` 有值时按市场清单条目下载到 `models/<id>/<版本>/`（需显式指定 `ids`）
 #[derive(Debug, Default, Deserialize)]
 pub struct DownloadParams {
     #[serde(default)]
     pub ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
-/// POST /models/download：一键下载模型到注册表路径。
+/// POST /models/download：一键下载模型到注册表路径（指定 `version` 时走市场清单版本化下载）。
 /// 未指定 `ids` 时下载全部缺失（文件不存在）的模型；已有文件视为成功，单个失败不阻断其余。
 /// 下载为阻塞 IO，放入 `spawn_blocking` 执行，避免占用异步运行时线程。
 pub async fn download_models(
@@ -331,7 +595,15 @@ pub async fn download_models(
     body: Option<Json<DownloadParams>>,
 ) -> Response {
     let cfg = state.cfg.clone();
-    let requested = body.and_then(|Json(p)| p.ids).unwrap_or_default();
+    let params = body.map(|Json(p)| p).unwrap_or_default();
+    let requested = params.ids.unwrap_or_default();
+    let version = params.version.filter(|v| !v.trim().is_empty());
+    if version.is_some() && requested.is_empty() {
+        return ApiError::InvalidParams(
+            "指定 version 时需同时提供 ids（市场清单下载需明确模型）".into(),
+        )
+        .into_response();
+    }
     let ids: Vec<String> = if requested.is_empty() {
         let store = state.store.lock().unwrap();
         match check_models(&cfg, &store) {
@@ -349,7 +621,11 @@ pub async fn download_models(
         requested
     };
 
-    let items = match tokio::task::spawn_blocking(move || download_each(&cfg, ids)).await {
+    let joined = match version {
+        Some(v) => tokio::task::spawn_blocking(move || download_version_each(&cfg, ids, v)).await,
+        None => tokio::task::spawn_blocking(move || download_each(&cfg, ids)).await,
+    };
+    let items = match joined {
         Ok(v) => v,
         Err(e) => {
             let msg = format!("下载线程异常：{e}");
@@ -394,6 +670,84 @@ fn download_each(cfg: &Config, ids: Vec<String>) -> Vec<serde_json::Value> {
                     let msg = e.to_string();
                     tracing::error!("模型“{id}”下载失败：{msg}");
                     json!({ "id": id, "ok": false, "message": msg })
+                }
+            }
+        })
+        .collect()
+}
+
+/// 按市场清单版本逐个下载：条目需 `downloadable()`（已启用且直链与 sha256 齐备）。
+/// 版本化下载需要 `prefs` 记录激活版本，故在阻塞线程内独立打开 sqlite 连接（避免跨 await 持锁）。
+fn download_version_each(
+    cfg: &Config,
+    ids: Vec<String>,
+    version: String,
+) -> Vec<serde_json::Value> {
+    let entries = match market::load(Some(&market::overlay_path(cfg))) {
+        Ok(e) => e,
+        Err(e) => {
+            return vec![json!({ "id": "", "ok": false, "message": e.to_string() })];
+        }
+    };
+    let db = Path::new(&cfg.general.data_dir).join("photos.db");
+    let store = match Store::open(&db) {
+        Ok(s) => s,
+        Err(e) => {
+            return vec![json!({
+                "id": "",
+                "ok": false,
+                "message": format!("打开数据库 {} 失败：{e}", db.display()),
+            })];
+        }
+    };
+    ids.into_iter()
+        .map(|id| {
+            let spec = match cfg.model_spec(&id) {
+                Ok(s) => s,
+                Err(e) => {
+                    return json!({ "id": id, "ok": false, "message": e.to_string() });
+                }
+            };
+            if version_path(cfg, &id, &version, Path::new(&spec.path)).exists() {
+                return json!({
+                    "id": id,
+                    "version": version,
+                    "ok": true,
+                    "message": "该版本已存在，无需下载",
+                });
+            }
+            let Some(entry) = entries.iter().find(|e| e.id == id && e.version == version) else {
+                return json!({
+                    "id": id,
+                    "version": version,
+                    "ok": false,
+                    "message": format!("市场清单中未找到模型“{id}”的版本“{version}”"),
+                });
+            };
+            if !entry.downloadable() {
+                return json!({
+                    "id": id,
+                    "version": version,
+                    "ok": false,
+                    "message": format!(
+                        "条目未启用下载或缺少直链/sha256（可在 {} 中补齐后重试）",
+                        market::overlay_path(cfg).display()
+                    ),
+                });
+            }
+            tracing::info!("开始下载模型“{id}”版本“{version}”…");
+            match download_version(cfg, &store, &id, &version, &entry.url, &entry.sha256) {
+                Ok(path) => json!({
+                    "id": id,
+                    "version": version,
+                    "ok": true,
+                    "message": "下载完成并已激活该版本",
+                    "path": path.display().to_string(),
+                }),
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::error!("模型“{id}”版本“{version}”下载失败：{msg}");
+                    json!({ "id": id, "version": version, "ok": false, "message": msg })
                 }
             }
         })

@@ -10,6 +10,10 @@ use serde::Serialize;
 pub enum ApiError {
     /// 参数非法（400）
     InvalidParams(String),
+    /// 自定义模型注册声明非法（400）
+    ModelRegisterInvalid(String),
+    /// 模型版本不存在（400）
+    ModelVersionUnknown(String),
     /// 模型缺失 / 未就绪（503）
     ModelMissing(String),
     /// 文件过大（413）
@@ -36,6 +40,8 @@ impl ApiError {
     pub fn code(&self) -> &'static str {
         match self {
             ApiError::InvalidParams(_) => "INVALID_PARAMS",
+            ApiError::ModelRegisterInvalid(_) => "MODEL_REGISTER_INVALID",
+            ApiError::ModelVersionUnknown(_) => "MODEL_VERSION_UNKNOWN",
             ApiError::ModelMissing(_) => "MODEL_MISSING",
             ApiError::FileTooLarge(_) => "FILE_TOO_LARGE",
             ApiError::UnsupportedMedia(_) => "UNSUPPORTED_MEDIA",
@@ -48,6 +54,9 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::InvalidParams(_) => StatusCode::BAD_REQUEST,
+            ApiError::ModelRegisterInvalid(_) | ApiError::ModelVersionUnknown(_) => {
+                StatusCode::BAD_REQUEST
+            }
             ApiError::ModelMissing(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::FileTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -59,6 +68,8 @@ impl ApiError {
     fn message(&self) -> String {
         match self {
             ApiError::InvalidParams(m) => m.clone(),
+            ApiError::ModelRegisterInvalid(m) => m.clone(),
+            ApiError::ModelVersionUnknown(m) => m.clone(),
             ApiError::ModelMissing(m) => m.clone(),
             ApiError::FileTooLarge(m) => m.clone(),
             ApiError::UnsupportedMedia(m) => m.clone(),

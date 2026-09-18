@@ -1,0 +1,130 @@
+# 内置模型市场清单（随二进制内嵌，离线可用）
+#
+# 说明：
+# - 处理链路本身零联网，「一键下载」只是可选便利；本清单用于 WebUI 展示可获取的模型。
+# - 条目默认 `enabled = false` 且 url / sha256 留空：**不随包发布第三方直链与哈希**，
+#   避免地址失效或哈希不符导致下载出错误文件。
+# - 用户可复制 `data/model_market.toml`（结构与本文件一致），按 `id` + `version` 覆盖条目，
+#   补齐真实 url 与 sha256 后把 `enabled` 置为 true，即启用该版本的下载。
+# - `version` 即磁盘目录名：下载后落到 `models/<id>/<version>/`，可多版本共存并切换/回滚。
+
+[[models]]
+id = "retinaface"
+version = "1.0.0"
+role = "face"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "InsightFace / HivisionIDPhotos 发布页"
+enabled = false
+
+[[models]]
+id = "movnet_light"
+version = "1.0.0"
+role = "keypoint"
+url = ""
+sha256 = ""
+size = 0
+license = "Apache-2.0"
+source = "TensorFlow MoveNet SinglePose Lightning（ONNX 转换版）"
+enabled = false
+
+[[models]]
+id = "movnet_thunder"
+version = "1.0.0"
+role = "keypoint"
+url = ""
+sha256 = ""
+size = 0
+license = "Apache-2.0"
+source = "TensorFlow MoveNet SinglePose Thunder（ONNX 转换版）"
+enabled = false
+
+[[models]]
+id = "mtcnn_pnet"
+version = "1.0.0"
+role = "face"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "MTCNN 三级联（P-Net）"
+enabled = false
+
+[[models]]
+id = "mtcnn_rnet"
+version = "1.0.0"
+role = "face"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "MTCNN 三级联（R-Net）"
+enabled = false
+
+[[models]]
+id = "mtcnn_onet"
+version = "1.0.0"
+role = "face"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "MTCNN 三级联（O-Net）"
+enabled = false
+
+[[models]]
+id = "rmbg"
+version = "1.4.0"
+role = "matting"
+url = ""
+sha256 = ""
+size = 0
+license = "bria-rmbg（非商用许可，详见上游）"
+source = "BRIA AI RMBG-1.4"
+enabled = false
+
+[[models]]
+id = "birefnet_lite"
+version = "1.0.0"
+role = "matting"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "BiRefNet general（bb_swin_v1_tiny）"
+enabled = false
+
+[[models]]
+id = "birefnet_full"
+version = "1.0.0"
+role = "matting"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "BiRefNet general（full）"
+enabled = false
+
+[[models]]
+id = "modnet"
+version = "1.0.0"
+role = "matting"
+url = ""
+sha256 = ""
+size = 0
+license = "详见上游仓库"
+source = "MODNet 摄影人像抠图"
+enabled = false
+
+[[models]]
+id = "parsing_lip"
+version = "1.0.0"
+role = "parsing"
+url = ""
+sha256 = ""
+size = 0
+license = "详见上游仓库"
+source = "LIP 20 类人像解析（换装用）"
+enabled = false

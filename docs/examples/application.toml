@@ -1,6 +1,7 @@
 # 智能证件照工具 —— 统一入口配置样例
 # 文档：docs/02-架构设计.md §4.1；模型明细：docs/04-模型清单.md
 # 参数优先级：命令行 > 环境变量（PHOTOS_ + 路径大写，. → _）> 本文件 > 默认值
+# 模型注册表另有第二层覆盖：<data_dir>/models.custom.toml（由 POST /models/register 写入，重启生效）
 
 [general]
 data_dir = "data"
@@ -43,6 +44,12 @@ input_dims = [1, 48, 48, 3]
 path = "models/retinaface_r50.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 640, 640]
+role = "face"                     # face | keypoint | matting | parsing | auto（缺省）
+
+[models.retinaface.preprocess]    # 声明式预处理：接入任意 ONNX 的关键
+layout = "nchw"                   # auto（由 input_dims 推断）| nchw | nhwc
+norm = { mean = [104, 117, 123] } # unit（RGB÷255）| none | { mean = [...] } | { mean_std = { mean = [...], std = [...] } }
+channel = "rgb"                   # rgb | bgr
 
 [models.movnet_light]
 path = "models/movenet_lightning.onnx"
@@ -80,6 +87,22 @@ path = "models/parsing_lip.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 473, 473]
 # 虚拟试衣换装专用（LIP 20 类人像解析），不进三模式套件
+
+# —— 插件化模型：注册任意 ONNX（也可经 POST /models/register 写入 <data_dir>/models.custom.toml）——
+# 配置层级：默认值 → 本文件 → <data_dir>/models.custom.toml → 环境变量（同 id 覆盖）。
+# 本地多版本：文件放入 models/<id>/<版本>/<文件名>，激活版本记录在 sqlite prefs（可切换 / 回滚）。
+# 市场清单：内置 resources/model_market.toml + 用户覆盖 <data_dir>/model_market.toml。
+#
+# [models.my_matting]
+# path = "models/my_matting.onnx"
+# sha256 = "……64 位十六进制；留空或全 0 视为未定版……"
+# input_dims = [1, 3, 512, 512]
+# role = "matting"
+#
+# [models.my_matting.preprocess]
+# layout = "nchw"
+# norm = { mean_std = { mean = [0.5, 0.5, 0.5], std = [0.5, 0.5, 0.5] } }
+# channel = "rgb"
 
 [modes.speed]
 face = "mtcnn"

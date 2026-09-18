@@ -34,6 +34,53 @@ export interface ModelItem {
   ready: boolean;
   check_status: string;
   message: string;
+  /** 模型角色：auto | face | keypoint | matting | parsing */
+  role: string;
+  /** 当前生效路径所属版本（旧布局 / 直连路径为 null） */
+  version: string | null;
+  /** 已下载到 models/<id>/<版本>/ 的版本列表（升序） */
+  versions: string[];
+  active_version: string | null;
+  /** 是否为内置注册表条目（false = 用户注册） */
+  builtin: boolean;
+}
+
+/** 模型市场条目（内置清单 + 用户覆盖） */
+export interface MarketItem {
+  id: string;
+  version: string;
+  role: string;
+  url: string;
+  sha256: string;
+  size: number;
+  license: string;
+  source: string;
+  /** 清单条目是否启用（内置占位条目为 false，需用户覆盖后启用） */
+  enabled: boolean;
+  /** 是否具备下载条件（启用且直链与 sha256 齐备） */
+  downloadable: boolean;
+  /** 该 id 是否已在注册表中 */
+  registered: boolean;
+  /** 该版本是否已下载到本地 */
+  downloaded: boolean;
+  active_version: string | null;
+}
+
+export interface ModelVersionInfo {
+  id: string;
+  versions: string[];
+  active_version: string | null;
+}
+
+/** 注册自定义模型的声明式元数据（预处理缺省沿用内置约定） */
+export interface RegisterModelPayload {
+  id: string;
+  path: string;
+  input_dims: number[];
+  role?: string;
+  /** 留空时若文件已存在则由服务端自动计算 */
+  sha256?: string;
+  preprocess?: { layout?: string; norm?: unknown; channel?: string };
 }
 
 export interface Artifact {
@@ -166,12 +213,58 @@ export interface DownloadResult {
   message: string;
 }
 
-/** 一键下载模型：不传 ids 时下载全部「缺失」模型（服务端逐个下载，单个失败不阻断其余） */
-export async function downloadModels(ids?: string[]): Promise<{ items: DownloadResult[] }> {
+/** 一键下载模型：不传 ids 时下载全部「缺失」模型（服务端逐个下载，单个失败不阻断其余）；
+ *  传入 version 时按市场清单条目下载到 `models/<id>/<版本>/`（需同时指定 ids） */
+export async function downloadModels(
+  ids?: string[],
+  version?: string,
+): Promise<{ items: DownloadResult[] }> {
+  const payload: { ids?: string[]; version?: string } = {};
+  if (ids && ids.length > 0) payload.ids = ids;
+  if (version) payload.version = version;
   return request<{ items: DownloadResult[] }>("/models/download", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ids && ids.length > 0 ? { ids } : {}),
+    body: JSON.stringify(payload),
+  });
+}
+
+/** 模型市场清单（内置 + 用户覆盖，含已下载与激活状态） */
+export async function fetchMarket(): Promise<{ items: MarketItem[] }> {
+  return request<{ items: MarketItem[] }>("/models/market");
+}
+
+/** 查询指定模型已下载版本与当前激活版本 */
+export async function fetchVersions(id: string): Promise<ModelVersionInfo> {
+  return request<ModelVersionInfo>(`/models/versions?id=${encodeURIComponent(id)}`);
+}
+
+/** 切换 / 回滚到指定已下载版本（服务端校验文件存在与 sha256） */
+export async function activateModel(
+  id: string,
+  version: string,
+): Promise<{ id: string; active_version: string; message: string }> {
+  return request<{ id: string; active_version: string; message: string }>("/models/activate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, version }),
+  });
+}
+
+/** 注册自定义模型（写入 data/models.custom.toml，重启服务后生效） */
+export async function registerModel(
+  payload: RegisterModelPayload,
+): Promise<{ id: string; registered: boolean; replaced: boolean; restart_required: boolean; message: string }> {
+  return request<{
+    id: string;
+    registered: boolean;
+    replaced: boolean;
+    restart_required: boolean;
+    message: string;
+  }>("/models/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 }
 

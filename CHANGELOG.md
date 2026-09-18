@@ -2,6 +2,27 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.16] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【插件化模型·元数据】**声明式模型元数据**：`ModelSpec` 新增 `role`（`auto`\|`face`\|`keypoint`\|`matting`\|`parsing`）与 `preprocess`（`layout` / `norm` / `channel`）两个 serde 默认字段，旧 toml 无新字段仍可解析；`Layout`（`auto`\|`nchw`\|`nhwc`）、`Norm`（`unit`\|`none`\|`{ mean }`\|`{ mean_std }`）、`ChannelOrder`（`rgb`\|`bgr`）。`Config::validate` 新增中文校验：角色白名单、`mean`/`std` 长度必须为 3 且 `std` 全正、`layout` 与 `input_dims` 矛盾、通道维非 3（暂不支持单通道）。内置 `retinaface` 由默认值显式声明 `Norm::Mean([104,117,123])` + `Nchw`，行为不变
+- 【插件化模型·预处理】**按声明构造推理输入**：新增 `preprocess::build_input_with(img, dims, &Preprocess)`，按 `layout × channel × norm` 组合构造输入；原 `build_input(img, dims, retinaface)` 保留为**薄委托**（`retinaface=true` → `Mean([104,117,123])` + 推断布局），`pipeline.rs` 与 MTCNN 级联调用点零改动
+- 【插件化模型·注册】**自定义模型注册**：新增 `POST /models/register`，校验通过后写入 `<data_dir>/models.custom.toml`（同 id 覆盖，响应 `replaced`），`Config::load_from` 增加**第二层覆盖**（默认值 → `application.toml` → `models.custom.toml` → 环境变量，仍走 `merge_value` + `validate()`）。写入前用「默认配置 + 当前生效模型表 + 候选文件」完整反序列化并校验，**校验失败不落盘**；`sha256` 可省略（文件已存在则自动计算，否则 400）；响应恒带 `restart_required: true`（`AppState.cfg` 为 `Arc<Config>` 不可变，**重启进程生效**）
+- 【插件化模型·市场】**模型市场清单**：新增 `photos-core/src/market.rs` 与内嵌资源 `resources/model_market.toml`（11 个条目，`include_str!` 随二进制内嵌，离线可用），用户可用 `<data_dir>/model_market.toml` 按 `id` + `version` 整条覆盖或追加；`downloadable = enabled && url 非空 && sha256 为 64 位非占位`。内置条目**默认 url/sha256 留空且 `enabled = false`**（不随包发布第三方直链与哈希），仅展示并禁用下载。新增 `GET /models/market`（含 `downloadable` / `registered` / `downloaded` / `active_version`），清单非法时上报 `MODEL_MARKET_INVALID`
+- 【插件化模型·多版本】**本地多版本与切换 / 回滚**：磁盘布局 `models/<id>/<版本>/<文件名>`；`resolve_model_path_versioned` 解析顺序为「注册表 `path` 命中文件（旧布局零迁移）→ sqlite `prefs` 激活版本 → 取最高版本并回写」，版本号按**逐段数值比较**（`1.10.0 > 1.9.0`）。新增 `GET /models/versions`（已下载版本 + 激活版本）与 `POST /models/activate`（先判定版本目录存在，再对目标文件做 sha256 校验，**校验通过才写 `prefs`**，校验失败不切换）；`POST /models/download` 新增可选 `version`，按市场清单下载到 `models/<id>/<版本>/` 并在成功后自动激活（指定 `version` 时 `ids` 必填，否则 400）
+- 【插件化模型·接口】`GET /models` 响应扩展 `role` / `version` / `versions` / `active_version` / `builtin`（`version` 为当前实际解析到的版本目录名，注册表直连单文件时为 `null`；`builtin` 标记是否属内置注册表）；API 端点总数由 13 增至 17
+- 【插件化模型·错误码】新增 `MODEL_REGISTER_INVALID`（注册声明非法，400）与 `MODEL_VERSION_UNKNOWN`（模型 id 或版本不存在，400），避免模型类错误被统一映射为 `503`
+- 【前端·模型管理】新增 `components/ModelPanel.tsx`（**已注册模型**：角色标签 / 自定义注册标记 / 校验状态 / 版本下拉与「切换」；**模型市场**：清单展示 + 未启用 / 已下载标记 + 「下载该版本」按钮；**注册自定义模型**：id / 路径 / `input_dims` / 角色 / `sha256` / 预处理表单，提交后提示重启生效），挂载于观测面板下方；`api.ts` 新增 `MarketItem` / `ModelVersionInfo` / `RegisterModelPayload` 类型与 `fetchMarket()` / `registerModel()` / `fetchVersions()` / `activateModel()`，`downloadModels()` 支持 `version`；**纯 Tailwind，无拖拽库、无图表库**
+
+### 📚 Docs 文档更新
+- `docs/04-模型清单.md`：§2 补充 `role` / `preprocess` 字段表与声明式预处理示例及校验规则；新增 §7「模型市场与本地多版本」（市场清单两层结构、可下载判定、多版本布局与解析顺序、自定义注册），原 §7–§9 顺延为 §8–§10
+- `docs/05-API契约.md`：端点总表补充 4 个新端点，`GET /models` 响应补插件化扩展字段表，`POST /models/download` 补 `version` 字段与约束，新增 §3.14–§3.17 四个端点小节，§4 错误码补 `MODEL_REGISTER_INVALID` / `MODEL_VERSION_UNKNOWN`
+- `docs/06-运行使用手册.md`：新增 §3.4「自定义模型注册与本地多版本」（注册三入口、多版本布局、市场清单启用方式），WebUI 章节补第 8 项「模型管理」，API 表与 curl 示例补模型市场 / 版本 / 激活 / 注册，补充新错误码
+- `docs/02-架构设计.md`：§1.4 模型管理补插件化注册、多版本与市场清单；§4.1 补模型配置加载层级；§4.2 补多版本与市场维护约束；§4.3 `prefs` 表补激活版本键说明；§6.1 WebUI 结构补模型面板
+- `docs/examples/application.toml`：`retinaface` 补 `role` 与 `[models.retinaface.preprocess]` 示例，附插件化注册 / 多版本 / 市场清单注释与自定义模型模板
+- `docs/07-能力增强.md`：§五.1 插件化模型标记为已落地（2026.09.18.16）
+- 说明：本批**未新增任何第三方依赖**（`toml` / `serde` / `ureq` 均为既有依赖）
+
 ## [2026.09.18.15] - 0.1.0
 
 ### ✨ New Features 新增功能

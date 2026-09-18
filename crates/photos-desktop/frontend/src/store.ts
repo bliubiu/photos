@@ -2,18 +2,23 @@ import { create } from "zustand";
 import {
   AppConfig,
   EMPTY_TASK_FILTER,
+  MarketItem,
   ModelItem,
+  RegisterModelPayload,
   SubmitParams,
   TaskDetail,
   TaskFilter,
   TaskItem,
+  activateModel as requestActivateModel,
   clearTasks as requestClearTasks,
   deleteTask as requestDeleteTask,
   downloadModels as requestModelDownload,
   fetchConfig,
+  fetchMarket,
   fetchModels,
   fetchTaskDetail,
   fetchTasks,
+  registerModel as requestRegisterModel,
   submitTask,
 } from "./api";
 
@@ -89,7 +94,13 @@ export interface BatchItem {
 
 interface AppState {
   config: AppConfig | null;
-  models: { id: string; ready: boolean; check_status: string; message: string }[];
+  models: ModelItem[];
+  /** 模型市场清单（内置 + 用户覆盖） */
+  market: MarketItem[];
+  /** 模型管理操作（注册 / 切换版本 / 版本下载）进行中 */
+  modelBusy: boolean;
+  /** 注册成功后的重启提示（重启服务后自定义模型才生效） */
+  modelNotice: string | null;
   tasks: TaskItem[];
   /** 历史列表筛选条件 */
   taskFilter: TaskFilter;
@@ -128,6 +139,14 @@ interface AppState {
   submit: () => Promise<void>;
   retryFailed: () => Promise<void>;
   downloadModels: () => Promise<void>;
+  /** 刷新模型市场清单 */
+  refreshMarket: () => Promise<void>;
+  /** 注册自定义模型（重启后生效） */
+  registerModel: (payload: RegisterModelPayload) => Promise<void>;
+  /** 切换 / 回滚模型版本 */
+  activateModel: (id: string, version: string) => Promise<void>;
+  /** 按市场清单下载指定模型版本（成功后自动激活该版本） */
+  downloadVersion: (id: string, version: string) => Promise<void>;
 }
 
 /** 参数面板状态 → 提交参数（自定义底色/尺寸以字符串追加，服务端归一化为文件名安全 id） */
@@ -165,19 +184,12 @@ function toBatchStatus(status: string): BatchStatus {
   return "processing";
 }
 
-/** 模型列表状态映射（GET /models → 前端状态） */
-function mapModels(items: ModelItem[]) {
-  return items.map((m) => ({
-    id: m.id,
-    ready: m.ready,
-    check_status: m.check_status,
-    message: m.message,
-  }));
-}
-
 export const useStore = create<AppState>((set, get) => ({
   config: null,
   models: [],
+  market: [],
+  modelBusy: false,
+  modelNotice: null,
   tasks: [],
   taskFilter: EMPTY_TASK_FILTER,
   selectedId: null,
@@ -218,7 +230,7 @@ export const useStore = create<AppState>((set, get) => ({
       ]);
       set({
         config,
-        models: mapModels(models.items),
+        models: models.items,
         tasks: tasks.items,
         params: {
           mode: config.default_mode,
@@ -437,7 +449,7 @@ export const useStore = create<AppState>((set, get) => ({
       const res = await requestModelDownload();
       // 下载完成后刷新模型状态（成功的模型在列表中转为就绪）
       const models = await fetchModels();
-      set({ models: mapModels(models.items) });
+      set({ models: models.items });
       const failed = res.items.filter((i) => !i.ok);
       if (failed.length > 0) {
         set({
@@ -450,6 +462,67 @@ export const useStore = create<AppState>((set, get) => ({
       set({ error: (e as Error).message });
     } finally {
       set({ downloading: false });
+    }
+  },
+
+  async refreshMarket() {
+    try {
+      const [market, models] = await Promise.all([fetchMarket(), fetchModels()]);
+      set({ market: market.items, models: models.items });
+    } catch (e) {
+      set({ error: (e as Error).message });
+    }
+  },
+
+  async registerModel(payload) {
+    set({ modelBusy: true, error: null, modelNotice: null });
+    try {
+      const res = await requestRegisterModel(payload);
+      set({
+        modelNotice: res.restart_required
+          ? `${res.message}（重启服务后生效）`
+          : res.message,
+      });
+      await get().refreshMarket();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    } finally {
+      set({ modelBusy: false });
+    }
+  },
+
+  async activateModel(id, version) {
+    set({ modelBusy: true, error: null, modelNotice: null });
+    try {
+      const res = await requestActivateModel(id, version);
+      set({ modelNotice: `模型“${res.id}”已切换到版本 ${res.active_version}` });
+      await get().refreshMarket();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    } finally {
+      set({ modelBusy: false });
+    }
+  },
+
+  async downloadVersion(id, version) {
+    set({ modelBusy: true, error: null, modelNotice: null });
+    try {
+      const res = await requestModelDownload([id], version);
+      const failed = res.items.filter((i) => !i.ok);
+      if (failed.length > 0) {
+        set({
+          error: `模型“${id}”版本 ${version} 下载失败：${failed
+            .map((f) => f.message)
+            .join("；")}`,
+        });
+      } else {
+        set({ modelNotice: `模型“${id}”版本 ${version} 下载完成并已激活` });
+      }
+      await get().refreshMarket();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    } finally {
+      set({ modelBusy: false });
     }
   },
 }));

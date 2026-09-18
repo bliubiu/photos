@@ -154,7 +154,9 @@ async fn 配置驱动前端下拉() {
 
 #[tokio::test]
 async fn 模型列表结构() {
-    let t = TestApp::new();
+    let mut t = TestApp::new();
+    // 模型目录指向临时目录，避免读取仓库 models/ 造成结果不确定
+    t.cfg.general.models_dir = t.dir.path().join("models").display().to_string();
     let app = t.app();
     let req = Request::builder()
         .uri("/models")
@@ -168,6 +170,13 @@ async fn 模型列表结构() {
     assert!(rf["check_status"].is_string());
     assert!(rf["ready"].is_boolean());
     assert!(rf["message"].is_string());
+    // 插件化扩展字段：角色 / 版本 / 内置标记
+    assert_eq!(rf["role"], "face");
+    assert_eq!(rf["builtin"], true);
+    assert!(rf["versions"].is_array());
+    // 旧库无 prefs 记录：无激活版本、也无版本目录（回归）
+    assert!(rf["active_version"].is_null());
+    assert!(rf["version"].is_null());
 }
 
 #[tokio::test]
@@ -1277,4 +1286,221 @@ fn test_factory() -> EngineFactory {
     Arc::new(|w, h| {
         photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
     })
+}
+
+// ---------- 插件化模型（市场 / 注册 / 多版本） ----------
+
+/// POST 请求（JSON body）
+fn post_json(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn 模型市场清单默认禁用可展示() {
+    let mut t = TestApp::new();
+    t.cfg.general.models_dir = t.dir.path().join("models").display().to_string();
+    let app = t.app();
+    let (status, json) = send(&app, get_request("/models/market")).await;
+    assert_eq!(status, StatusCode::OK, "获取市场清单失败：{json}");
+    let items = json["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "内置清单不应为空");
+    // 内置条目 url/sha256 为占位：可展示但禁用下载
+    for it in items {
+        assert_eq!(it["enabled"], false, "内置条目默认不应启用：{it}");
+        assert_eq!(it["downloadable"], false, "占位条目不应可下载：{it}");
+        assert!(it["version"].is_string());
+        assert!(it["role"].is_string());
+    }
+    let rmbg = items
+        .iter()
+        .find(|m| m["id"] == "rmbg")
+        .expect("应有 rmbg 条目");
+    assert_eq!(rmbg["role"], "matting");
+    assert_eq!(rmbg["registered"], true);
+    assert_eq!(rmbg["downloaded"], false);
+
+    // 占位条目不可下载：指定 version 但不带 ids 直接 400，带 ids 则逐项返回中文失败原因
+    let (status, json) = send(
+        &app,
+        post_json("/models/download", r#"{"version":"1.4.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "INVALID_PARAMS");
+    let (status, json) = send(
+        &app,
+        post_json("/models/download", r#"{"ids":["rmbg"],"version":"1.4.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["items"][0]["ok"], false);
+    assert!(
+        json["items"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("未启用下载"),
+        "实际：{}",
+        json["items"][0]["message"]
+    );
+}
+
+#[tokio::test]
+async fn 注册自定义模型写入注册表并可被配置加载() {
+    let t = TestApp::new();
+    let app = t.app();
+    let ok_body = json!({
+        "id": "my_matting",
+        "path": "models/my_matting.onnx",
+        "input_dims": [1, 3, 512, 512],
+        "sha256": "1".repeat(64),
+        "role": "matting",
+        "preprocess": {
+            "layout": "nchw",
+            "norm": { "mean_std": { "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5] } },
+            "channel": "rgb"
+        }
+    })
+    .to_string();
+
+    let (status, json) = send(&app, post_json("/models/register", &ok_body)).await;
+    assert_eq!(status, StatusCode::OK, "注册失败：{json}");
+    assert_eq!(json["registered"], true);
+    assert_eq!(json["replaced"], false);
+    assert_eq!(json["restart_required"], true);
+    // 重复注册同一 id → 覆盖
+    let (status, json) = send(&app, post_json("/models/register", &ok_body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["replaced"], true);
+
+    // 落盘到 <data_dir>/models.custom.toml，并可在重启后由 Config::load_from 读到
+    let registry = t.dir.path().join("data").join("models.custom.toml");
+    assert!(registry.exists(), "注册表应落盘：{}", registry.display());
+    let app_toml = t.dir.path().join("application.toml");
+    std::fs::write(
+        &app_toml,
+        format!(
+            "[general]\ndata_dir = \"{}\"\n",
+            t.dir
+                .path()
+                .join("data")
+                .display()
+                .to_string()
+                .replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    let reloaded = Config::load_from(Some(&app_toml)).unwrap();
+    let spec = reloaded
+        .models
+        .get("my_matting")
+        .expect("重启后应加载到注册的模型");
+    assert_eq!(spec.role.as_str(), "matting");
+    assert_eq!(spec.input_dims, vec![1, 3, 512, 512]);
+
+    // 非法声明：角色非法 / sha256 非法 / 缺 sha256 且文件不存在 → 400 MODEL_REGISTER_INVALID
+    for bad in [
+        json!({ "id": "bad1", "path": "models/bad1.onnx", "input_dims": [1,3,512,512], "role": "banana", "sha256": "1".repeat(64) }).to_string(),
+        json!({ "id": "bad2", "path": "models/bad2.onnx", "input_dims": [1,3,512,512], "sha256": "not-a-hash" }).to_string(),
+        json!({ "id": "bad3", "path": "models/not-exist.onnx", "input_dims": [1,3,512,512] }).to_string(),
+        // 布局与维度矛盾（声明 nchw 但第二维不是 3）
+        json!({ "id": "bad4", "path": "models/bad4.onnx", "input_dims": [1,512,512,3], "sha256": "1".repeat(64), "preprocess": { "layout": "nchw" } }).to_string(),
+        // id 非法（含路径分隔符）
+        json!({ "id": "../evil", "path": "models/evil.onnx", "input_dims": [1,3,512,512], "sha256": "1".repeat(64) }).to_string(),
+    ] {
+        let (status, json) = send(&app, post_json("/models/register", &bad)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "应被拒绝：{bad} → {json}");
+        assert_eq!(json["code"], "MODEL_REGISTER_INVALID");
+    }
+    // 非法请求体（缺必填字段）同样返回中文 400
+    let (status, json) = send(&app, post_json("/models/register", r#"{"id":"x"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "MODEL_REGISTER_INVALID");
+    assert!(json["message"].as_str().unwrap().contains("注册请求体非法"));
+}
+
+#[tokio::test]
+async fn 模型版本查询切换与回滚() {
+    let mut t = TestApp::new();
+    // 版本目录落在临时 models_dir，避免污染仓库
+    let models_dir = t.dir.path().join("models");
+    t.cfg.general.models_dir = models_dir.display().to_string();
+    let app = t.app();
+
+    // 旧库无 prefs 记录：版本列表为空、无激活版本（回归）
+    let (status, json) = send(&app, get_request("/models/versions?id=rmbg")).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["versions"].as_array().unwrap().is_empty());
+    assert!(json["active_version"].is_null());
+
+    // 未知 id / 未知版本 → 400 MODEL_VERSION_UNKNOWN
+    let (status, json) = send(&app, get_request("/models/versions?id=nope")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "MODEL_VERSION_UNKNOWN");
+    let (status, json) = send(
+        &app,
+        post_json("/models/activate", r#"{"id":"rmbg","version":"9.9.9"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "MODEL_VERSION_UNKNOWN");
+
+    // 放入两个已下载版本
+    for (v, content) in [
+        ("1.0.0", b"onnx-a".as_slice()),
+        ("1.1.0", b"onnx-b".as_slice()),
+    ] {
+        let dir = models_dir.join("rmbg").join(v);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rmbg-1.4.onnx"), content).unwrap();
+    }
+    let (_, json) = send(&app, get_request("/models/versions?id=rmbg")).await;
+    assert_eq!(json["versions"], json!(["1.0.0", "1.1.0"]));
+    // 注册表 sha256 为占位时不校验内容，可直接激活
+    let (status, json) = send(
+        &app,
+        post_json("/models/activate", r#"{"id":"rmbg","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "激活失败：{json}");
+    assert_eq!(json["active_version"], "1.0.0");
+    let (_, json) = send(&app, get_request("/models/versions?id=rmbg")).await;
+    assert_eq!(json["active_version"], "1.0.0");
+
+    // GET /models 反映激活版本与版本目录
+    let (_, list) = send(&app, get_request("/models")).await;
+    let item = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "rmbg")
+        .unwrap();
+    assert_eq!(item["active_version"], "1.0.0");
+    assert_eq!(item["version"], "1.0.0");
+    assert_eq!(item["builtin"], true);
+
+    // 回滚到另一版本
+    let (status, json) = send(
+        &app,
+        post_json("/models/activate", r#"{"id":"rmbg","version":"1.1.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["active_version"], "1.1.0");
+
+    // 注册表声明真实 sha256 后，内容不符的版本拒绝激活（MODEL_MISSING）
+    let mut cfg = t.cfg.clone();
+    cfg.models.get_mut("rmbg").unwrap().sha256 = "a".repeat(64);
+    let app = router(cfg, test_factory(), false);
+    let (status, json) = send(
+        &app,
+        post_json("/models/activate", r#"{"id":"rmbg","version":"1.0.0"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
+    assert_eq!(json["code"], "MODEL_MISSING");
 }

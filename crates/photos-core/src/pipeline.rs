@@ -12,7 +12,7 @@ use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
 use crate::metrics::{StageTimer, TaskMetrics};
-use crate::preprocess::{LetterBox, build_input, probability_map};
+use crate::preprocess::{LetterBox, build_input_with, probability_map};
 use crate::vision::affine::{rotate_image_same, rotation_affine};
 use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, feature_protect_mask};
 use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
@@ -209,14 +209,14 @@ pub fn run_pipeline_with_metrics(
     // 3.1 人体关键点（MoveNet）：预处理 + 推理 + 解码
     let kp_timer = StageTimer::start("人体关键点");
     let kp_spec = cfg.model_spec(&suite.keypoint)?;
-    let kp_in = build_input(&img, &kp_spec.input_dims, false)?;
+    let kp_in = build_input_with(&img, &kp_spec.input_dims, &kp_spec.preprocess)?;
     let kp_outs = engine.run(&suite.keypoint, &kp_in.tensor)?;
     let kps = decode_movenet(&kp_outs[0], w, h)?;
     kp_timer.stop(metrics);
     // 3.2 人像抠图：预处理 + 推理 + 概率掩膜
     let mat_timer = StageTimer::start("人像抠图");
     let mat_spec = cfg.model_spec(&suite.matting)?;
-    let mat_in = build_input(&img, &mat_spec.input_dims, false)?;
+    let mat_in = build_input_with(&img, &mat_spec.input_dims, &mat_spec.preprocess)?;
     let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
     let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
     mat_timer.stop(metrics);
@@ -227,7 +227,7 @@ pub fn run_pipeline_with_metrics(
         detect_mtcnn_cascade(engine, &img)?
     } else {
         let face_spec = cfg.model_spec(&suite.face)?;
-        let face_in = build_input(&img, &face_spec.input_dims, true)?;
+        let face_in = build_input_with(&img, &face_spec.input_dims, &face_spec.preprocess)?;
         let face_outs = engine.run(&suite.face, &face_in.tensor)?;
         let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
             Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
@@ -289,7 +289,7 @@ pub fn run_pipeline_with_metrics(
             let dress_timer = StageTimer::start("换装");
             engine.load(cfg, dressing::PARSING_MODEL_ID, suite.execution_provider)?;
             let p_spec = cfg.model_spec(dressing::PARSING_MODEL_ID)?;
-            let p_in = build_input(&rot_img, &p_spec.input_dims, false)?;
+            let p_in = build_input_with(&rot_img, &p_spec.input_dims, &p_spec.preprocess)?;
             let p_outs = engine.run(dressing::PARSING_MODEL_ID, &p_in.tensor)?;
             let parsing = dressing::decode_parsing(
                 &p_outs[0],
