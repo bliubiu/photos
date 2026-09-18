@@ -287,6 +287,8 @@ fn process_one(
         dress,
         transparent: args.transparent,
         bg_image: args.bg_image.clone(),
+        // 步骤表取自全局配置 `[pipeline] steps`（CLI 不提供步骤开关）
+        steps: None,
     };
     let mut metrics = TaskMetrics::new();
     match run_pipeline_with_metrics(cfg, engine, &req, &mut metrics) {

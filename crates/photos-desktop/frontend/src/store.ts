@@ -44,6 +44,8 @@ export interface ParamsState {
   outputFormat: string; // 图片输出格式：jpg | webp
   jpgQuality: number; // JPG 压缩质量 1..=100
   pdf: boolean; // 排版相纸额外输出 PDF
+  /** 工作流步骤表（null = 服务端全局配置 / 内置默认十步） */
+  steps: string[] | null;
 }
 
 /** 参数预设（「我的常用参数」）：名称 + 参数快照，持久化到 localStorage */
@@ -169,6 +171,7 @@ function toSubmitParams(params: ParamsState): SubmitParams {
     output_format: params.outputFormat,
     jpg_quality: params.jpgQuality,
     pdf: params.pdf,
+    steps: params.steps,
   };
 }
 
@@ -213,6 +216,7 @@ export const useStore = create<AppState>((set, get) => ({
     outputFormat: "jpg",
     jpgQuality: 90,
     pdf: false,
+    steps: null,
   },
   batch: [],
   lastPayload: null,
@@ -250,6 +254,7 @@ export const useStore = create<AppState>((set, get) => ({
           outputFormat: config.output?.format ?? "jpg",
           jpgQuality: config.output?.jpg_quality ?? 90,
           pdf: config.output?.pdf ?? false,
+          steps: null,
         },
       });
     } catch (e) {
@@ -339,6 +344,7 @@ export const useStore = create<AppState>((set, get) => ({
           outputFormat: p.output_format ?? params.outputFormat,
           jpgQuality: p.jpg_quality ?? params.jpgQuality,
           pdf: p.pdf ?? false,
+          steps: p.steps ?? null,
         },
       });
     } catch (e) {

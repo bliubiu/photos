@@ -296,14 +296,27 @@ pub fn ensure_models_ready(
     mode_id: &str,
 ) -> CoreResult<()> {
     let suite = cfg.mode(mode_id)?;
-    let provider = suite.execution_provider;
     // speed 的 face=mtcnn 表示完整三级联，需装载 p/r/on 三个子模型
-    let mut ids: Vec<&str> = vec![&suite.keypoint, &suite.matting];
+    let mut ids: Vec<String> = vec![suite.keypoint.clone(), suite.matting.clone()];
     if suite.face == crate::vision::mtcnn::CASCADE_FACE_ID {
-        ids.extend(crate::vision::mtcnn::cascade_model_ids());
+        ids.extend(
+            crate::vision::mtcnn::cascade_model_ids()
+                .iter()
+                .map(|s| s.to_string()),
+        );
     } else {
-        ids.push(&suite.face);
+        ids.push(suite.face.clone());
     }
+    ensure_models_ready_for(cfg, engine, &ids, suite.execution_provider)
+}
+
+/// 按模型 id 列表装载（供工作流按启用步骤按需装载；`provider` 取模式套件的执行提供方）
+pub fn ensure_models_ready_for(
+    cfg: &Config,
+    engine: &mut dyn InferenceEngine,
+    ids: &[String],
+    provider: ExecutionProvider,
+) -> CoreResult<()> {
     for id in ids {
         engine.load(cfg, id, provider)?;
     }

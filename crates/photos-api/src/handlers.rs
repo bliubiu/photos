@@ -117,6 +117,8 @@ pub struct TaskParams {
     pub jpg_quality: Option<u8>,
     /// 排版相纸是否额外输出 PDF（缺省取全局配置 `[output].pdf`）
     pub pdf: Option<bool>,
+    /// 工作流步骤表（可选；缺省取全局配置 `[pipeline] steps`，为空时取内置默认十步）
+    pub steps: Option<Vec<String>>,
 }
 
 /// 美颜参数（enabled 开关；强度缺省取全局配置 `[beauty]` 默认值）
@@ -226,6 +228,41 @@ fn validate_dress(dress: &Option<DressParams>) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// 校验工作流步骤表（未知步骤 / 重复步骤 / 依赖缺失均返回中文 400）
+fn validate_steps(cfg: &Config, steps: &Option<Vec<String>>) -> Result<(), ApiError> {
+    let Some(names) = steps.as_ref().filter(|l| !l.is_empty()) else {
+        return Ok(());
+    };
+    let mut ops: Vec<&str> = Vec::with_capacity(names.len());
+    for name in names {
+        let op = photos_core::workflow::step_op(cfg, name).ok_or_else(|| {
+            ApiError::InvalidParams(format!(
+                "未知工作流步骤“{name}”，可选：{}",
+                photos_core::workflow::available_steps(cfg).join("、")
+            ))
+        })?;
+        if ops.contains(&op) {
+            return Err(ApiError::InvalidParams(format!(
+                "工作流步骤重复：{}",
+                photos_core::workflow::step_stage(op).unwrap_or(op)
+            )));
+        }
+        ops.push(op);
+    }
+    for op in &ops {
+        for need in photos_core::workflow::step_requires(op) {
+            if !ops.contains(need) {
+                return Err(ApiError::InvalidParams(format!(
+                    "工作流步骤「{}」依赖「{}」，请在步骤表中一并启用",
+                    photos_core::workflow::step_stage(op).unwrap_or(op),
+                    photos_core::workflow::step_stage(need).unwrap_or(need)
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------- 工具 ----------
 
 /// 对外任务 id（task_{自增id}）
@@ -297,6 +334,15 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Response {
             "format": cfg.output.format,
             "jpg_quality": cfg.output.jpg_quality,
             "pdf": cfg.output.pdf,
+        },
+        "pipeline": {
+            "steps": photos_core::workflow::step_metas(cfg).iter().map(|m| json!({
+                "id": m.id,
+                "label": m.label,
+                "stage": m.stage,
+                "requires": m.requires,
+            })).collect::<Vec<_>>(),
+            "effective": photos_core::workflow::effective_steps(cfg, None),
         },
     }))
     .into_response()
@@ -865,6 +911,7 @@ async fn create_task_inner(
     validate_beauty(&params.beauty)?;
     validate_dress(&params.dress)?;
     validate_output(&params)?;
+    validate_steps(&state.cfg, &params.steps)?;
 
     // 4. 模型预检（就绪才受理；缺失返回 503，不自动下载以免阻塞）
     if state.model_precheck {
@@ -911,6 +958,7 @@ async fn create_task_inner(
         "output_format": params.output_format,
         "jpg_quality": params.jpg_quality,
         "pdf": params.pdf,
+        "steps": params.steps,
     })
     .to_string();
     let upload_name = format!(
@@ -993,6 +1041,7 @@ async fn create_task_inner(
             output_format: params.output_format,
             jpg_quality: params.jpg_quality,
             pdf: params.pdf,
+            steps: params.steps,
         },
         input_path,
     );
@@ -1083,6 +1132,7 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             dress,
             transparent: params.transparent.unwrap_or(false),
             bg_image: params.bg_image.clone().map(PathBuf::from),
+            steps: params.steps.clone(),
         };
         let result = tokio::task::spawn_blocking(move || {
             let (w, h) = image::image_dimensions(&req.input).unwrap_or((640, 640));

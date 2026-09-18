@@ -282,3 +282,25 @@ whiten = 0.1
 format = "jpg"      # 证件照/效果图/排版图片格式：jpg | webp（webp 为 VP8L 无损，体积通常更大）
 jpg_quality = 90    # JPG 压缩质量 1..=100（对 webp 无效；越低体积越小）
 pdf = false         # 排版相纸是否额外输出 PDF（页面按相纸物理尺寸设定，便于打印店直接使用）
+
+# —— 工作流编排 [pipeline]：步骤表 / 步骤参数 / 自定义步骤（缺省 = 内置默认十步）——
+# 生效优先级：请求 params.steps（非空）> 本文件 steps > 内置默认十步；请求为空时回落到本文件。
+# 步骤依赖：keypoint/matting/face_detect ← read_image；pose ← keypoint；rotate ← pose；
+#           dress/beauty/background ← rotate；layout ← background（依赖缺失会在校验期报错）。
+#
+# [pipeline]
+# steps = [
+#   "read_image", "keypoint", "matting", "face_detect", "pose", "rotate",
+#   # "dress",       # 关闭换装
+#   # "beauty",      # 关闭美颜
+#   "background",
+#   # "layout",      # 关闭排版
+# ]
+#
+# # 步骤参数：覆盖该步骤使用的模型 id（优先于模式套件的同角色模型）
+# [pipeline.params.keypoint]
+# model = "movnet_thunder"
+#
+# # 自定义步骤：给内置算子起别名，可并入 steps 实现一个算子多次执行
+# [pipeline.custom.我的二次抠图]
+# op = "matting"

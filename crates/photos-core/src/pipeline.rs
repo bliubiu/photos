@@ -8,41 +8,14 @@ use std::path::PathBuf;
 
 use image::{GrayImage, Luma, RgbImage, RgbaImage};
 
-use crate::config::{BeautyConfig, Config};
+use crate::config::Config;
 use crate::error::{CoreError, CoreResult};
-use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
-use crate::metrics::{StageTimer, TaskMetrics};
-use crate::preprocess::{LetterBox, build_input_with, probability_map};
-use crate::vision::affine::{rotate_image_same, rotation_affine};
-use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, feature_protect_mask};
-use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
-use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
-use crate::vision::dressing::{self, SuitStyle};
-use crate::vision::face::{
-    DecodeTransform, FaceBox, FaceDetection, decode_retinaface, retinaface_prior_count,
-};
-use crate::vision::geometry::{
-    Point2, RotationDecision, SIDE_FACE_YAW_DEG, decide_rotation, fused_angle,
-    fused_angle_with_torso, head_angle, shoulder_angle, torso_angle, yaw_from_landmarks,
-};
-use crate::vision::keypoint::{KeypointSet, decode_movenet};
-use crate::vision::matting::{feather, morph_open, threshold_mask};
-use crate::vision::mtcnn::{CASCADE_FACE_ID, detect_mtcnn_cascade};
+use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready_for};
+use crate::metrics::TaskMetrics;
+use crate::vision::face::retinaface_prior_count;
+use crate::vision::geometry::RotationDecision;
+use crate::workflow::{self, PipelineCtx};
 
-/// 人脸检测分数阈值
-const FACE_SCORE_THRESHOLD: f32 = 0.5;
-/// NMS IoU 阈值
-const NMS_IOU_THRESHOLD: f32 = 0.4;
-/// 抠图概率 mask 阈值（[0,1] 输出按 ×255 后阈值化）
-const MASK_THRESHOLD: u8 = 128;
-/// 形态学开运算半径
-const MASK_MORPH_RADIUS: u32 = 1;
-/// 边缘羽化高斯 sigma
-const MASK_FEATHER_SIGMA: f32 = 1.0;
-/// 头顶留白 = 0.2 × 脸高
-const CROP_TOP_RATIO: f64 = 0.2;
-/// 下巴余量 = 0.1 × 脸高
-const CROP_BOTTOM_RATIO: f64 = 0.1;
 /// 自定义背景图产物的底色标识（产物命名 `task_{id}_{size}_custombg.jpg`）
 pub const CUSTOM_BG_ID: &str = "custombg";
 
@@ -71,6 +44,8 @@ pub struct ProcessRequest {
     pub transparent: bool,
     /// 自定义背景图路径（可选；按证件照尺寸 cover 缩放裁切后与人像合成，额外出一张 `custombg` 产物）
     pub bg_image: Option<PathBuf>,
+    /// 工作流步骤表（None = 取全局配置 `[pipeline] steps`，为空时取内置默认十步）
+    pub steps: Option<Vec<String>>,
 }
 
 /// 美颜请求参数（M4 实现算子）
@@ -149,17 +124,7 @@ pub fn limited_dimensions(w: u32, h: u32, max_side: u32) -> (u32, u32) {
     (nw, nh)
 }
 
-/// 输入图等比预缩放（`max_side = 0` 或未超限时原样返回）
-fn limit_input_side(img: RgbImage, max_side: u32) -> RgbImage {
-    let (w, h) = img.dimensions();
-    let (nw, nh) = limited_dimensions(w, h, max_side);
-    if (nw, nh) == (w, h) {
-        return img;
-    }
-    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
-}
-
-/// 执行单图最小闭环：读图 → 检测/抠图 → 角度决策 → 同步纠偏 → 换底色 → 裁切缩放
+/// 执行单图最小闭环：按工作流步骤表编排（读图 → 检测/抠图 → 角度决策 → 同步纠偏 → 换底色 → 裁切缩放）
 pub fn run_pipeline(
     cfg: &Config,
     engine: &mut dyn InferenceEngine,
@@ -177,7 +142,7 @@ pub fn run_pipeline_with_metrics(
     req: &ProcessRequest,
     metrics: &mut TaskMetrics,
 ) -> CoreResult<PipelineResult> {
-    // 1. 解析模式/尺寸/底色列表，并校验该模式模型就绪（缺失给出中文指引）
+    // 1. 解析模式/尺寸/底色列表与生效步骤表；按启用步骤装载所需模型（缺失给出中文指引）
     // 尺寸与底色支持自定义形式（`px:295x413` / `mm:35x45@300` / `#RRGGBB`），统一归一化为
     // 文件名安全的 id 供落库与产物命名
     let suite = cfg.mode(&req.mode)?;
@@ -190,325 +155,24 @@ pub fn run_pipeline_with_metrics(
         .iter()
         .map(|id| cfg.resolve_background(id))
         .collect::<CoreResult<Vec<_>>>()?;
-    ensure_models_ready(cfg, engine, &req.mode)?;
+    let steps = workflow::effective_steps(cfg, req.steps.as_deref());
+    let ids = workflow::required_model_ids(cfg, suite, &steps);
+    ensure_models_ready_for(cfg, engine, &ids, suite.execution_provider)?;
 
-    // 2. 读图（统一 RGB）；超过最大边长时先等比预缩放，限制峰值内存与推理耗时
-    let read_timer = StageTimer::start("读图");
-    let img = image::open(&req.input)
-        .map_err(|e| CoreError::Image(format!("读取图片 {} 失败：{e}", req.input.display())))?
-        .to_rgb8();
-    let img = limit_input_side(img, cfg.general.max_input_side);
-    let (w, h) = img.dimensions();
-    if w == 0 || h == 0 {
-        return Err(CoreError::Image("图片尺寸为零".into()));
-    }
-    read_timer.stop(metrics);
-
-    // 3. 推理：RetinaFace 按套件单模型；MTCNN 为完整三级联（p/r/on）
-    use crate::vision::mtcnn::cascade_model_ids;
-    // 3.1 人体关键点（MoveNet）：预处理 + 推理 + 解码
-    let kp_timer = StageTimer::start("人体关键点");
-    let kp_spec = cfg.model_spec(&suite.keypoint)?;
-    let kp_in = build_input_with(&img, &kp_spec.input_dims, &kp_spec.preprocess)?;
-    let kp_outs = engine.run(&suite.keypoint, &kp_in.tensor)?;
-    let kps = decode_movenet(&kp_outs[0], w, h)?;
-    kp_timer.stop(metrics);
-    // 3.2 人像抠图：预处理 + 推理 + 概率掩膜
-    let mat_timer = StageTimer::start("人像抠图");
-    let mat_spec = cfg.model_spec(&suite.matting)?;
-    let mat_in = build_input_with(&img, &mat_spec.input_dims, &mat_spec.preprocess)?;
-    let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
-    let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
-    mat_timer.stop(metrics);
-
-    // 3.3 人脸检测（RetinaFace 单模型 / MTCNN 三级联）
-    let face_timer = StageTimer::start("人脸检测");
-    let faces = if suite.face == CASCADE_FACE_ID {
-        detect_mtcnn_cascade(engine, &img)?
-    } else {
-        let face_spec = cfg.model_spec(&suite.face)?;
-        let face_in = build_input_with(&img, &face_spec.input_dims, &face_spec.preprocess)?;
-        let face_outs = engine.run(&suite.face, &face_in.tensor)?;
-        let (scale_x, scale_y, pad_x, pad_y) = match face_in.letterbox {
-            Some(lb) => (lb.scale, lb.scale, lb.pad_x, lb.pad_y),
-            None => (1.0, 1.0, 0.0, 0.0),
-        };
-        // 真实 RetinaFace 输出顺序为 [bbox, confidence, landmark]（Hivision 官方模型），
-        // decode_retinaface 期望 [scores, boxes, landmarks]，此处按位置重排
-        decode_retinaface(
-            &face_outs[1],
-            &face_outs[0],
-            &face_outs[2],
-            FACE_SCORE_THRESHOLD,
-            NMS_IOU_THRESHOLD,
-            DecodeTransform {
-                image_size: (
-                    face_spec.input_dims[2] as u32,
-                    face_spec.input_dims[3] as u32,
-                ),
-                scale_x,
-                scale_y,
-                pad_x,
-                pad_y,
-            },
-        )?
-    };
-    // 级联 id 校验（测试/配置完整性）
-    if suite.face == CASCADE_FACE_ID {
-        for id in cascade_model_ids() {
-            cfg.model_spec(id)?;
-        }
-    }
-    let face = faces
-        .first()
-        .ok_or_else(|| CoreError::Image("未检测到人脸".into()))?;
-    face_timer.stop(metrics);
-
-    // 5. 姿态角度求解（0.6 头部 + 0.4 肩线；髋/膝可用时改用 0.5/0.3/0.2 三路，缺失降级并告警）
-    let pose_timer = StageTimer::start("姿态求解");
-    let mut warnings = Vec::new();
-    let measured = fused_measured(&kps, &mut warnings);
-    let decision = decide_rotation(measured, req.rotate)?;
-    if let Some(warn) = decision.warning() {
-        warnings.push(warn);
-    }
-    if let Some(warn) = side_face_warning(face) {
-        warnings.push(warn);
-    }
-    pose_timer.stop(metrics);
-
-    // 6. 同步几何纠偏（同一仿射矩阵变换原图与 mask）
-    let rotate_timer = StageTimer::start("几何纠偏");
-    let (rot_img, rot_mask) = rotate_image_same(&img, &mask, decision.correction())?;
-    rotate_timer.stop(metrics);
-
-    // 6.5 换装（可选）：人像解析 → 衣服 mask → 服装贴合（作用于旋转后原图，美颜之前）。
-    // 解析模型独立于三模式套件，按需惰性装载（失败给出中文指引）。
-    let dressed = match &req.dress {
-        Some(d) if d.enabled => {
-            let dress_timer = StageTimer::start("换装");
-            engine.load(cfg, dressing::PARSING_MODEL_ID, suite.execution_provider)?;
-            let p_spec = cfg.model_spec(dressing::PARSING_MODEL_ID)?;
-            let p_in = build_input_with(&rot_img, &p_spec.input_dims, &p_spec.preprocess)?;
-            let p_outs = engine.run(dressing::PARSING_MODEL_ID, &p_in.tensor)?;
-            let parsing = dressing::decode_parsing(
-                &p_outs[0],
-                rot_img.width(),
-                rot_img.height(),
-                p_in.letterbox.as_ref(),
-            )?;
-            let out = if let Some(gs) = &d.garments {
-                // 多图分部位贴合：各部位按自身类别独立贴合，未提供部位自动跳过
-                let mut images: Vec<RgbImage> = Vec::new();
-                let mut specs: Vec<(&[u8], usize)> = Vec::new();
-                for (classes, path) in [
-                    (dressing::TOP_CLASSES.as_slice(), gs.top.as_ref()),
-                    (dressing::BOTTOM_CLASSES.as_slice(), gs.bottom.as_ref()),
-                    (dressing::SHOE_CLASSES.as_slice(), gs.shoes.as_ref()),
-                ] {
-                    if let Some(p) = path {
-                        images.push(
-                            image::open(p)
-                                .map_err(|e| {
-                                    CoreError::Image(format!(
-                                        "读取服装图 {} 失败：{e}",
-                                        p.display()
-                                    ))
-                                })?
-                                .to_rgb8(),
-                        );
-                        specs.push((classes, images.len() - 1));
-                    }
-                }
-                let parts: Vec<dressing::GarmentPart<'_>> = specs
-                    .iter()
-                    .map(|(c, i)| dressing::GarmentPart {
-                        classes: c,
-                        image: &images[*i],
-                    })
-                    .collect();
-                dressing::fit_garment_parts(&rot_img, &parsing, &parts)?
-            } else {
-                // 程序化全身套装样式（suit_full_*）用全身服装类集（含裤装/腿/鞋），
-                // 用户服装图与上半身样式沿用单件语义，避免误覆盖下半身
-                let style = d
-                    .garment
-                    .as_ref()
-                    .map(|_| None)
-                    .unwrap_or_else(|| {
-                        Some(SuitStyle::parse(d.style.as_deref().unwrap_or("suit_navy")))
-                    })
-                    .transpose()?;
-                let clothes = if style.is_some_and(SuitStyle::is_full) {
-                    dressing::full_clothes_mask(&parsing)
-                } else {
-                    dressing::clothes_mask(&parsing)
-                };
-                let garment = match &d.garment {
-                    Some(path) => image::open(path)
-                        .map_err(|e| {
-                            CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display()))
-                        })?
-                        .to_rgb8(),
-                    None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
-                };
-                dressing::fit_garment(&rot_img, &garment, &clothes)?
-            };
-            dress_timer.stop(metrics);
-            out
-        }
-        _ => rot_img.clone(),
-    };
-
-    // 6.6 美颜（可选）：分区磨皮——五官（双眼/眉、鼻、嘴）保护区不磨皮，保留五官锐度；
-    // 美颜不改变 mask 与裁剪框
-    let beautified = match &req.beauty {
-        Some(p) if p.enabled => {
-            let beauty_timer = StageTimer::start("美颜");
-            let protect = beauty_protect_mask(face, w, h, decision.correction());
-            let out = apply_beauty_protected(
-                &dressed,
-                &BeautyConfig {
-                    enabled: true,
-                    skin_smooth: p.skin_smooth.unwrap_or(cfg.beauty.skin_smooth),
-                    brighten: p.brighten.unwrap_or(cfg.beauty.brighten),
-                    whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
-                },
-                Some(&protect),
-            );
-            beauty_timer.stop(metrics);
-            out
-        }
-        _ => dressed,
-    };
-
-    // 7. 换底色（mask 羽化 + 边缘去色边后逐像素 alpha 混合；廉价操作只做一次检测/抠图/纠偏）
-    // 7.1 裁剪框与底色无关，先算一次
-    let bg_timer = StageTimer::start("换底裁切");
-    let crop = compute_crop(
-        &face.face,
-        w,
-        h,
-        size.width_px,
-        size.height_px,
-        CROP_TOP_RATIO,
-        CROP_BOTTOM_RATIO,
-    )?;
-    // 7.2 羽化掩膜 + 边缘去色边（按估计的原始背景色解混半透明边缘，抑制白边/黑边/底色残留）
-    let alpha = feather(&rot_mask, MASK_FEATHER_SIGMA);
-    let cleaned = decontaminate(&beautified, &alpha);
-    let mut photos = Vec::with_capacity(bgs.len() + 1);
-    let mut effects = Vec::new();
-    for (bg_id, bg) in &bgs {
-        // 效果图：换底后保持旋转全图尺寸
-        let composed = composite(&cleaned, &alpha, bg.rgb);
-        if req.effect {
-            effects.push(BgOutput {
-                bg: bg_id.clone(),
-                image: composed.clone(),
-            });
-        }
-        // 证件照：按人脸框裁切缩放
-        let final_img = crop_resize(&composed, &crop, size.width_px, size.height_px)?;
-        photos.push(BgOutput {
-            bg: bg_id.clone(),
-            image: final_img,
-        });
-    }
-
-    // 7.3 自定义背景图（可选）：按原图尺寸 cover 缩放裁切后与人像合成，产物底色标识 custombg
-    if let Some(path) = &req.bg_image {
-        let bg_img = image::open(path)
-            .map_err(|e| CoreError::Image(format!("读取背景图 {} 失败：{e}", path.display())))?
-            .to_rgb8();
-        let canvas = fit_cover(&bg_img, w, h);
-        let composed = composite_with_image(&cleaned, &alpha, &canvas);
-        let final_img = crop_resize(&composed, &crop, size.width_px, size.height_px)?;
-        photos.push(BgOutput {
-            bg: CUSTOM_BG_ID.to_string(),
-            image: final_img,
-        });
-    }
-
-    // 7.4 透明底证件照（可选）：RGB 取去色边后前景，alpha 取羽化掩膜（PNG 输出）
-    let transparent = if req.transparent {
-        let rgba = to_rgba(&cleaned, &alpha);
-        Some(crop_resize_rgba(
-            &rgba,
-            &crop,
-            size.width_px,
-            size.height_px,
-        )?)
-    } else {
-        None
-    };
-    bg_timer.stop(metrics);
-
-    // 8. 排版相纸（可选）：以首个底色证件照按相纸规格铺版
-    let layout_timer = StageTimer::start("排版");
-    let layout_img = match &req.layout {
-        Some(layout_id) => {
-            let spec = cfg.layout.get(layout_id).ok_or_else(|| {
-                CoreError::ConfigValidate(format!(
-                    "未知排版“{layout_id}”，可选：{}",
-                    cfg.layout.keys().cloned().collect::<Vec<_>>().join("、")
-                ))
-            })?;
-            Some(crate::vision::layout::compose(
-                &photos[0].image,
-                spec,
-                size.dpi,
-            )?)
-        }
-        None => None,
-    };
-    // 排版为可选阶段：未指定相纸时不记录该阶段耗时
-    if req.layout.is_some() {
-        layout_timer.stop(metrics);
-    }
+    // 2. 建执行上下文并按步骤表逐步执行（步骤开关、顺序与自定义步骤均由步骤表决定）
+    let mut ctx = PipelineCtx::new(cfg, engine, req, metrics, suite.clone(), size, bgs);
+    workflow::run_steps(&mut ctx, &steps)?;
+    workflow::warn_disabled_features(&mut ctx, &steps);
 
     Ok(PipelineResult {
-        photos,
-        effects,
-        layout: layout_img,
-        transparent,
-        decision,
-        warnings,
-        metrics: metrics.clone(),
+        photos: ctx.photos,
+        effects: ctx.effects,
+        layout: ctx.layout_img,
+        transparent: ctx.transparent,
+        decision: ctx.decision.unwrap_or(RotationDecision::Auto(0.0)),
+        warnings: ctx.warnings,
+        metrics: (*ctx.metrics).clone(),
     })
-}
-
-/// 五官保护掩膜：检测结果位于原图坐标系，美颜作用于纠偏后图像，故按同一旋转矩阵把
-/// 五官关键点变换到纠偏后坐标系再生成保护掩膜（旋转保距，人脸框尺寸不变、中心随变换移动）
-fn beauty_protect_mask(face: &FaceDetection, w: u32, h: u32, deg: f64) -> GrayImage {
-    let m = rotation_affine(w as f64 / 2.0, h as f64 / 2.0, deg);
-    let landmarks = face.landmarks.map(|p| {
-        let (x, y) = m * (p.x as f32, p.y as f32);
-        Point2::new(x as f64, y as f64)
-    });
-    let center = face.face.center();
-    let (cx, cy) = m * (center.x as f32, center.y as f32);
-    let (fw, fh) = (face.face.width(), face.face.height());
-    let rotated_face = FaceBox {
-        x1: cx - fw / 2.0,
-        y1: cy - fh / 2.0,
-        x2: cx + fw / 2.0,
-        y2: cy + fh / 2.0,
-        score: face.face.score,
-    };
-    feature_protect_mask(w, h, &face_feature_regions(&rotated_face, &landmarks))
-}
-
-/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（letterbox 逆变换 + 阈值化 + 形态学去噪）
-fn probability_mask(
-    out: &TensorData,
-    w: u32,
-    h: u32,
-    letterbox: Option<&LetterBox>,
-) -> CoreResult<GrayImage> {
-    let prob = probability_map(out, w, h, letterbox)?;
-    let bin = threshold_mask(&prob, MASK_THRESHOLD);
-    Ok(morph_open(&bin, MASK_MORPH_RADIUS))
 }
 
 /// 演示引擎：balanced 三件套内置 mock 回放（`photos process --demo` 与测试共用）。
@@ -612,158 +276,10 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
     .stub("parsing_lip", vec![parsing])
 }
 
-/// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；髋/膝可用时改用三路融合；缺失时降级并记录告警
-fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
-    let head = kps.eyes().map(|(l, r)| head_angle(&l, &r));
-    let shoulder = kps.shoulders().map(|(l, r)| shoulder_angle(&l, &r));
-    // 躯干垂直度：肩中点 → 髋（缺失退回膝）中点，二者缺一时无法求解
-    let torso = match (kps.shoulder_mid(), kps.lower_mid()) {
-        (Some(s), Some(lower)) => Some(torso_angle(&s, &lower)),
-        _ => None,
-    };
-    match (head, shoulder, torso) {
-        // 髋/膝可用 → 三路融合，额外修复高低肩之外的侧身倾斜
-        (Some(h), Some(s), Some(t)) => fused_angle_with_torso(h, s, t),
-        (Some(h), Some(s), None) => fused_angle(h, s),
-        (Some(h), None, _) => {
-            warnings.push("未检测到双肩，仅用头部角度".into());
-            h
-        }
-        (None, Some(s), _) => {
-            warnings.push("未检测到双眼，仅用肩线角度".into());
-            s
-        }
-        (None, None, _) => {
-            warnings.push("未检测到双眼与双肩，跳过自动纠偏".into());
-            0.0
-        }
-    }
-}
-
-/// 侧脸告警：由人脸 5 点关键点（左眼、右眼、鼻尖）估算 yaw，超过阈值时返回中文提示。
-/// 关键点退化（双眼重合，如演示/桩数据）时无法判断，返回 None 不告警。
-fn side_face_warning(face: &FaceDetection) -> Option<String> {
-    let yaw = yaw_from_landmarks(&face.landmarks[0], &face.landmarks[1], &face.landmarks[2])?;
-    (yaw.abs() > SIDE_FACE_YAW_DEG)
-        .then(|| format!("疑似侧脸（估算偏转 {yaw:.0}°），建议提供正面照"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Rgb;
-
-    #[test]
-    fn 美颜五官保护掩膜随纠偏角同步变换() {
-        let face = FaceDetection {
-            face: FaceBox {
-                x1: 100.0,
-                y1: 100.0,
-                x2: 200.0,
-                y2: 200.0,
-                score: 0.99,
-            },
-            landmarks: [
-                Point2::new(125.0, 140.0),
-                Point2::new(175.0, 140.0),
-                Point2::new(150.0, 165.0),
-                Point2::new(133.0, 185.0),
-                Point2::new(167.0, 185.0),
-            ],
-        };
-        // 未纠偏：五官保护区落在原坐标
-        let mask = beauty_protect_mask(&face, 300, 300, 0.0);
-        assert!(mask.get_pixel(125, 140)[0] > 200, "左眼应被保护");
-        assert!(mask.get_pixel(150, 185)[0] > 200, "嘴中心应被保护");
-        // 绕图像中心 (150,150) 顺时针 90°：(x,y) → (150-(y-150), 150+(x-150))
-        // 左眼 (125,140) → (160,125)；嘴中心 (150,185) → (115,150)
-        let rotated = beauty_protect_mask(&face, 300, 300, 90.0);
-        for (name, x, y) in [("左眼", 160u32, 125u32), ("嘴中心", 115, 150)] {
-            assert!(
-                rotated.get_pixel(x, y)[0] > 200,
-                "纠偏后{name}({x},{y})应被保护，实际 {}",
-                rotated.get_pixel(x, y)[0]
-            );
-        }
-        // 远离五官的背景不受保护
-        assert_eq!(rotated.get_pixel(280, 20)[0], 0);
-    }
-
-    #[test]
-    fn 躯干垂直度参与三路姿态融合() {
-        use crate::vision::keypoint::{
-            LEFT_EYE, LEFT_HIP, LEFT_SHOULDER, RIGHT_EYE, RIGHT_HIP, RIGHT_SHOULDER,
-        };
-        let mut kps = KeypointSet { points: [None; 17] };
-        // 双眼、双肩水平（角度 0）
-        kps.points[LEFT_EYE] = Some(Point2::new(40.0, 40.0));
-        kps.points[RIGHT_EYE] = Some(Point2::new(60.0, 40.0));
-        kps.points[LEFT_SHOULDER] = Some(Point2::new(20.0, 100.0));
-        kps.points[RIGHT_SHOULDER] = Some(Point2::new(80.0, 100.0));
-        let mut w = Vec::new();
-        // 无髋/膝 → 退化为两路（0.6×0 + 0.4×0 = 0），无告警
-        assert!(fused_measured(&kps, &mut w).abs() < 1e-9);
-        assert!(w.is_empty());
-        // 髋中点在肩中点左侧 31.7px（垂直距离 180px）→ 躯干倾斜 atan(31.7/180) ≈ 10° → 0.2×10 = 2.0
-        let dy = 180.0f64;
-        let dx = dy * 10.0f64.to_radians().tan();
-        let hip_mid_x = 50.0 - dx;
-        kps.points[LEFT_HIP] = Some(Point2::new(hip_mid_x - 5.0, 280.0));
-        kps.points[RIGHT_HIP] = Some(Point2::new(hip_mid_x + 5.0, 280.0));
-        let measured = fused_measured(&kps, &mut w);
-        assert!((measured - 2.0).abs() < 0.02, "实际 {measured}");
-        assert!(w.is_empty(), "髋部可用时不应告警");
-    }
-
-    #[test]
-    fn 侧脸超阈值告警且退化不告警() {
-        let face_box = FaceBox {
-            x1: 100.0,
-            y1: 100.0,
-            x2: 200.0,
-            y2: 200.0,
-            score: 0.99,
-        };
-        let frontal = FaceDetection {
-            face: face_box,
-            landmarks: [
-                Point2::new(125.0, 140.0),
-                Point2::new(175.0, 140.0),
-                Point2::new(150.0, 165.0),
-                Point2::new(133.0, 185.0),
-                Point2::new(167.0, 185.0),
-            ],
-        };
-        assert!(side_face_warning(&frontal).is_none(), "正面照不应告警");
-        // 鼻尖右移 30px（半间距 25px）→ asin(1.2) 钳制 → 90° → 告警
-        let side = FaceDetection {
-            landmarks: [
-                Point2::new(125.0, 140.0),
-                Point2::new(175.0, 140.0),
-                Point2::new(180.0, 165.0),
-                Point2::new(133.0, 185.0),
-                Point2::new(167.0, 185.0),
-            ],
-            ..frontal
-        };
-        let warn = side_face_warning(&side).unwrap();
-        assert!(
-            warn.contains("疑似侧脸") && warn.contains("正面照"),
-            "{warn}"
-        );
-        // 双眼重合（演示/桩数据退化）→ 无法判断，不告警
-        let degenerate = FaceDetection {
-            landmarks: [
-                Point2::new(150.0, 140.0),
-                Point2::new(150.0, 140.0),
-                Point2::new(150.0, 165.0),
-                Point2::new(133.0, 185.0),
-                Point2::new(167.0, 185.0),
-            ],
-            ..frontal
-        };
-        assert!(side_face_warning(&degenerate).is_none());
-    }
 
     #[test]
     fn 最小闭环输出标准证件照() {
@@ -784,6 +300,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -813,6 +330,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: None,
         };
         let mut metrics = TaskMetrics::new();
@@ -917,6 +435,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -942,6 +461,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: Some(10.0),
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -974,6 +494,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
@@ -1016,6 +537,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -1049,6 +571,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         assert_eq!(result.photos.len(), 3);
@@ -1087,6 +610,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图 = 旋转后全图尺寸（纠偏角 0 → 原图 100x140）
@@ -1131,6 +655,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图与全链路均基于缩放后尺寸
@@ -1158,6 +683,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         let canvas = result.layout.expect("应有排版相纸");
@@ -1185,6 +711,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
         assert!(err.to_string().contains("底色"), "实际：{err}");
@@ -1201,6 +728,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let err2 = run_pipeline(&cfg, &mut engine, &req2).unwrap_err();
         assert!(err2.to_string().contains("未知排版"), "实际：{err2}");
@@ -1228,6 +756,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -1250,6 +779,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -1287,6 +817,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -1309,6 +840,7 @@ mod tests {
             }),
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -1346,6 +878,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -1368,6 +901,7 @@ mod tests {
             }),
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -1423,6 +957,7 @@ mod tests {
             }),
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
 
@@ -1455,6 +990,7 @@ mod tests {
             dress: None,
             transparent: true,
             bg_image: None,
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         let rgba = result.transparent.expect("应输出透明底证件照");
@@ -1477,6 +1013,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: None,
+            steps: None,
         };
         assert!(
             run_pipeline(&cfg, &mut engine2, &req2)
@@ -1512,6 +1049,7 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: Some(bg_path),
+            steps: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 纯色底色 1 张 + 自定义背景 1 张
@@ -1546,8 +1084,100 @@ mod tests {
             dress: None,
             transparent: false,
             bg_image: Some(dir.path().join("不存在.png")),
+            steps: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
         assert!(err.to_string().contains("读取背景图"), "实际：{err}");
+    }
+
+    /// 步骤表 id 便捷构造
+    fn 步骤表(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn 关闭可选步骤仍出图且阶段指标减少() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+            // 关闭换装/美颜/排版三个可选步骤
+            steps: Some(步骤表(&[
+                "read_image",
+                "keypoint",
+                "matting",
+                "face_detect",
+                "pose",
+                "rotate",
+                "background",
+            ])),
+        };
+        let mut metrics = TaskMetrics::new();
+        let result = run_pipeline_with_metrics(&cfg, &mut engine, &req, &mut metrics).unwrap();
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
+        let stages: Vec<&str> = metrics.stages.iter().map(|s| s.stage.as_str()).collect();
+        assert!(
+            stages.contains(&"换底裁切"),
+            "启用步骤应记录阶段：{stages:?}"
+        );
+        for 关闭 in ["换装", "美颜", "排版"] {
+            assert!(
+                !stages.contains(&关闭),
+                "未启用的步骤不应记录阶段「{关闭}」：{stages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 缺抠图步骤仍出图并告警() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+            // 关闭人像抠图：无掩膜可换底，退化为直接裁切当前图像
+            steps: Some(步骤表(&[
+                "read_image",
+                "keypoint",
+                "face_detect",
+                "pose",
+                "rotate",
+                "background",
+            ])),
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        assert_eq!(result.photos[0].image.dimensions(), (295, 413));
+        assert!(
+            result.warnings.iter().any(|w| w.contains("抠图")),
+            "应给出中文告警：{:?}",
+            result.warnings
+        );
     }
 }

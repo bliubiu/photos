@@ -19,6 +19,16 @@ export interface LayoutOption {
   id: string;
   name: string;
 }
+/** 工作流步骤元数据（GET /config 的 pipeline.steps，驱动步骤编排面板） */
+export interface PipelineStepMeta {
+  id: string;
+  label: string;
+  /** 阶段中文名（与任务详情 metrics 的 stage 一致） */
+  stage: string;
+  /** 依赖的步骤 id（须一并启用） */
+  requires: string[];
+}
+
 export interface AppConfig {
   default_mode: string;
   modes: ModeOption[];
@@ -26,6 +36,7 @@ export interface AppConfig {
   backgrounds: BackgroundOption[];
   layouts: LayoutOption[];
   output: { format: string; jpg_quality: number; pdf: boolean };
+  pipeline: { steps: PipelineStepMeta[]; effective: string[] };
 }
 
 export interface ModelItem {
@@ -103,6 +114,8 @@ export interface TaskParamsSnapshot {
   output_format?: string | null;
   jpg_quality?: number | null;
   pdf?: boolean | null;
+  /** 工作流步骤表（null = 取服务端全局配置） */
+  steps?: string[] | null;
 }
 
 /** 单阶段耗时（任务详情 metrics 字段） */
@@ -176,6 +189,8 @@ export interface SubmitParams {
   jpg_quality: number;
   /** 排版相纸额外输出 PDF */
   pdf: boolean;
+  /** 工作流步骤表（null = 取服务端全局配置 `[pipeline] steps` 或内置默认十步） */
+  steps: string[] | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -334,6 +349,7 @@ export async function submitTask(file: File, params: SubmitParams): Promise<stri
       output_format: params.output_format,
       jpg_quality: params.jpg_quality,
       pdf: params.pdf,
+      steps: params.steps,
     }),
   );
   const created = await request<{ id: string; status: string }>("/tasks", {

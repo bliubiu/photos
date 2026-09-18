@@ -2,6 +2,26 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.17] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【工作流编排·编排层】**声明式步骤表**：新增 `photos-core/src/workflow.rs`，把原先写死在 `pipeline.rs` 的十步链路改造为 `STEP_DEFS` 步骤表（步骤 id / 中文阶段名 / 依赖 `requires` / `StepFn = fn(&mut PipelineCtx) -> CoreResult<()>`），并以 `PipelineCtx` 汇聚全部中间态（原图 / 关键点 / 抠图掩膜 / 人脸 / 纠偏图 / 产物 / 告警）。`pipeline.rs` 由约 1460 行收敛为**薄壳**（约 1180 行）：解析模式 / 尺寸 / 底色 → `effective_steps` → `required_model_ids` → `run_steps` → 组装 `PipelineResult`；`run_pipeline_with_metrics` 签名与产物契约不变，调用方零改动
+- 【工作流编排·步骤开关】**可配置处理步骤**：新增 `[pipeline] steps` 配置与请求参数 `params.steps`（`ProcessRequest` 新增同名字段），**生效优先级：请求（非空）> 配置 > 内置默认十步**（默认表即原顺序，行为与改造前一致）。步骤依赖在校验期强制（`keypoint`/`matting`/`face_detect` ← `read_image`；`pose` ← `keypoint`；`rotate` ← `pose`；`dress`/`beauty`/`background` ← `rotate`；`layout` ← `background`），未知 / 重复 / 依赖缺失均返回**中文 400**（`INVALID_PARAMS`）
+- 【工作流编排·降级】**关闭可选步骤仍出图**：缺 `face_detect` → 以整图作人脸框居中裁切；缺 `matting` → 跳过换底合成与透明底输出（`cleaned` / `composed` 直接取原图）并中文告警；缺 `keypoint` 时隐藏人脸检测与姿态求解。新增 `warn_disabled_features`：请求了美颜 / 排版 / 换底（含透明底与自定义背景）/ 换装但对应步骤未启用时**只告警不阻断**，逐条写入结果 `warnings`
+- 【工作流编排·自定义 pipeline】**自定义步骤与步骤参数**：`Config` 新增 `PipelineConfig { steps, params, custom }` 与 `CustomStep { op }`（均 serde 默认，旧 toml 无 `[pipeline]` 仍可解析）；`[pipeline.custom.<名>] op = "<内置步骤 id>"` 给内置算子起别名并可并入步骤表（同一算子可多次执行），`[pipeline.params.<步骤>] model` 覆盖该步骤使用的模型 id（优先于模式套件）；校验期禁止自定义步骤名与内置步骤同名、`op` 必须为内置算子。运行期新增 `register_step(name, stage, func) -> bool` 供宿主进程注册编译期算子（**不做外部动态库加载**），另有 `step_defs` / `step_metas` / `available_steps` / `step_op` / `step_requires` / `step_stage` / `resolve_step` / `effective_steps` / `required_model_ids` / `run_steps` 等公开 API
+- 【工作流编排·模型装载】`required_model_ids` 按启用步骤推导（步骤声明的模型 id 优先）；**换装的人像解析模型不进任何套件**，由换装步骤启用时惰性装载，避免默认步骤表下强制预载导致模型缺失硬失败
+- 【工作流编排·指标】每个步骤自带 `StageTimer` 埋点，保持「未执行的可选阶段不记录耗时」的既有口径
+- 【工作流编排·接口】`POST /tasks` 的 `params` 接受 `steps`（数组，顺序即执行顺序），非法步骤返回中文 400；`params_json` 快照与任务详情回填同名字段。`GET /config` 新增 `pipeline` 字段：`steps`（步骤元数据：`id` / `label` / `stage` / `requires`，含自定义步骤）与 `effective`（当前生效步骤表）
+- 【前端·工作流编排】新增 `components/WorkflowPanel.tsx`（**步骤列表**：中文名 + ↑/↓ 调序 + 「关闭」；**已关闭步骤**：一键「启用」；**「恢复默认」**置 `params.steps = null` 回到服务端配置 / 内置默认；**依赖缺失与请求冲突提示**），挂载于实时预览面板下方；`api.ts` 新增 `PipelineStepMeta` 类型与 `AppConfig.pipeline`，`SubmitParams` / `TaskParamsSnapshot` 新增 `steps`，`store.ts` 的 `ParamsState` 新增 `steps` 并在「复用参数」时回填；**纯 Tailwind，无拖拽库、无图表库**
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：`POST /tasks` 参数表新增 `steps` 字段与**步骤 id / 依赖表**（含降级规则），`GET /config` 响应补 `pipeline` 字段说明
+- `docs/06-运行使用手册.md`：配置段总览补 `[pipeline]`，新增 §4.4「工作流编排」（配置示例、优先级、依赖与降级、自定义步骤），WebUI 章节由 8 项增至 9 项（工作流编排面板），HTTP API 章节补步骤编排 curl 示例与 400 说明
+- `docs/02-架构设计.md`：§3 流水线补「工作流编排（`photos-core::workflow`）」小节（步骤表 / 优先级 / 依赖与降级 / 模型装载 / 自定义步骤），§4.1 配置骨架补 `[pipeline]`，§6.1 WebUI 结构补工作流编排面板
+- `docs/examples/application.toml`：新增 `[pipeline]` 注释模板（`steps` / `[pipeline.params.<步骤>]` / `[pipeline.custom.<名>]`）与依赖、优先级说明
+- `docs/07-能力增强.md`：§五.2 工作流编排标记为已落地（2026.09.18.17），§「已实现」条目补步骤开关 / 调序 / 自定义步骤
+- 说明：本批**未新增任何第三方依赖**，未引入拖拽库与图表库
+
 ## [2026.09.18.16] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -49,6 +49,9 @@ pub struct Config {
     /// 服务参数 `[server]`
     #[serde(default)]
     pub server: ServerConfig,
+    /// 工作流编排 `[pipeline]`（步骤开关、顺序与自定义步骤）
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 }
 
 /// 全局段
@@ -415,6 +418,27 @@ impl Default for ServerConfig {
     }
 }
 
+/// 工作流编排 `[pipeline]`：步骤表、步骤参数与自定义步骤
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// 启用的步骤 id 列表（顺序即执行顺序；缺省 = 内置默认十步）
+    #[serde(default)]
+    pub steps: Vec<String>,
+    /// 步骤参数 `[pipeline.params.<步骤>]`（目前支持 `model`：覆盖该步骤使用的模型 id）
+    #[serde(default)]
+    pub params: BTreeMap<String, toml::Value>,
+    /// 自定义步骤 `[pipeline.custom.<名>]`（`op` 指向内置步骤算子）
+    #[serde(default)]
+    pub custom: BTreeMap<String, CustomStep>,
+}
+
+/// 自定义步骤定义：把自定义名字映射到内置步骤算子（编译期注册，不支持外部动态库）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomStep {
+    /// 内置步骤 id（算子）
+    pub op: String,
+}
+
 impl Config {
     /// 默认加载：优先读取当前目录 `application.toml`，再叠加环境变量
     pub fn load() -> CoreResult<Self> {
@@ -549,6 +573,61 @@ impl Config {
                 if !self.models.contains_key(model_id) {
                     return Err(CoreError::ConfigValidate(format!(
                         "模式“{suite_id}”的{role}引用了未注册模型“{model_id}”"
+                    )));
+                }
+            }
+        }
+        self.validate_steps()?;
+        Ok(())
+    }
+
+    /// 校验工作流步骤表：自定义步骤合法性、未知步骤、重复步骤与依赖缺失
+    pub fn validate_steps(&self) -> CoreResult<()> {
+        use crate::workflow;
+        // 1. 自定义步骤定义：不得与内置步骤同名，op 必须是内置步骤 id
+        for (name, custom) in &self.pipeline.custom {
+            if workflow::is_builtin_step(name) {
+                return Err(CoreError::ConfigValidate(format!(
+                    "自定义步骤“{name}”与内置步骤同名，请改用其它名称"
+                )));
+            }
+            if !workflow::is_builtin_step(&custom.op) {
+                return Err(CoreError::ConfigValidate(format!(
+                    "自定义步骤“{name}”的 op“{}”不是内置步骤，可选：{}",
+                    custom.op,
+                    workflow::builtin_steps().join("、")
+                )));
+            }
+        }
+        // 2. 缺省步骤表（空）= 内置默认，无需校验
+        let steps = &self.pipeline.steps;
+        if steps.is_empty() {
+            return Ok(());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for s in steps {
+            if !seen.insert(s) {
+                return Err(CoreError::ConfigValidate(format!(
+                    "工作流步骤“{s}”重复，请检查 [pipeline] steps"
+                )));
+            }
+            if workflow::step_op(self, s).is_none() {
+                return Err(CoreError::ConfigValidate(format!(
+                    "未知工作流步骤“{s}”，可选：{}",
+                    workflow::available_steps(self).join("、")
+                )));
+            }
+        }
+        // 3. 依赖校验（依赖以内置算子 id 表达，步骤表中需存在等价步骤）
+        for s in steps {
+            let op = workflow::step_op(self, s).unwrap_or(s.as_str());
+            for dep in workflow::step_requires(op) {
+                if !steps
+                    .iter()
+                    .any(|n| workflow::step_op(self, n) == Some(*dep))
+                {
+                    return Err(CoreError::ConfigValidate(format!(
+                        "步骤“{s}”依赖步骤“{dep}”，请在 [pipeline] steps 中同时启用"
                     )));
                 }
             }
@@ -773,6 +852,7 @@ impl Default for Config {
             output: OutputConfig::default(),
             inference: InferenceConfig::default(),
             server: ServerConfig::default(),
+            pipeline: PipelineConfig::default(),
         }
     }
 }

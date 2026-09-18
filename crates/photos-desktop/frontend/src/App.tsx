@@ -8,6 +8,7 @@ import LivePreviewPanel from "./components/LivePreviewPanel";
 import HistoryList from "./components/HistoryList";
 import ObservabilityPanel from "./components/ObservabilityPanel";
 import ModelPanel from "./components/ModelPanel";
+import WorkflowPanel from "./components/WorkflowPanel";
 
 export default function App() {
   const { init, error } = useStore();
@@ -43,6 +44,7 @@ export default function App() {
         <section className="lg:col-span-2 space-y-6">
           <PreviewPanel />
           <LivePreviewPanel />
+          <WorkflowPanel />
           <ObservabilityPanel />
           <ModelPanel />
         </section>

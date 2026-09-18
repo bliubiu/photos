@@ -39,6 +39,16 @@ pub fn rotate_image_same(
     Ok((rotated_img, rotated_mask))
 }
 
+/// 仅变换原图（双线性），用于工作流未启用抠图步骤、无 mask 可同步变换时的纠偏
+pub fn rotate_image(img: &RgbImage, deg: f64) -> RgbImage {
+    if deg == 0.0 {
+        return img.clone();
+    }
+    let (w, h) = img.dimensions();
+    let m = rotation_affine(w as f64 / 2.0, h as f64 / 2.0, deg);
+    warp(img, &m, Interpolation::Bilinear, Rgb([0, 0, 0]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

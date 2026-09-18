@@ -150,6 +150,89 @@ async fn 配置驱动前端下拉() {
     assert_eq!(white["rgb"], json!([255, 255, 255]));
     let layouts = json["layouts"].as_array().unwrap();
     assert!(layouts.iter().any(|l| l["id"] == "6inch"));
+    // 工作流步骤元数据（驱动前端步骤编排面板）
+    let steps = json["pipeline"]["steps"].as_array().unwrap();
+    assert!(
+        steps.iter().any(|s| s["id"] == "background"
+            && s["label"] == "换底裁切"
+            && s["stage"] == "换底裁切")
+    );
+    let matting = steps.iter().find(|s| s["id"] == "matting").unwrap();
+    assert_eq!(matting["requires"], json!(["read_image"]));
+    assert_eq!(json["pipeline"]["effective"].as_array().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn 工作流步骤非法返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 未知步骤
+    let (body, ctype) = multipart_body(&demo_jpeg(), r#"{"steps":["read_image","不存在的步骤"]}"#);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("未知工作流步骤"));
+    // 依赖缺失（几何纠偏需姿态求解）
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"steps":["read_image","rotate","background"]}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["message"].as_str().unwrap().contains("依赖"));
+}
+
+#[tokio::test]
+async fn 关闭可选步骤的任务成功出图() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 仅保留必产出图的最小步骤链（关闭换装/美颜/排版）
+    let (body, ctype) = multipart_body(
+        &demo_jpeg(),
+        r#"{"backgrounds":["white"],"steps":["read_image","keypoint","matting","face_detect","pose","rotate","background"]}"#,
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = json["id"].as_str().unwrap().to_string();
+    let mut detail = Value::Null;
+    for _ in 0..100 {
+        let req = Request::builder()
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(&app, req).await;
+        if json["status"] == "succeeded" || json["status"] == "failed" {
+            detail = json;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    // 关闭排版后无排版阶段耗时记录
+    let stages = detail["metrics"].as_array().unwrap();
+    assert!(!stages.iter().any(|s| s["stage"] == "排版"));
+    assert!(stages.iter().any(|s| s["stage"] == "换底裁切"));
 }
 
 #[tokio::test]

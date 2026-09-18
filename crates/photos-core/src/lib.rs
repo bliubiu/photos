@@ -15,3 +15,4 @@ pub mod pipeline;
 pub mod preprocess;
 pub mod storage;
 pub mod vision;
+pub mod workflow;

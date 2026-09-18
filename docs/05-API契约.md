@@ -102,7 +102,8 @@
   "bg_image": null,
   "output_format": "jpg",
   "jpg_quality": 90,
-  "pdf": false
+  "pdf": false,
+  "steps": ["read_image", "keypoint", "matting", "face_detect", "pose", "rotate", "background"]
 }
 ```
 
@@ -121,6 +122,24 @@
 | `output_format` | string\|null | `jpg`\|`webp`（大小写不敏感，`jpeg` 等价 `jpg`）；缺省用 `[output].format`；非法值返回 `400` |
 | `jpg_quality` | number\|null | JPG 压缩质量 `1..=100`，缺省用 `[output].jpg_quality`；越界返回 `400`；对 `webp`（VP8L 无损）无效 |
 | `pdf` | bool\|null | 是否在排版图片之外额外输出 `task_{id}_layout_{相纸}.pdf`；需同时指定 `layout` 才产出；缺省用 `[output].pdf` |
+| `steps` | string[]\|null | 可选；**工作流步骤表**（元素为步骤 id 或 `[pipeline.custom]` 中的自定义步骤名），顺序即执行顺序。缺省 `null` = 取全局配置 `[pipeline] steps`，全局为空时用内置默认十步。步骤 id 未知、重复或依赖缺失返回 `400`；请求了美颜 / 排版 / 换底 / 换装但对应步骤未启用时不报错，仅出图并在 `warnings` 中中文告警 |
+
+#### 步骤 id 与依赖
+
+| 步骤 id | 阶段（metrics.stage） | 依赖（须一并启用） |
+|---|---|---|
+| `read_image` | 读图 | — |
+| `keypoint` | 人体关键点 | `read_image` |
+| `matting` | 人像抠图 | `read_image` |
+| `face_detect` | 人脸检测 | `read_image` |
+| `pose` | 姿态求解 | `keypoint` |
+| `rotate` | 几何纠偏 | `pose` |
+| `dress` | 换装 | `rotate` |
+| `beauty` | 美颜 | `rotate` |
+| `background` | 换底裁切 | `rotate` |
+| `layout` | 排版 | `background` |
+
+降级规则：缺 `face_detect` → 按整图居中裁切并中文告警；缺 `matting` → 跳过换底合成与透明底输出（仍出图）并中文告警；缺 `keypoint` → 隐藏人脸检测与姿态求解。
 
 #### 成功响应
 
@@ -358,11 +377,20 @@
   "sizes": [{ "id": "one_inch", "name": "一寸", "width_px": 295, "height_px": 413 }],
   "backgrounds": [{ "id": "white", "name": "白", "rgb": [255, 255, 255] }],
   "layouts": [{ "id": "6inch", "name": "6寸相纸" }, { "id": "a4", "name": "A4" }],
-  "output": { "format": "jpg", "jpg_quality": 90, "pdf": false }
+  "output": { "format": "jpg", "jpg_quality": 90, "pdf": false },
+  "pipeline": {
+    "steps": [
+      { "id": "read_image", "label": "读图", "stage": "读图", "requires": [] },
+      { "id": "keypoint", "label": "人体关键点", "stage": "人体关键点", "requires": ["read_image"] }
+    ],
+    "effective": ["read_image", "keypoint", "matting", "face_detect", "pose", "rotate", "dress", "beauty", "background", "layout"]
+  }
 }
 ```
 
 选项来源：`application.toml` + 默认值；驱动前端下拉，前端不硬编码尺寸表。
+
+`pipeline.steps` 为步骤元数据（内置十步 + `[pipeline.custom]` 自定义步骤，`label` 为中文名、`requires` 为依赖 id），`pipeline.effective` 为当前**生效**的步骤表（全局 `[pipeline] steps`，未配置时为内置默认十步）。前端步骤编排面板据此展示开关与调序，提交时通过 `params.steps` 覆盖。
 
 ### 3.11 GET `/ping`
 
