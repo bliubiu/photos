@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
+use photos_core::metrics::TaskMetrics;
 use photos_core::output::{OutputFormat, OutputOptions, save_task_outputs};
 use photos_core::pipeline::{
-    BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine, run_pipeline,
+    BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine,
+    run_pipeline_with_metrics,
 };
 use photos_core::storage::{NewTask, Store};
 
@@ -286,7 +288,8 @@ fn process_one(
         transparent: args.transparent,
         bg_image: args.bg_image.clone(),
     };
-    match run_pipeline(cfg, engine, &req) {
+    let mut metrics = TaskMetrics::new();
+    match run_pipeline_with_metrics(cfg, engine, &req, &mut metrics) {
         Ok(r) => {
             // 产物落盘：命名规约集中在 photos_core::output（与 API 一致）
             let layout_id = args.layout.as_deref();
@@ -304,6 +307,7 @@ fn process_one(
             let outputs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             let outputs_json = serde_json::to_string(&outputs)?;
             let warnings = serde_json::to_string(&r.warnings)?;
+            let metrics_json = metrics.to_json();
             store.update_task(
                 task_id,
                 "succeeded",
@@ -311,8 +315,13 @@ fn process_one(
                 &outputs_json,
                 &warnings,
                 Some(started.elapsed().as_millis() as i64),
+                Some(&metrics_json),
             )?;
+            photos_core::logging::log_metrics(task_id, &metrics);
             println!("已生成 {}：{}", input.display(), outputs.join("、"));
+            if !metrics.is_empty() {
+                println!("分阶段耗时：{}", metrics.summary());
+            }
             for w in &r.warnings {
                 println!("告警：{w}");
             }
@@ -327,7 +336,14 @@ fn process_one(
                 "[]",
                 "[]",
                 Some(started.elapsed().as_millis() as i64),
+                None,
             )?;
+            // 错误上报：结构化错误日志 + 落库（失败阶段取最后已记录阶段）
+            let failed_stage = metrics.last_stage().unwrap_or("处理").to_string();
+            photos_core::logging::log_error("INTERNAL", &failed_stage, &msg, Some(task_id));
+            if let Err(e) = store.record_error("INTERNAL", &failed_stage, &msg, Some(task_id)) {
+                eprintln!("警告：错误上报写库失败：{e}");
+            }
             // 模型已就位但当前构建未启用 ONNX 推理时给出迁移指引
             if msg.contains("无可用推理输出") {
                 bail!(

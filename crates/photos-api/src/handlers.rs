@@ -1,7 +1,8 @@
 //! 端点处理器（契约 docs/05-API契约.md §2）：
 //! POST /tasks、GET /tasks、DELETE /tasks、GET /tasks/{id}、DELETE /tasks/{id}、
 //! GET /tasks/{id}/output、GET /tasks/{id}/input、
-//! GET /models、POST /models/download、GET /config、GET /ping。
+//! GET /models、POST /models/download、GET /config、GET /ping、
+//! GET /metrics、GET /errors（可观测性）。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,9 +15,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use photos_core::config::Config;
+use photos_core::metrics::TaskMetrics;
 use photos_core::model::{CheckStatus, check_models, download_model, resolve_model_path};
 use photos_core::output::{OutputFormat, save_task_outputs};
-use photos_core::pipeline::{ProcessRequest, run_pipeline};
+use photos_core::pipeline::{ProcessRequest, run_pipeline_with_metrics};
 use photos_core::storage::{NewTask, Store, TaskFilter, TaskRecord};
 
 use crate::artifact;
@@ -66,7 +68,25 @@ impl AppState {
             slots,
         })
     }
+
+    /// 错误上报：结构化错误日志 + 落库 error_log（写库失败仅告警，不阻断主流程）
+    pub fn report_error(&self, code: &str, stage: &str, message: &str, task_id: Option<i64>) {
+        photos_core::logging::log_error(code, stage, message, task_id);
+        let store = match self.store.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("错误上报写库失败（存储锁异常）：{e}");
+                return;
+            }
+        };
+        if let Err(e) = store.record_error(code, stage, message, task_id) {
+            tracing::warn!("错误上报写库失败：{e}");
+        }
+    }
 }
+
+/// 指标聚合窗口：`GET /metrics` 取最近 N 条任务做统计
+const METRICS_WINDOW: i64 = 200;
 
 /// 单文件上传大小上限（20MB）
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -331,8 +351,25 @@ pub async fn download_models(
 
     let items = match tokio::task::spawn_blocking(move || download_each(&cfg, ids)).await {
         Ok(v) => v,
-        Err(e) => return ApiError::Internal(format!("下载线程异常：{e}")).into_response(),
+        Err(e) => {
+            let msg = format!("下载线程异常：{e}");
+            state.report_error("INTERNAL", "模型下载", &msg, None);
+            return ApiError::Internal(msg).into_response();
+        }
     };
+    // 失败项统一上报（结构化日志 + 落库），不阻断其余下载结果
+    for it in &items {
+        if it["ok"] == false {
+            let id = it["id"].as_str().unwrap_or("");
+            let msg = it["message"].as_str().unwrap_or("下载失败");
+            state.report_error(
+                "MODEL_MISSING",
+                "模型下载",
+                &format!("模型“{id}”下载失败：{msg}"),
+                None,
+            );
+        }
+    }
     Json(json!({ "items": items })).into_response()
 }
 
@@ -630,7 +667,8 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         };
         {
             let store = state.store.lock().unwrap();
-            if let Err(e) = store.update_task(task_id, "running", "开始处理", "[]", "[]", None)
+            if let Err(e) =
+                store.update_task(task_id, "running", "开始处理", "[]", "[]", None, None)
             {
                 tracing::error!("更新任务运行状态失败：{e}");
                 return;
@@ -699,16 +737,19 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                 photos_core::pipeline::limited_dimensions(w, h, state2.cfg.general.max_input_side);
             // 借出引擎（生产模式来自进程级池，复用已装载模型的引擎；用完自动归还）
             let mut lease = (state2.engine_factory)(w, h);
-            run_pipeline(&state2.cfg, lease.engine_mut(), &req)
+            // 分阶段耗时指标：失败时仍保留已记录阶段，供错误上报定位
+            let mut metrics = TaskMetrics::new();
+            let r = run_pipeline_with_metrics(&state2.cfg, lease.engine_mut(), &req, &mut metrics);
+            (r, metrics)
         })
         .await;
 
         let elapsed = started.elapsed().as_millis() as i64;
-        let outcome = match result {
-            Ok(Ok(r)) => {
+        let (outcome, metrics) = match result {
+            Ok((Ok(r), metrics)) => {
                 // 产物落盘（命名规约集中在 photos_core::output，与 CLI 一致）
                 let layout_spec = layout.as_deref().and_then(|id| state.cfg.layout.get(id));
-                match save_task_outputs(
+                let saved = match save_task_outputs(
                     &state.out_dir,
                     task_id,
                     &size,
@@ -725,36 +766,50 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                         r.warnings,
                     )),
                     Err(e) => Err(e.to_string()),
-                }
+                };
+                (saved, metrics)
             }
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(e) => Err(format!("任务执行异常：{e}")),
+            Ok((Err(e), metrics)) => (Err(e.to_string()), metrics),
+            Err(e) => (Err(format!("任务执行异常：{e}")), TaskMetrics::new()),
         };
+        // 失败阶段的定位：取最后一个已记录阶段，未记录任何阶段时归为「处理」
+        let failed_stage = metrics.last_stage().unwrap_or("处理").to_string();
+        let metrics_json = metrics.to_json();
 
-        let store = state.store.lock().unwrap();
-        match outcome {
-            Ok((outputs, warnings)) => {
-                let outputs_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "[]".into());
-                let warnings_json =
-                    serde_json::to_string(&warnings).unwrap_or_else(|_| "[]".into());
-                if let Err(e) = store.update_task(
-                    task_id,
-                    "succeeded",
-                    "处理完成",
-                    &outputs_json,
-                    &warnings_json,
-                    Some(elapsed),
-                ) {
-                    tracing::error!("更新任务成功状态失败：{e}");
+        {
+            let store = state.store.lock().unwrap();
+            match &outcome {
+                Ok((outputs, warnings)) => {
+                    let outputs_json =
+                        serde_json::to_string(outputs).unwrap_or_else(|_| "[]".into());
+                    let warnings_json =
+                        serde_json::to_string(warnings).unwrap_or_else(|_| "[]".into());
+                    if let Err(e) = store.update_task(
+                        task_id,
+                        "succeeded",
+                        "处理完成",
+                        &outputs_json,
+                        &warnings_json,
+                        Some(elapsed),
+                        Some(&metrics_json),
+                    ) {
+                        tracing::error!("更新任务成功状态失败：{e}");
+                    }
+                }
+                Err(msg) => {
+                    if let Err(e) =
+                        store.update_task(task_id, "failed", msg, "[]", "[]", Some(elapsed), None)
+                    {
+                        tracing::error!("更新任务失败状态出错：{e}");
+                    }
                 }
             }
-            Err(msg) => {
-                if let Err(e) =
-                    store.update_task(task_id, "failed", &msg, "[]", "[]", Some(elapsed))
-                {
-                    tracing::error!("更新任务失败状态出错：{e}");
-                }
-            }
+        }
+        match &outcome {
+            // 成功：输出分阶段耗时结构化日志
+            Ok(_) => photos_core::logging::log_metrics(task_id, &metrics),
+            // 失败：统一错误上报（结构化日志 + error_log 落库）
+            Err(msg) => state.report_error("INTERNAL", &failed_stage, msg, Some(task_id)),
         }
     });
 }
@@ -906,6 +961,12 @@ pub async fn get_task(
     // 提交参数（JSON 文本；历史库为空时返回 null）
     let params: serde_json::Value =
         serde_json::from_str(&record.params).unwrap_or(serde_json::Value::Null);
+    // 分阶段耗时指标（未采集时为空数组）
+    let metrics: Vec<serde_json::Value> = TaskMetrics::from_json(&record.metrics)
+        .stages
+        .into_iter()
+        .map(|s| json!({ "stage": s.stage, "ms": s.ms }))
+        .collect();
     Json(json!({
         "id": public_task_id(record.id),
         "status": record.status,
@@ -919,8 +980,93 @@ pub async fn get_task(
         "beauty": record.beauty,
         "dress": record.dress,
         "elapsed_ms": record.elapsed_ms,
+        "metrics": metrics,
         "created_at": record.created_at,
         "artifacts": artifacts,
+    }))
+    .into_response()
+}
+
+/// GET /metrics：任务统计、平均耗时、各阶段平均耗时与错误总数（可观测性面板数据源）
+pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
+    let store = state.store.lock().unwrap();
+    let counts = match store.count_by_status() {
+        Ok(c) => c,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let status_count = |s: &str| {
+        counts
+            .iter()
+            .find(|(k, _)| k == s)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
+    let (avg_ms, samples) = match store.elapsed_stats(METRICS_WINDOW) {
+        Ok(v) => v,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let stages = match store.metrics_aggregate(METRICS_WINDOW) {
+        Ok(v) => v,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let errors = match store.count_errors() {
+        Ok(n) => n,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    // 耗时统一保留一位小数，便于前端直接展示
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    Json(json!({
+        "tasks": {
+            "total": counts.iter().map(|(_, n)| *n).sum::<i64>(),
+            "queued": status_count("queued"),
+            "running": status_count("running"),
+            "succeeded": status_count("succeeded"),
+            "failed": status_count("failed"),
+        },
+        "elapsed_ms": { "avg": round1(avg_ms), "samples": samples },
+        "stages": stages
+            .iter()
+            .map(|s| json!({ "stage": s.stage, "avg_ms": round1(s.avg_ms), "samples": s.samples }))
+            .collect::<Vec<_>>(),
+        "errors": { "total": errors },
+    }))
+    .into_response()
+}
+
+/// GET /errors 查询参数（`limit` 钳制 1..=200）
+#[derive(Debug, Deserialize)]
+pub struct ErrorsQuery {
+    pub limit: Option<i64>,
+}
+
+/// GET /errors：最近错误上报列表（倒序）
+pub async fn list_errors(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ErrorsQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(20).clamp(1, 200);
+    let store = state.store.lock().unwrap();
+    let total = match store.count_errors() {
+        Ok(n) => n,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let items = match store.list_errors(limit) {
+        Ok(v) => v,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    Json(json!({
+        "total": total,
+        "items": items
+            .iter()
+            .map(|e| json!({
+                "id": e.id,
+                "created_at": e.created_at,
+                "code": e.code,
+                "stage": e.stage,
+                "message": e.message,
+                "task_id": e.task_id.map(public_task_id),
+            }))
+            .collect::<Vec<_>>(),
     }))
     .into_response()
 }
@@ -964,14 +1110,20 @@ pub async fn delete_task(
         }
     };
     let deleted_outputs = purge_task_files(&state, &record);
-    let store = state.store.lock().unwrap();
-    match store.delete_task(id) {
+    let result = {
+        let store = state.store.lock().unwrap();
+        store.delete_task(id)
+    };
+    match result {
         Ok(_) => Json(json!({
             "id": public_task_id(id),
             "deleted_outputs": deleted_outputs,
         }))
         .into_response(),
-        Err(e) => ApiError::from(e).into_response(),
+        Err(e) => {
+            state.report_error("INTERNAL", "删除任务", &e.to_string(), Some(id));
+            ApiError::from(e).into_response()
+        }
     }
 }
 
@@ -987,10 +1139,16 @@ pub async fn clear_tasks(State(state): State<Arc<AppState>>) -> Response {
     for r in &records {
         purge_task_files(&state, r);
     }
-    let store = state.store.lock().unwrap();
-    match store.clear_tasks() {
+    let result = {
+        let store = state.store.lock().unwrap();
+        store.clear_tasks()
+    };
+    match result {
         Ok(n) => Json(json!({ "deleted": n })).into_response(),
-        Err(e) => ApiError::from(e).into_response(),
+        Err(e) => {
+            state.report_error("INTERNAL", "清空历史", &e.to_string(), None);
+            ApiError::from(e).into_response()
+        }
     }
 }
 

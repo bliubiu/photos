@@ -20,6 +20,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::config::LogLevel;
 use crate::error::{CoreError, CoreResult};
+use crate::metrics::TaskMetrics;
 
 /// 初始化全局日志：文件（日轮转）+ 终端双写，返回文件写入器的 worker guard（main 退出时刷盘）
 pub fn init_logging(log_dir: &Path, level: LogLevel) -> CoreResult<WorkerGuard> {
@@ -178,30 +179,86 @@ where
 
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        let message = redact(visitor.message.as_deref().unwrap_or(""));
-        write!(writer, "{message}")?;
-        if !visitor.fields.is_empty() {
-            write!(writer, " {}", visitor.fields.join(" "))?;
-        }
+        let message = visitor.message.as_deref().unwrap_or("");
+        let text = if visitor.fields.is_empty() {
+            message.to_string()
+        } else {
+            format!("{message} {}", visitor.fields.join(" "))
+        };
+        // 整行（含结构化字段值）统一脱敏
+        write!(writer, "{}", redact(&text))?;
         writeln!(writer)
     }
 }
 
 /// 事件字段收集器（提取 message 与其余字段）
+///
+/// 按字段类型分别实现 `Visit`：字符串不加引号、数值/布尔原样输出，
+/// 便于结构化日志可读与机器解析（`record_debug` 仅作为兜底）。
 #[derive(Default)]
 struct MessageVisitor {
     message: Option<String>,
     fields: Vec<String>,
 }
 
-impl Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+impl MessageVisitor {
+    /// 记录一个字段（`message` 单独存放，其余按 `键=值` 追加）
+    fn push(&mut self, field: &Field, rendered: String) {
         if field.name() == "message" {
-            self.message = Some(format!("{value:?}"));
+            self.message = Some(rendered);
         } else {
-            self.fields.push(format!("{}={value:?}", field.name()));
+            self.fields.push(format!("{}={rendered}", field.name()));
         }
     }
+}
+
+impl Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.push(field, format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.push(field, value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.push(field, value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.push(field, value.to_string());
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.push(field, value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.push(field, value.to_string());
+    }
+}
+
+/// 记录任务分阶段耗时（结构化字段 + 中文摘要；无指标时不输出）
+pub fn log_metrics(task_id: i64, metrics: &TaskMetrics) {
+    if metrics.is_empty() {
+        return;
+    }
+    tracing::info!(
+        任务 = task_id,
+        总耗时毫秒 = metrics.total_ms().round() as i64,
+        分阶段耗时 = metrics.summary(),
+        "任务分阶段耗时统计"
+    );
+}
+
+/// 记录结构化错误日志（错误码 / 阶段 / 任务 id；任务无关时 task_id 为 None）
+pub fn log_error(code: &str, stage: &str, message: &str, task_id: Option<i64>) {
+    tracing::error!(
+        错误码 = code,
+        阶段 = stage,
+        任务 = ?task_id,
+        "{message}"
+    );
 }
 
 /// 线程短标识：`ThreadId(12)` → `T12`
@@ -370,5 +427,64 @@ mod tests {
     fn 普通文本不受影响() {
         let s = "处理完成，输出到 data/out/task_1_white.jpg";
         assert_eq!(redact(s), s);
+    }
+
+    /// 测试用内存写入器（收集日志文本）
+    #[derive(Clone, Default)]
+    struct TestBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct TestSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TestSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for TestBuf {
+        type Writer = TestSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestSink(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn 结构化字段按类型输出并脱敏() {
+        let buf = TestBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .event_format(ChineseLogFormat)
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut metrics = TaskMetrics::new();
+            metrics.add("读图", 1.25);
+            log_metrics(7, &metrics);
+            log_error(
+                "INVALID_PARAMS",
+                "人脸检测",
+                "处理失败：手机号 13812345678 无效",
+                Some(7),
+            );
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        // 字符串字段不加引号、数值原样输出
+        assert!(
+            text.contains("任务分阶段耗时统计 任务=7 总耗时毫秒=1 分阶段耗时=读图 1.2ms"),
+            "实际：{text}"
+        );
+        assert!(
+            text.contains("错误码=INVALID_PARAMS 阶段=人脸检测"),
+            "实际：{text}"
+        );
+        // 结构化字段值同样脱敏
+        assert!(text.contains("138********"), "实际：{text}");
+        assert!(!text.contains("13812345678"), "日志不得出现完整手机号");
     }
 }

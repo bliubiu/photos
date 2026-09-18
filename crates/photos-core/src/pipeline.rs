@@ -11,6 +11,7 @@ use image::{GrayImage, Luma, RgbImage, RgbaImage};
 use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
+use crate::metrics::{StageTimer, TaskMetrics};
 use crate::preprocess::{LetterBox, build_input, probability_map};
 use crate::vision::affine::{rotate_image_same, rotation_affine};
 use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, feature_protect_mask};
@@ -133,6 +134,8 @@ pub struct PipelineResult {
     pub decision: RotationDecision,
     /// 处理告警（降级原因等）
     pub warnings: Vec<String>,
+    /// 分阶段耗时指标（可观测性；未埋点阶段不记录）
+    pub metrics: TaskMetrics,
 }
 
 /// 按最大边长等比约束尺寸（`max_side = 0` 表示不限制）；供流水线缩放与调用方构造引擎时对齐
@@ -162,6 +165,18 @@ pub fn run_pipeline(
     engine: &mut dyn InferenceEngine,
     req: &ProcessRequest,
 ) -> CoreResult<PipelineResult> {
+    let mut metrics = TaskMetrics::new();
+    run_pipeline_with_metrics(cfg, engine, req, &mut metrics)
+}
+
+/// 同 [`run_pipeline`]，并额外写入分阶段耗时指标（调用方持有 `metrics` 容器，
+/// 失败时仍可读取已记录阶段用于错误上报）
+pub fn run_pipeline_with_metrics(
+    cfg: &Config,
+    engine: &mut dyn InferenceEngine,
+    req: &ProcessRequest,
+    metrics: &mut TaskMetrics,
+) -> CoreResult<PipelineResult> {
     // 1. 解析模式/尺寸/底色列表，并校验该模式模型就绪（缺失给出中文指引）
     // 尺寸与底色支持自定义形式（`px:295x413` / `mm:35x45@300` / `#RRGGBB`），统一归一化为
     // 文件名安全的 id 供落库与产物命名
@@ -178,6 +193,7 @@ pub fn run_pipeline(
     ensure_models_ready(cfg, engine, &req.mode)?;
 
     // 2. 读图（统一 RGB）；超过最大边长时先等比预缩放，限制峰值内存与推理耗时
+    let read_timer = StageTimer::start("读图");
     let img = image::open(&req.input)
         .map_err(|e| CoreError::Image(format!("读取图片 {} 失败：{e}", req.input.display())))?
         .to_rgb8();
@@ -186,16 +202,27 @@ pub fn run_pipeline(
     if w == 0 || h == 0 {
         return Err(CoreError::Image("图片尺寸为零".into()));
     }
+    read_timer.stop(metrics);
 
     // 3. 推理：RetinaFace 按套件单模型；MTCNN 为完整三级联（p/r/on）
     use crate::vision::mtcnn::cascade_model_ids;
+    // 3.1 人体关键点（MoveNet）：预处理 + 推理 + 解码
+    let kp_timer = StageTimer::start("人体关键点");
     let kp_spec = cfg.model_spec(&suite.keypoint)?;
     let kp_in = build_input(&img, &kp_spec.input_dims, false)?;
     let kp_outs = engine.run(&suite.keypoint, &kp_in.tensor)?;
+    let kps = decode_movenet(&kp_outs[0], w, h)?;
+    kp_timer.stop(metrics);
+    // 3.2 人像抠图：预处理 + 推理 + 概率掩膜
+    let mat_timer = StageTimer::start("人像抠图");
     let mat_spec = cfg.model_spec(&suite.matting)?;
     let mat_in = build_input(&img, &mat_spec.input_dims, false)?;
     let mat_outs = engine.run(&suite.matting, &mat_in.tensor)?;
+    let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
+    mat_timer.stop(metrics);
 
+    // 3.3 人脸检测（RetinaFace 单模型 / MTCNN 三级联）
+    let face_timer = StageTimer::start("人脸检测");
     let faces = if suite.face == CASCADE_FACE_ID {
         detect_mtcnn_cascade(engine, &img)?
     } else {
@@ -235,10 +262,10 @@ pub fn run_pipeline(
     let face = faces
         .first()
         .ok_or_else(|| CoreError::Image("未检测到人脸".into()))?;
-    let kps = decode_movenet(&kp_outs[0], w, h)?;
-    let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
+    face_timer.stop(metrics);
 
     // 5. 姿态角度求解（0.6 头部 + 0.4 肩线；髋/膝可用时改用 0.5/0.3/0.2 三路，缺失降级并告警）
+    let pose_timer = StageTimer::start("姿态求解");
     let mut warnings = Vec::new();
     let measured = fused_measured(&kps, &mut warnings);
     let decision = decide_rotation(measured, req.rotate)?;
@@ -248,14 +275,18 @@ pub fn run_pipeline(
     if let Some(warn) = side_face_warning(face) {
         warnings.push(warn);
     }
+    pose_timer.stop(metrics);
 
     // 6. 同步几何纠偏（同一仿射矩阵变换原图与 mask）
+    let rotate_timer = StageTimer::start("几何纠偏");
     let (rot_img, rot_mask) = rotate_image_same(&img, &mask, decision.correction())?;
+    rotate_timer.stop(metrics);
 
     // 6.5 换装（可选）：人像解析 → 衣服 mask → 服装贴合（作用于旋转后原图，美颜之前）。
     // 解析模型独立于三模式套件，按需惰性装载（失败给出中文指引）。
     let dressed = match &req.dress {
         Some(d) if d.enabled => {
+            let dress_timer = StageTimer::start("换装");
             engine.load(cfg, dressing::PARSING_MODEL_ID, suite.execution_provider)?;
             let p_spec = cfg.model_spec(dressing::PARSING_MODEL_ID)?;
             let p_in = build_input(&rot_img, &p_spec.input_dims, false)?;
@@ -266,7 +297,7 @@ pub fn run_pipeline(
                 rot_img.height(),
                 p_in.letterbox.as_ref(),
             )?;
-            if let Some(gs) = &d.garments {
+            let out = if let Some(gs) = &d.garments {
                 // 多图分部位贴合：各部位按自身类别独立贴合，未提供部位自动跳过
                 let mut images: Vec<RgbImage> = Vec::new();
                 let mut specs: Vec<(&[u8], usize)> = Vec::new();
@@ -322,7 +353,9 @@ pub fn run_pipeline(
                     None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
                 };
                 dressing::fit_garment(&rot_img, &garment, &clothes)?
-            }
+            };
+            dress_timer.stop(metrics);
+            out
         }
         _ => rot_img.clone(),
     };
@@ -331,8 +364,9 @@ pub fn run_pipeline(
     // 美颜不改变 mask 与裁剪框
     let beautified = match &req.beauty {
         Some(p) if p.enabled => {
+            let beauty_timer = StageTimer::start("美颜");
             let protect = beauty_protect_mask(face, w, h, decision.correction());
-            apply_beauty_protected(
+            let out = apply_beauty_protected(
                 &dressed,
                 &BeautyConfig {
                     enabled: true,
@@ -341,13 +375,16 @@ pub fn run_pipeline(
                     whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
                 },
                 Some(&protect),
-            )
+            );
+            beauty_timer.stop(metrics);
+            out
         }
         _ => dressed,
     };
 
     // 7. 换底色（mask 羽化 + 边缘去色边后逐像素 alpha 混合；廉价操作只做一次检测/抠图/纠偏）
     // 7.1 裁剪框与底色无关，先算一次
+    let bg_timer = StageTimer::start("换底裁切");
     let crop = compute_crop(
         &face.face,
         w,
@@ -405,8 +442,10 @@ pub fn run_pipeline(
     } else {
         None
     };
+    bg_timer.stop(metrics);
 
     // 8. 排版相纸（可选）：以首个底色证件照按相纸规格铺版
+    let layout_timer = StageTimer::start("排版");
     let layout_img = match &req.layout {
         Some(layout_id) => {
             let spec = cfg.layout.get(layout_id).ok_or_else(|| {
@@ -423,6 +462,10 @@ pub fn run_pipeline(
         }
         None => None,
     };
+    // 排版为可选阶段：未指定相纸时不记录该阶段耗时
+    if req.layout.is_some() {
+        layout_timer.stop(metrics);
+    }
 
     Ok(PipelineResult {
         photos,
@@ -431,6 +474,7 @@ pub fn run_pipeline(
         transparent,
         decision,
         warnings,
+        metrics: metrics.clone(),
     })
 }
 
@@ -748,6 +792,50 @@ mod tests {
         // 双眼/双肩水平 → 融合角 0 → Auto(0)，无告警
         assert_eq!(result.decision, RotationDecision::Auto(0.0));
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn 分阶段耗时指标随流水线采集() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+            rotate: None,
+        };
+        let mut metrics = TaskMetrics::new();
+        let result = run_pipeline_with_metrics(&cfg, &mut engine, &req, &mut metrics).unwrap();
+        // 必经阶段全部记录，且与结果内指标一致
+        let stages: Vec<&str> = metrics.stages.iter().map(|s| s.stage.as_str()).collect();
+        for expect in [
+            "读图",
+            "人体关键点",
+            "人像抠图",
+            "人脸检测",
+            "姿态求解",
+            "几何纠偏",
+            "换底裁切",
+        ] {
+            assert!(stages.contains(&expect), "缺少阶段「{expect}」：{stages:?}");
+        }
+        // 可选阶段未启用时不记录
+        assert!(!stages.contains(&"排版"), "未指定相纸不应记录排版阶段");
+        assert!(!stages.contains(&"换装"), "未启用换装不应记录换装阶段");
+        assert!(!stages.contains(&"美颜"), "未启用美颜不应记录美颜阶段");
+        assert!(metrics.total_ms() > 0.0, "总耗时应为正");
+        assert!(result.metrics.summary().contains("人脸检测"));
     }
 
     #[test]

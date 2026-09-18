@@ -97,6 +97,16 @@ export default function PreviewPanel() {
         </div>
       )}
 
+      {(detail.metrics ?? []).length > 0 && (
+        <div className="mb-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-xs text-gray-500">
+          {(detail.metrics ?? []).map((m) => (
+            <span key={m.stage}>
+              {m.stage} <span className="tabular-nums text-gray-700">{m.ms.toFixed(1)}ms</span>
+            </span>
+          ))}
+        </div>
+      )}
+
       {detail.artifacts.length === 0 && (
         <div className="py-12 text-center text-sm text-gray-400">暂无产物</div>
       )}

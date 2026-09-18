@@ -1184,6 +1184,94 @@ async fn 任务详情含提交参数与原图可访问() {
     assert_eq!(json["code"], "TASK_NOT_FOUND");
 }
 
+#[tokio::test]
+async fn 任务详情含分阶段耗时指标() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (_, detail) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"]}"#,
+    )
+    .await;
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    let stages = detail["metrics"].as_array().unwrap();
+    let names: Vec<&str> = stages
+        .iter()
+        .map(|s| s["stage"].as_str().unwrap())
+        .collect();
+    for expect in [
+        "读图",
+        "人体关键点",
+        "人像抠图",
+        "人脸检测",
+        "姿态求解",
+        "几何纠偏",
+        "换底裁切",
+    ] {
+        assert!(names.contains(&expect), "缺少阶段 {expect}：{names:?}");
+    }
+    assert!(stages.iter().all(|s| s["ms"].as_f64().unwrap() >= 0.0));
+}
+
+#[tokio::test]
+async fn 指标聚合与错误上报端点() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 成功任务计入指标聚合
+    let (_, ok_detail) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"]}"#,
+    )
+    .await;
+    assert_eq!(ok_detail["status"], "succeeded");
+    // 背景图不存在 → 任务失败并上报错误
+    let (_, failed) = create_custom_and_wait(
+        &app,
+        r#"{"mode":"balanced","size":"one_inch","backgrounds":["white"],"bg_image":"no-such-bg.png"}"#,
+    )
+    .await;
+    assert_eq!(failed["status"], "failed");
+    assert!(
+        failed["message"].as_str().unwrap().contains("背景图"),
+        "实际：{}",
+        failed["message"]
+    );
+
+    // GET /metrics：任务统计 + 平均耗时 + 各阶段平均耗时 + 错误总数
+    let (status, metrics) = send(&app, get_request("/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metrics["tasks"]["succeeded"], 1);
+    assert_eq!(metrics["tasks"]["failed"], 1);
+    assert!(metrics["elapsed_ms"]["avg"].as_f64().unwrap() >= 0.0);
+    assert_eq!(metrics["elapsed_ms"]["samples"], 1);
+    let agg = metrics["stages"].as_array().unwrap();
+    assert!(
+        agg.iter()
+            .any(|s| s["stage"] == "人脸检测" && s["samples"] == 1),
+        "实际：{agg:?}"
+    );
+    assert_eq!(metrics["errors"]["total"], 1);
+
+    // GET /errors：失败任务的结构化错误记录
+    let (status, errors) = send(&app, get_request("/errors")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(errors["total"], 1);
+    let item = &errors["items"][0];
+    assert_eq!(item["code"], "INTERNAL");
+    // 失败阶段取最后一个已完成阶段（读取背景图失败发生在「换底裁切」结束前）
+    assert_eq!(item["stage"], "几何纠偏");
+    assert!(item["message"].as_str().unwrap().contains("背景图"));
+    assert_eq!(item["task_id"], failed["id"]);
+
+    // limit 越界钳制（0 → 默认 20，不报错）
+    let (status, _) = send(&app, get_request("/errors?limit=0")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// 测试用引擎工厂（demo 回放，不入池）
 fn test_factory() -> EngineFactory {
     Arc::new(|w, h| {

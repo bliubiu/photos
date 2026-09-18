@@ -58,6 +58,12 @@ export interface TaskParamsSnapshot {
   pdf?: boolean | null;
 }
 
+/** 单阶段耗时（任务详情 metrics 字段） */
+export interface StageMetric {
+  stage: string;
+  ms: number;
+}
+
 export interface TaskDetail {
   id: string;
   status: "queued" | "running" | "succeeded" | "failed";
@@ -69,6 +75,8 @@ export interface TaskDetail {
   rotate: number | null;
   params: TaskParamsSnapshot | null;
   elapsed_ms: number | null;
+  /** 分阶段耗时指标（未采集到时为空数组） */
+  metrics: StageMetric[];
   created_at: string;
   artifacts: Artifact[];
 }
@@ -240,6 +248,32 @@ export async function submitTask(file: File, params: SubmitParams): Promise<stri
     body: form,
   });
   return created.id;
+}
+
+/** 可观测性：任务统计 + 平均耗时 + 各阶段平均耗时 + 错误总数（GET /metrics） */
+export interface MetricsSummary {
+  tasks: { total: number; queued: number; running: number; succeeded: number; failed: number };
+  elapsed_ms: { avg: number; samples: number };
+  stages: { stage: string; avg_ms: number; samples: number }[];
+  errors: { total: number };
+}
+
+export async function fetchMetrics(): Promise<MetricsSummary> {
+  return request<MetricsSummary>("/metrics");
+}
+
+/** 错误上报记录（GET /errors，倒序） */
+export interface ErrorItem {
+  id: number;
+  created_at: string;
+  code: string;
+  stage: string;
+  message: string;
+  task_id: string | null;
+}
+
+export async function fetchErrors(limit = 20): Promise<{ total: number; items: ErrorItem[] }> {
+  return request<{ total: number; items: ErrorItem[] }>(`/errors?limit=${limit}`);
 }
 
 /** 产物下载地址（同源，直接可用于 <a> 或 <img>） */

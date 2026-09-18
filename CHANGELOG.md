@@ -2,6 +2,21 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.15] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【可观测性·指标】**分阶段耗时采集**：新增 `photos-core/src/metrics.rs`（`StageTimer` / `TaskMetrics` / `StageAggregate` / `aggregate`），`pipeline.rs` 新增 `run_pipeline_with_metrics`（原 `run_pipeline` 保留为薄委托，调用方零改动），在**读图 / 人体关键点 / 人像抠图 / 人脸检测 / 姿态求解 / 几何纠偏 / 换装（可选）/ 美颜（可选）/ 换底裁切 / 排版（可选）** 十处埋点；未执行的可选阶段不记录。指标随 `task_history.metrics` 列落库（v4 幂等迁移，旧库自动补列），`GET /tasks/{id}` 响应新增 `metrics` 数组，CLI 单图成功打印「分阶段耗时：读图 12.0ms · 人脸检测 88.3ms」
+- 【可观测性·指标】**`GET /metrics` 聚合端点**：返回任务状态计数（总数/排队/处理中/已完成/失败）、平均总耗时（含样本数）、各阶段平均耗时（按阶段名升序，仅统计 `succeeded` 且已落库指标的任务）与错误总数；统计窗口为最近 200 条任务（`METRICS_WINDOW`），数据源为 sqlite 聚合查询 `count_by_status` / `elapsed_stats` / `metrics_aggregate`，无外部依赖（未引入 Prometheus 等）
+- 【可观测性·日志】**结构化日志增强**：`ChineseLogFormat` 改为**整行统一脱敏**（含结构化字段），`MessageVisitor` 补全类型化 `Visit`（`record_str` / `record_i64` / `record_u64` / `record_f64` / `record_bool`）并按类型渲染字段；新增 `photos_core::logging::log_metrics(task_id, metrics)` 与 `log_error(code, stage, message, task_id)` 两个中文结构化辅助函数
+- 【可观测性·错误】**错误上报**：新增 `error_log` 表与 `Store::record_error` / `list_errors` / `count_errors`；`AppState::report_error` 同时写结构化日志与落库（写库失败仅告警，**不阻断主流程**，并收窄存储锁作用域避免自锁）。覆盖任务失败（错误码 `INTERNAL` + 失败阶段取最后一个已完成阶段）、模型下载失败（`MODEL_MISSING`）、删除/清空历史异常。新增 `GET /errors`（倒序，`limit` 钳制 1..=200，默认 20，`task_id` 回显为 `task_N`）
+- 【前端·可观测性】新增 `components/ObservabilityPanel.tsx`（任务统计、平均总耗时、各阶段平均耗时**纯 CSS 条形**、最近错误列表，可手动刷新），挂载于预览区下方；预览面板顶部展示当前任务的**分阶段耗时**；`api.ts` 新增 `StageMetric` / `MetricsSummary` / `ErrorItem` 类型与 `fetchMetrics()` / `fetchErrors()`；**未引入 ECharts**
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：端点总表补充 `/metrics` / `/errors`，新增 §3.12 / §3.13 契约小节，`GET /tasks/{id}` 响应示例补 `metrics` 字段
+- `docs/02-架构设计.md`：存储设计补 `task_history.metrics` 列与 `error_log` 表，流水线小节补可观测性实现归属，WebUI 结构补可观测性面板
+- `docs/06-运行使用手册.md`：CLI `process` 补分阶段耗时输出与错误落库说明，WebUI 补「运行指标」面板，API 表与示例补 `/metrics` / `/errors`
+- `docs/07-能力增强.md`：§三.4 可观测性标记为已落地（2026.09.18.15）
+
 ## [2026.09.18.14] - 0.1.0
 
 ### ✨ New Features 新增功能

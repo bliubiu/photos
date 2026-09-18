@@ -69,6 +69,8 @@
 | GET | `/models` | 模型注册表与校验状态 |
 | POST | `/models/download` | 一键下载指定（缺省为全部缺失）模型 |
 | GET | `/config` | 驱动前端下拉的选项集 |
+| GET | `/metrics` | 可观测性指标：任务统计、平均耗时、各阶段平均耗时、错误总数 |
+| GET | `/errors` | 可观测性错误上报记录（倒序，`limit` 钳制 1..=200，默认 20） |
 | GET | `/ping` | 健康检查 |
 
 ## 3. 详细契约
@@ -157,6 +159,15 @@
   "beauty": "{ \"enabled\": true, \"skin_smooth\": 0.8, \"brighten\": 0.2, \"whiten\": null }",
   "dress": "{ \"enabled\": true, \"garment_path\": null, \"style\": \"suit_navy\", \"garments\": { \"top\": \"/data/demo_top.jpg\", \"bottom\": \"/data/demo_bottom.jpg\", \"shoes\": null } }",
   "elapsed_ms": 2345,
+  "metrics": [
+    { "stage": "读图", "ms": 12.3 },
+    { "stage": "人体关键点", "ms": 88.4 },
+    { "stage": "人像抠图", "ms": 420.1 },
+    { "stage": "人脸检测", "ms": 96.7 },
+    { "stage": "姿态求解", "ms": 0.4 },
+    { "stage": "几何纠偏", "ms": 18.9 },
+    { "stage": "换底裁切", "ms": 240.5 }
+  ],
   "created_at": "2026-09-16 12:00:00.000",
   "artifacts": [
     {
@@ -173,7 +184,7 @@
 }
 ```
 
-`mode`/`size`/`backgrounds`/`rotate` 为受理时归一化后的落库值；`params` 为**提交参数快照**（与受理时一致，尺寸/底色为归一化 id，可原样回传复用），历史库无该列（旧数据）时为 `null`。
+`mode`/`size`/`backgrounds`/`rotate` 为受理时归一化后的落库值；`params` 为**提交参数快照**（与受理时一致，尺寸/底色为归一化 id，可原样回传复用），历史库无该列（旧数据）时为 `null`；`metrics` 为分阶段耗时（未采集到或旧数据时为空数组 `[]`，失败任务只含已完成的阶段）。
 
 | 情况 | 行为 |
 |---|---|
@@ -335,6 +346,53 @@
 ```json
 { "status": "ok" }
 ```
+
+### 3.12 GET `/metrics`
+
+可观测性指标聚合（取最近 200 条已完成任务统计；耗时为毫秒，保留一位小数）。
+
+```json
+{
+  "tasks": { "total": 12, "queued": 0, "running": 1, "succeeded": 10, "failed": 1 },
+  "elapsed_ms": { "avg": 2345.6, "samples": 10 },
+  "stages": [
+    { "stage": "人脸检测", "avg_ms": 96.7, "samples": 10 },
+    { "stage": "人像抠图", "avg_ms": 420.1, "samples": 10 }
+  ],
+  "errors": { "total": 1 }
+}
+```
+
+- `elapsed_ms.samples` 为参与均值计算的已完成任务数（无数据时为 0，`avg` 为 0）。
+- `stages` 仅统计 `succeeded` 且已落库指标的任务，按阶段名升序。
+- 无外部依赖（无 Prometheus 等），数据源为 sqlite `task_history` 与 `error_log`。
+
+### 3.13 GET `/errors`
+
+错误上报记录（倒序）。
+
+| query | 含义 |
+|---|---|
+| `limit` | 返回条数，钳制 1..=200，默认 20 |
+
+```json
+{
+  "total": 1,
+  "items": [
+    {
+      "id": 1,
+      "created_at": "2026-09-18 10:20:30.000",
+      "code": "INTERNAL",
+      "stage": "换底裁切",
+      "message": "读取背景图 no-such-bg.png 失败：No such file or directory",
+      "task_id": "task_17c0f0a2"
+    }
+  ]
+}
+```
+
+- `code` 沿用错误码枚举（如 `INTERNAL`、`MODEL_MISSING`）；`stage` 为失败时最后完成的流水线阶段（非流水线场景为业务动作名，如「模型下载」「删除任务」）。
+- `task_id` 无关联任务时为 `null`。
 
 ## 4. 实现约束
 

@@ -6,6 +6,7 @@ import BatchPanel from "./components/BatchPanel";
 import PreviewPanel from "./components/PreviewPanel";
 import LivePreviewPanel from "./components/LivePreviewPanel";
 import HistoryList from "./components/HistoryList";
+import ObservabilityPanel from "./components/ObservabilityPanel";
 
 export default function App() {
   const { init, error } = useStore();
@@ -41,6 +42,7 @@ export default function App() {
         <section className="lg:col-span-2 space-y-6">
           <PreviewPanel />
           <LivePreviewPanel />
+          <ObservabilityPanel />
         </section>
       </main>
 

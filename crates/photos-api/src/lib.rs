@@ -1,10 +1,10 @@
 //! photos-api：Axum 路由层（M3 实现），挂载 photos-core。
 //!
 //! 契约：docs/05-API契约.md。服务只绑定回环地址（默认 127.0.0.1 随机端口），
-//! 提供 11 个端点（POST /tasks、GET /tasks、DELETE /tasks、GET /tasks/{id}、
+//! 提供 13 个端点（POST /tasks、GET /tasks、DELETE /tasks、GET /tasks/{id}、
 //! DELETE /tasks/{id}、GET /tasks/{id}/output、GET /tasks/{id}/input、
-//! GET /models、POST /models/download、GET /config、GET /ping），
-//! 任务状态机 queued → running → succeeded | failed。
+//! GET /models、POST /models/download、GET /config、GET /ping、
+//! GET /metrics、GET /errors），任务状态机 queued → running → succeeded | failed。
 
 pub mod artifact;
 pub mod engine_pool;
@@ -67,6 +67,8 @@ pub fn router_with_frontend(
         )
         .route("/tasks/{id}/output", get(handlers::task_output))
         .route("/tasks/{id}/input", get(handlers::task_input))
+        .route("/metrics", get(handlers::get_metrics))
+        .route("/errors", get(handlers::list_errors))
         .with_state(state);
     if let Some(dir) = frontend {
         app.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true))

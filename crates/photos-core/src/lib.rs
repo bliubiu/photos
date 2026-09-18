@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod inference;
 pub mod logging;
+pub mod metrics;
 pub mod model;
 pub mod output;
 pub mod pipeline;
