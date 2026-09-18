@@ -384,6 +384,164 @@ impl Config {
             ))
         })
     }
+
+    /// 解析尺寸标识：内置 `[sizes.<id>]`，或自定义形式
+    ///
+    /// - `px:宽x高`：直接给定像素，如 `px:295x413`（DPI 取 300）
+    /// - `mm:宽x高@DPI`：物理尺寸 + 分辨率，如 `mm:35x45@300`
+    ///
+    /// 返回（归一化 id, 规格）；自定义 id 形如 `px_295x413` / `mm_35x45_300`（文件名安全）
+    pub fn resolve_size(&self, id: &str) -> CoreResult<(String, SizeSpec)> {
+        if let Some(spec) = self.sizes.get(id) {
+            return Ok((id.to_string(), spec.clone()));
+        }
+        if let Some(found) = parse_custom_size(id) {
+            return Ok(found);
+        }
+        Err(CoreError::ConfigValidate(format!(
+            "未知尺寸“{id}”，可选：{}；也可自定义 `px:宽x高` 或 `mm:宽x高@DPI`",
+            self.sizes.keys().cloned().collect::<Vec<_>>().join("、")
+        )))
+    }
+
+    /// 解析底色标识：内置 `[backgrounds.<id>]`，或自定义形式 `#RRGGBB` / `rgb:R,G,B`
+    ///
+    /// 返回（归一化 id, 规格）；自定义 id 形如 `rgb-ff0000`（文件名安全，且不含下划线——
+    /// 产物命名按末段下划线解析底色标识）
+    pub fn resolve_background(&self, id: &str) -> CoreResult<(String, BackgroundSpec)> {
+        if let Some(spec) = self.backgrounds.get(id) {
+            return Ok((id.to_string(), spec.clone()));
+        }
+        if let Some(rgb) = parse_custom_rgb(id) {
+            let hex = format!("{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+            return Ok((
+                format!("rgb-{hex}"),
+                BackgroundSpec {
+                    name: format!("自定义 #{}", hex.to_uppercase()),
+                    rgb,
+                },
+            ));
+        }
+        Err(CoreError::ConfigValidate(format!(
+            "未知底色“{id}”，可选：{}；也可自定义 `#RRGGBB` 或 `rgb:R,G,B`",
+            self.backgrounds
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、")
+        )))
+    }
+}
+
+/// 解析自定义底色：`#RRGGBB`（含归一化 `rgb-ff0000`）或 `rgb:R,G,B`（分量 0-255）
+fn parse_custom_rgb(raw: &str) -> Option<[u8; 3]> {
+    let s = raw.trim();
+    if let Some(hex) = s.strip_prefix('#').or_else(|| s.strip_prefix("rgb-")) {
+        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        return Some([
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+        ]);
+    }
+    let rest = s.strip_prefix("rgb:")?;
+    let parts = rest
+        .split(',')
+        .map(|p| p.trim().parse::<u8>().ok())
+        .collect::<Option<Vec<u8>>>()?;
+    match parts.as_slice() {
+        [r, g, b] => Some([*r, *g, *b]),
+        _ => None,
+    }
+}
+
+/// 解析自定义尺寸 →（归一化 id, 规格）；同时接受前缀形式与归一化 id（解析幂等）：
+/// - `px:宽x高` / `px_宽x高`
+/// - `mm:宽x高@DPI` / `mm_宽x高_DPI`
+fn parse_custom_size(raw: &str) -> Option<(String, SizeSpec)> {
+    /// 像素边长上限（避免超大画布耗尽内存）
+    const MAX_PX: u32 = 10000;
+    /// DPI 取值区间
+    const MIN_DPI: u32 = 72;
+    const MAX_DPI: u32 = 2400;
+    /// `px:` 形式的默认 DPI（用于排版换算）
+    const DEFAULT_DPI: u32 = 300;
+
+    let s = raw.trim().replace(['×', 'X'], "x");
+    let (is_px, body) = if let Some(b) = s.strip_prefix("px:").or_else(|| s.strip_prefix("px_")) {
+        (true, b)
+    } else if let Some(b) = s.strip_prefix("mm:").or_else(|| s.strip_prefix("mm_")) {
+        (false, b)
+    } else {
+        return None;
+    };
+
+    if is_px {
+        let (w, h) = split_dims(body)?;
+        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+        if w == 0 || h == 0 || w > MAX_PX || h > MAX_PX {
+            return None;
+        }
+        return Some((
+            format!("px_{w}x{h}"),
+            SizeSpec {
+                name: format!("自定义 {w}×{h}px"),
+                width_mm: w as f64 / DEFAULT_DPI as f64 * 25.4,
+                height_mm: h as f64 / DEFAULT_DPI as f64 * 25.4,
+                dpi: DEFAULT_DPI,
+                width_px: w,
+                height_px: h,
+            },
+        ));
+    }
+
+    // `mm:35x45@300`（用户输入）或 `mm_35x45_300`（归一化 id，DPI 为末尾下划线段）
+    let (dims, dpi_txt) = match body.split_once('@') {
+        Some(parts) => parts,
+        None => body.rsplit_once('_')?,
+    };
+    let (w, h) = split_dims(dims)?;
+    let (w, h) = (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?);
+    let dpi = dpi_txt.parse::<u32>().ok()?;
+    if !(w > 0.0 && h > 0.0 && w <= 1000.0 && h <= 1000.0) {
+        return None;
+    }
+    if !(MIN_DPI..=MAX_DPI).contains(&dpi) {
+        return None;
+    }
+    let to_px = |mm: f64| (mm / 25.4 * dpi as f64).round() as u32;
+    let (w_px, h_px) = (to_px(w), to_px(h));
+    if w_px == 0 || h_px == 0 || w_px > MAX_PX || h_px > MAX_PX {
+        return None;
+    }
+    Some((
+        format!("mm_{}x{}_{dpi}", trim_num(w), trim_num(h)),
+        SizeSpec {
+            name: format!("自定义 {}×{}mm @{dpi}dpi", trim_num(w), trim_num(h)),
+            width_mm: w,
+            height_mm: h,
+            dpi,
+            width_px: w_px,
+            height_px: h_px,
+        },
+    ))
+}
+
+/// 按 `x` 拆分宽高文本
+fn split_dims(s: &str) -> Option<(&str, &str)> {
+    let (a, b) = s.split_once('x')?;
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// 数值转紧凑文本（`35.00` → `35`，`35.50` → `35.5`）
+fn trim_num(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// 默认配置（与 docs/examples/application.toml 保持一致）
@@ -1022,6 +1180,74 @@ mod tests {
         assert_eq!(cfg.size("small_two_inch").unwrap().height_px, 531);
         assert_eq!(cfg.size("exam_registration").unwrap().width_px, 413);
         assert_eq!(cfg.size("exam_registration").unwrap().height_px, 531);
+    }
+
+    #[test]
+    fn 自定义尺寸与底色解析() {
+        let cfg = Config::default();
+
+        // 内置标识原样返回
+        let (id, spec) = cfg.resolve_size("one_inch").unwrap();
+        assert_eq!(id, "one_inch");
+        assert_eq!(spec.width_px, 295);
+
+        // px 形式：直接给定像素（DPI 取 300 用于排版换算）
+        let (id, spec) = cfg.resolve_size("px:300x400").unwrap();
+        assert_eq!(id, "px_300x400");
+        assert_eq!((spec.width_px, spec.height_px, spec.dpi), (300, 400, 300));
+        assert!((spec.width_mm - 25.4).abs() < 1e-6);
+
+        // mm 形式：物理尺寸 + DPI，像素 = mm / 25.4 × DPI 四舍五入
+        let (id, spec) = cfg.resolve_size("mm:35x45@300").unwrap();
+        assert_eq!(id, "mm_35x45_300");
+        assert_eq!((spec.width_px, spec.height_px, spec.dpi), (413, 531, 300));
+        let (id, spec) = cfg.resolve_size("mm:33.5x45@600").unwrap();
+        assert_eq!(id, "mm_33.5x45_600");
+        assert_eq!(spec.width_px, 791);
+
+        // 非法尺寸：未知内置、缺分隔符、越界像素、越界 DPI
+        for bad in [
+            "不存在",
+            "px:0x400",
+            "px:300",
+            "px:99999x400",
+            "mm:35x45@10",
+            "mm:0x45@300",
+        ] {
+            assert!(cfg.resolve_size(bad).is_err(), "{bad} 应被拒绝");
+        }
+
+        // 底色：内置 / 十六进制 / 十进制三元组（归一化为文件名安全 id）
+        let (id, spec) = cfg.resolve_background("blue").unwrap();
+        assert_eq!((id.as_str(), spec.rgb), ("blue", [67, 142, 219]));
+        let (id, spec) = cfg.resolve_background("#ff0000").unwrap();
+        assert_eq!((id.as_str(), spec.rgb), ("rgb-ff0000", [255, 0, 0]));
+        assert_eq!(spec.name, "自定义 #FF0000");
+        let (id, spec) = cfg.resolve_background("rgb:255, 0, 0").unwrap();
+        assert_eq!((id.as_str(), spec.rgb), ("rgb-ff0000", [255, 0, 0]));
+
+        // 非法底色
+        for bad in ["#ff00", "#gggggg", "rgb:255,0", "rgb:256,0,0", "不存在"] {
+            assert!(cfg.resolve_background(bad).is_err(), "{bad} 应被拒绝");
+        }
+    }
+
+    #[test]
+    fn 归一化标识可再次解析() {
+        // 归一化 id 会落库并再次进入流水线，解析需幂等
+        let cfg = Config::default();
+        let (id, spec) = cfg.resolve_size("px_300x400").unwrap();
+        assert_eq!(
+            (id.as_str(), spec.width_px, spec.dpi),
+            ("px_300x400", 300, 300)
+        );
+        let (id, spec) = cfg.resolve_size("mm_33.5x45_600").unwrap();
+        assert_eq!(
+            (id.as_str(), spec.width_px, spec.dpi),
+            ("mm_33.5x45_600", 791, 600)
+        );
+        let (id, spec) = cfg.resolve_background("rgb-ff0000").unwrap();
+        assert_eq!((id.as_str(), spec.rgb), ("rgb-ff0000", [255, 0, 0]));
     }
 
     #[test]

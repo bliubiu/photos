@@ -97,8 +97,8 @@
 | 字段 | 类型 | 约束 |
 |---|---|---|
 | `mode` | string | `speed`\|`balanced`\|`quality`；缺省用 `general.default_mode` |
-| `size` | string | 必须存在于 `[sizes.*]` |
-| `backgrounds` | string[] | 1..N，元素存在于 `[backgrounds.*]` |
+| `size` | string | 内置 id（须存在于 `[sizes.*]`）或自定义形式 `px:宽x高`（如 `px:295x413`，DPI 取 300）/ `mm:宽x高@DPI`（如 `mm:35x45@300`，像素 = mm ÷ 25.4 × DPI 四舍五入）；非法形式返回 `400` |
+| `backgrounds` | string[] | 1..N，元素为内置 id（须存在于 `[backgrounds.*]`）或自定义 RGB（`#RRGGBB` / `rgb:R,G,B`）；非法元素返回 `400` |
 | `beauty` | object | 可选；`enabled` 默认 false；`skin_smooth`/`brighten`/`whiten` 可选，取值 `[0,1]`，缺省用全局配置 `[beauty]` 默认值（0.3/0.2/0.1）；越界返回 `400` |
 | `dress` | object | 可选；`enabled` 默认 false；`garment_path`（服务端服装图路径）、`style`（`suit_navy`\|`suit_black`\|`shirt_white` 上半身，`suit_full_navy`\|`suit_full_black` 全身套装）、`garments`（`{top?, bottom?, shoes?}` 分部位服装图路径，`top`/`bottom`/`shoes` 任一存在即生效，全空视为未提供）三选一，`garments` 优先于 `garment_path`、`garment_path` 优先于 `style`；三者皆缺或 `style` 非法返回 `400` |
 | `rotate` | number\|null | 手动纠偏角（度），`[-45,45]`；null=自动 |
@@ -189,6 +189,8 @@
 ```
 
 说明：列表供 WebUI **历史任务**（M3 必含）与 CLI 排查使用；只返回元数据，不含像素。`outputs` 为产物文件名数组（与详情 `artifacts` 一致），满足历史任务「结果路径」展示。
+
+自定义尺寸/底色在受理时归一化为文件名安全 id 后落库与命名：`px:295x413` → `px_295x413`、`mm:35x45@300` → `mm_35x45_300`、`#ff0000` → `rgb-ff0000`（产物如 `task_17c0f0a2_px_295x413_rgb-ff0000.jpg`）。归一化 id 可再次提交，解析幂等。
 
 ### 3.5 GET `/models`
 

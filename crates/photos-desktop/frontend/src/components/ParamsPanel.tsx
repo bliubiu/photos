@@ -1,8 +1,13 @@
+import { useState } from "react";
+
 import { useStore } from "../store";
 
 export default function ParamsPanel() {
   const { config, models, params, setParams, submit, submitting, downloading, downloadModels } =
     useStore();
+  // 自定义底色/尺寸输入值（仅在启用时写入 store）
+  const [bgColor, setBgColor] = useState("#3a7afe");
+  const [sizeMm, setSizeMm] = useState({ w: 35, h: 45, dpi: 300 });
   if (!config) return <section className="text-sm text-gray-500">配置加载中…</section>;
 
   const toggleBg = (id: string) => {
@@ -10,6 +15,15 @@ export default function ParamsPanel() {
     setParams({
       backgrounds: cur.includes(id) ? cur.filter((b) => b !== id) : [...cur, id],
     });
+  };
+
+  /** 自定义尺寸标识（契约：`mm:宽x高@DPI`） */
+  const customSizeId = (v: { w: number; h: number; dpi: number }) => `mm:${v.w}x${v.h}@${v.dpi}`;
+
+  const updateSizeMm = (patch: Partial<typeof sizeMm>) => {
+    const next = { ...sizeMm, ...patch };
+    setSizeMm(next);
+    if (params.customSize !== null) setParams({ customSize: customSizeId(next) });
   };
 
   const missing = models.filter((m) => m.check_status === "missing").length;
@@ -84,6 +98,59 @@ export default function ParamsPanel() {
         </div>
       </div>
 
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={params.customSize !== null}
+            onChange={(e) =>
+              setParams({ customSize: e.target.checked ? customSizeId(sizeMm) : null })
+            }
+          />
+          使用自定义尺寸（毫米）
+        </label>
+        {params.customSize !== null && (
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">宽（mm）</label>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                step={0.5}
+                value={sizeMm.w}
+                onChange={(e) => updateSizeMm({ w: Number(e.target.value) })}
+                className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">高（mm）</label>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                step={0.5}
+                value={sizeMm.h}
+                onChange={(e) => updateSizeMm({ h: Number(e.target.value) })}
+                className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">DPI</label>
+              <input
+                type="number"
+                min={72}
+                max={2400}
+                step={1}
+                value={sizeMm.dpi}
+                onChange={(e) => updateSizeMm({ dpi: Number(e.target.value) })}
+                className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
       <div>
         <label className="mb-1 block text-xs text-gray-500">底色（可多选）</label>
         <div className="flex flex-wrap gap-2">
@@ -108,6 +175,25 @@ export default function ParamsPanel() {
             );
           })}
         </div>
+        <label className="mt-2 flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={params.customBg !== null}
+            onChange={(e) => setParams({ customBg: e.target.checked ? bgColor : null })}
+          />
+          自定义底色
+          <input
+            type="color"
+            value={params.customBg ?? bgColor}
+            disabled={params.customBg === null}
+            onChange={(e) => {
+              setBgColor(e.target.value);
+              if (params.customBg !== null) setParams({ customBg: e.target.value });
+            }}
+            className="h-6 w-10 rounded border border-gray-300 disabled:opacity-50"
+          />
+          {params.customBg && <span className="text-[11px] text-gray-400">{params.customBg}</span>}
+        </label>
       </div>
 
       <div className="flex items-center justify-between">

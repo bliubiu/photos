@@ -180,7 +180,13 @@ fn process_one(
         .clone()
         .unwrap_or_else(|| cfg.general.default_mode.clone());
     let size = args.size.clone().unwrap_or_else(|| "one_inch".to_string());
-    let bgs = parse_backgrounds(&args.backgrounds)?;
+    // 尺寸/底色支持自定义形式（`px:295x413` / `mm:35x45@300` / `#RRGGBB`），统一归一化为
+    // 文件名安全的 id 供落库与产物命名
+    let (size, _) = cfg.resolve_size(&size)?;
+    let bgs = parse_backgrounds(&args.backgrounds)?
+        .iter()
+        .map(|b| cfg.resolve_background(b).map(|(id, _)| id))
+        .collect::<std::result::Result<Vec<String>, _>>()?;
     let started = std::time::Instant::now();
     let beauty = if args.beauty {
         "{\"enabled\":true}"

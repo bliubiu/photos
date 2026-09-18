@@ -720,6 +720,84 @@ async fn 透明底与自定义背景图产物() {
     assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
 }
 
+#[tokio::test]
+async fn 自定义尺寸与自定义底色出图() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 自定义像素尺寸 + 自定义十六进制底色（均归一化为文件名安全 id）
+    let params = serde_json::json!({
+        "mode": "balanced",
+        "size": "px:200x280",
+        "backgrounds": ["#ff0000"],
+    })
+    .to_string();
+    let (body, ctype) = multipart_body(&demo_jpeg(), &params);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "创建任务失败：{json}");
+    let id = json["id"].as_str().unwrap().to_string();
+
+    let detail = loop {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (_, d) = send(&app, req).await;
+        let st = d["status"].as_str().unwrap();
+        if st == "succeeded" || st == "failed" {
+            break d;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+    // 落库与产物命名使用归一化 id
+    let artifacts = detail["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1, "实际产物：{artifacts:?}");
+    let filename = artifacts[0]["filename"].as_str().unwrap();
+    assert!(
+        filename.contains("px_200x280") && filename.contains("rgb-ff0000"),
+        "产物命名应含归一化标识，实际：{filename}"
+    );
+    assert_eq!(artifacts[0]["background"], "rgb-ff0000");
+
+    // 自定义尺寸生效（证件照像素等于自定义宽高）
+    let path = t.out_dir().join(filename);
+    assert_eq!(image::image_dimensions(path).unwrap(), (200, 280));
+}
+
+#[tokio::test]
+async fn 自定义尺寸与底色非法取值返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    for params in [
+        r#"{"size":"px:0x280"}"#,
+        r#"{"size":"mm:35x45@10"}"#,
+        r##"{"backgrounds":["#ff00"]}"##,
+        r#"{"backgrounds":["rgb:256,0,0"]}"#,
+    ] {
+        let (body, ctype) = multipart_body(&demo_jpeg(), params);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/tasks")
+            .header(header::CONTENT_TYPE, ctype)
+            .body(Body::from(body))
+            .unwrap();
+        let (status, json) = send(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "参数 {params} 应被拒绝");
+        assert_eq!(json["code"], "INVALID_PARAMS");
+    }
+}
+
 /// POST /models/download（JSON body）
 fn download_request(body: &str) -> Request<Body> {
     Request::builder()

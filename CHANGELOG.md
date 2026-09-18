@@ -2,6 +2,19 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.6] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【尺寸】支持**一次性自定义尺寸**：`config::Config::resolve_size` 接受 `px:宽x高`（如 `px:295x413`，DPI 取 300 用于排版换算）与 `mm:宽x高@DPI`（如 `mm:35x45@300`，像素 = mm ÷ 25.4 × DPI 四舍五入），无需改 `application.toml`；越界（像素 0/超 10000、DPI 不在 72..2400、宽高非正）返回 `400 INVALID_PARAMS`
+- 【底色】支持**一次性自定义 RGB 底色**：`config::Config::resolve_background` 接受 `#RRGGBB` 与 `rgb:R,G,B`（分量 0-255），非法取值返回 `400 INVALID_PARAMS`
+- 【命名】自定义规格在受理时归一化为文件名安全 id 后落库与命名：`px:295x413` → `px_295x413`、`mm:35x45@300` → `mm_35x45_300`、`#ff0000` → `rgb-ff0000`（产物如 `task_{id}_px_295x413_rgb-ff0000.jpg`）；归一化 id 可再次提交（解析幂等）
+- 【前端】参数面板新增**自定义底色取色器**与**自定义尺寸（毫米宽高 + DPI）**输入，启用后随 `backgrounds`/`size` 一并提交
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：`size`/`backgrounds` 字段约束补充自定义形式，任务列表说明补充归一化 id 规则
+- `docs/06-运行使用手册.md`：尺寸/底色选项与示例补充自定义写法（CLI 底色以逗号分隔，故自定义色用 `#RRGGBB`）
+- `docs/07-能力增强.md`：自定义 RGB 底色 + 自定义尺寸标记为已落地（2026.09.18.6）
+
 ## [2026.09.18.5] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -22,6 +22,8 @@ export interface ParamsState {
   rotate: number | null; // null = 自动
   transparent: boolean; // 额外输出透明底 PNG
   bgImage: string | null; // 自定义背景图路径
+  customBg: string | null; // 自定义 RGB 底色（#RRGGBB），null = 不启用
+  customSize: string | null; // 自定义尺寸标识（mm:宽x高@DPI），null = 用内置尺寸
 }
 
 interface AppState {
@@ -73,6 +75,8 @@ export const useStore = create<AppState>((set, get) => ({
     rotate: null,
     transparent: false,
     bgImage: null,
+    customBg: null,
+    customSize: null,
   },
   submitting: false,
   downloading: false,
@@ -98,6 +102,8 @@ export const useStore = create<AppState>((set, get) => ({
           rotate: null,
           transparent: false,
           bgImage: null,
+          customBg: null,
+          customSize: null,
         },
       });
     } catch (e) {
@@ -140,10 +146,14 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set({ submitting: true, error: null });
     try {
+      // 自定义底色/尺寸以字符串形式追加，服务端归一化为文件名安全 id
+      const backgrounds = params.customBg
+        ? [...params.backgrounds, params.customBg]
+        : params.backgrounds;
       const payload: SubmitParams = {
         mode: params.mode,
-        size: params.size,
-        backgrounds: params.backgrounds,
+        size: params.customSize ?? params.size,
+        backgrounds,
         rotate: params.rotate,
         layout: params.layout,
         effect_image: params.effect,

@@ -410,7 +410,9 @@ async fn create_task_inner(
     cfg.mode(&mode)
         .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
     let size = params.size.clone().unwrap_or_else(|| "one_inch".into());
-    cfg.size(&size)
+    // 尺寸支持自定义形式（`px:295x413` / `mm:35x45@300`），落库与产物命名使用归一化 id
+    let (size, _) = cfg
+        .resolve_size(&size)
         .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
     let bgs = params
         .backgrounds
@@ -419,10 +421,15 @@ async fn create_task_inner(
     if bgs.is_empty() {
         return Err(ApiError::InvalidParams("底色列表不能为空".into()));
     }
-    for bg in &bgs {
-        cfg.background(bg)
-            .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
-    }
+    // 底色支持自定义形式（`#RRGGBB` / `rgb:R,G,B`），落库与产物命名使用归一化 id
+    let bgs = bgs
+        .iter()
+        .map(|bg| {
+            cfg.resolve_background(bg)
+                .map(|(id, _)| id)
+                .map_err(|e| ApiError::InvalidParams(e.to_string()))
+        })
+        .collect::<Result<Vec<String>, ApiError>>()?;
     if let Some(layout) = &params.layout {
         if !cfg.layout.contains_key(layout) {
             return Err(ApiError::InvalidParams(format!("未知排版“{layout}”")));

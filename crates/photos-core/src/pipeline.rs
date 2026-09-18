@@ -160,15 +160,17 @@ pub fn run_pipeline(
     req: &ProcessRequest,
 ) -> CoreResult<PipelineResult> {
     // 1. 解析模式/尺寸/底色列表，并校验该模式模型就绪（缺失给出中文指引）
+    // 尺寸与底色支持自定义形式（`px:295x413` / `mm:35x45@300` / `#RRGGBB`），统一归一化为
+    // 文件名安全的 id 供落库与产物命名
     let suite = cfg.mode(&req.mode)?;
-    let size = cfg.size(&req.size)?;
+    let (_, size) = cfg.resolve_size(&req.size)?;
     if req.bgs.is_empty() {
         return Err(CoreError::ConfigValidate("底色列表不能为空".into()));
     }
     let bgs = req
         .bgs
         .iter()
-        .map(|id| cfg.background(id).map(|b| (id.clone(), b)))
+        .map(|id| cfg.resolve_background(id))
         .collect::<CoreResult<Vec<_>>>()?;
     ensure_models_ready(cfg, engine, &req.mode)?;
 
