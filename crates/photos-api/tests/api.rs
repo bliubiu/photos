@@ -719,3 +719,76 @@ async fn 透明底与自定义背景图产物() {
     // PNG 魔数
     assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
 }
+
+/// POST /models/download（JSON body）
+fn download_request(body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/models/download")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn 模型下载_未知id返回400() {
+    let t = TestApp::new();
+    let app = t.app();
+    let (status, json) = send(&app, download_request(r#"{"ids":["不存在的模型"]}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "INVALID_PARAMS");
+    assert!(json["message"].as_str().unwrap().contains("未知模型"));
+}
+
+#[tokio::test]
+async fn 模型下载_文件已存在直接成功() {
+    let t = TestApp::new();
+    // 全部模型路径指向同一已存在文件：默认（缺失集合）应为空，无需联网
+    let fake = t.dir.path().join("fake.onnx");
+    std::fs::write(&fake, b"onnx").unwrap();
+    let mut cfg = t.cfg.clone();
+    for spec in cfg.models.values_mut() {
+        spec.path = fake.display().to_string();
+        spec.download = None;
+    }
+    let app = router(cfg, test_factory(), false);
+
+    let (status, json) = send(&app, download_request("{}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["items"].as_array().unwrap().is_empty(),
+        "无缺失模型时应不下任何下载：{json}"
+    );
+
+    let (status, json) = send(&app, download_request(r#"{"ids":["retinaface"]}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let item = &json["items"][0];
+    assert_eq!(item["id"], "retinaface");
+    assert_eq!(item["ok"], true);
+    assert!(item["message"].as_str().unwrap().contains("已存在"));
+}
+
+#[tokio::test]
+async fn 模型下载_缺失且无下载地址返回失败项() {
+    let t = TestApp::new();
+    // 目标文件不存在且未配置下载地址：单个失败不阻断，逐项返回中文原因
+    let missing = t.dir.path().join("not-exist.onnx");
+    let mut cfg = t.cfg.clone();
+    let spec = cfg.models.get_mut("retinaface").unwrap();
+    spec.path = missing.display().to_string();
+    spec.download = None;
+    let app = router(cfg, test_factory(), false);
+
+    let (status, json) = send(&app, download_request(r#"{"ids":["retinaface"]}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let item = &json["items"][0];
+    assert_eq!(item["ok"], false);
+    assert!(item["message"].as_str().unwrap().contains("未配置下载地址"));
+}
+
+/// 测试用引擎工厂（demo 回放，不入池）
+fn test_factory() -> EngineFactory {
+    Arc::new(|w, h| {
+        photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
+    })
+}

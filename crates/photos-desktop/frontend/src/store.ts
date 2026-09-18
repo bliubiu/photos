@@ -1,9 +1,11 @@
 import { create } from "zustand";
 import {
   AppConfig,
+  ModelItem,
   SubmitParams,
   TaskDetail,
   TaskItem,
+  downloadModels as requestModelDownload,
   fetchConfig,
   fetchModels,
   fetchTaskDetail,
@@ -24,13 +26,15 @@ export interface ParamsState {
 
 interface AppState {
   config: AppConfig | null;
-  models: { id: string; ready: boolean; message: string }[];
+  models: { id: string; ready: boolean; check_status: string; message: string }[];
   tasks: TaskItem[];
   selectedId: string | null;
   detail: TaskDetail | null;
   files: File[];
   params: ParamsState;
   submitting: boolean;
+  /** 模型一键下载进行中 */
+  downloading: boolean;
   error: string | null;
 
   init: () => Promise<void>;
@@ -40,6 +44,17 @@ interface AppState {
   refreshTasks: () => Promise<void>;
   refreshDetail: () => Promise<void>;
   submit: () => Promise<void>;
+  downloadModels: () => Promise<void>;
+}
+
+/** 模型列表状态映射（GET /models → 前端状态） */
+function mapModels(items: ModelItem[]) {
+  return items.map((m) => ({
+    id: m.id,
+    ready: m.ready,
+    check_status: m.check_status,
+    message: m.message,
+  }));
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -60,6 +75,7 @@ export const useStore = create<AppState>((set, get) => ({
     bgImage: null,
   },
   submitting: false,
+  downloading: false,
   error: null,
 
   async init() {
@@ -71,7 +87,7 @@ export const useStore = create<AppState>((set, get) => ({
       ]);
       set({
         config,
-        models: models.items.map((m) => ({ id: m.id, ready: m.ready, message: m.message })),
+        models: mapModels(models.items),
         tasks: tasks.items,
         params: {
           mode: config.default_mode,
@@ -143,6 +159,28 @@ export const useStore = create<AppState>((set, get) => ({
       set({ error: (e as Error).message });
     } finally {
       set({ submitting: false });
+    }
+  },
+
+  async downloadModels() {
+    set({ downloading: true, error: null });
+    try {
+      const res = await requestModelDownload();
+      // 下载完成后刷新模型状态（成功的模型在列表中转为就绪）
+      const models = await fetchModels();
+      set({ models: mapModels(models.items) });
+      const failed = res.items.filter((i) => !i.ok);
+      if (failed.length > 0) {
+        set({
+          error: `模型下载失败：${failed
+            .map((f) => `${f.id}（${f.message}）`)
+            .join("；")}`,
+        });
+      }
+    } catch (e) {
+      set({ error: (e as Error).message });
+    } finally {
+      set({ downloading: false });
     }
   },
 }));

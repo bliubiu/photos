@@ -112,6 +112,21 @@ export async function fetchModels(): Promise<{ items: ModelItem[] }> {
   return request<{ items: ModelItem[] }>("/models");
 }
 
+export interface DownloadResult {
+  id: string;
+  ok: boolean;
+  message: string;
+}
+
+/** 一键下载模型：不传 ids 时下载全部「缺失」模型（服务端逐个下载，单个失败不阻断其余） */
+export async function downloadModels(ids?: string[]): Promise<{ items: DownloadResult[] }> {
+  return request<{ items: DownloadResult[] }>("/models/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(ids && ids.length > 0 ? { ids } : {}),
+  });
+}
+
 export async function fetchTasks(limit = 50, offset = 0): Promise<TaskList> {
   return request<TaskList>(`/tasks?limit=${limit}&offset=${offset}`);
 }

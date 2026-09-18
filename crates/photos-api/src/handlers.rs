@@ -1,6 +1,6 @@
-//! 7 个端点处理器（契约 docs/05-API契约.md §2）：
+//! 8 个端点处理器（契约 docs/05-API契约.md §2）：
 //! POST /tasks、GET /tasks、GET /tasks/{id}、GET /tasks/{id}/output、
-//! GET /models、GET /config、GET /ping。
+//! GET /models、POST /models/download、GET /config、GET /ping。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use photos_core::config::Config;
-use photos_core::model::{CheckStatus, check_models};
+use photos_core::model::{CheckStatus, check_models, download_model, resolve_model_path};
 use photos_core::pipeline::{ProcessRequest, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
@@ -266,6 +266,73 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
         })).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// POST `/models/download` 请求体：`ids` 缺省（或空数组）表示下载全部「缺失」模型
+#[derive(Debug, Default, Deserialize)]
+pub struct DownloadParams {
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+}
+
+/// POST /models/download：一键下载模型到注册表路径。
+/// 未指定 `ids` 时下载全部缺失（文件不存在）的模型；已有文件视为成功，单个失败不阻断其余。
+/// 下载为阻塞 IO，放入 `spawn_blocking` 执行，避免占用异步运行时线程。
+pub async fn download_models(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<DownloadParams>>,
+) -> Response {
+    let cfg = state.cfg.clone();
+    let requested = body.and_then(|Json(p)| p.ids).unwrap_or_default();
+    let ids: Vec<String> = if requested.is_empty() {
+        let store = state.store.lock().unwrap();
+        match check_models(&cfg, &store) {
+            Ok(s) => s
+                .into_iter()
+                .filter(|s| s.check_status == CheckStatus::Missing)
+                .map(|s| s.id)
+                .collect(),
+            Err(e) => return ApiError::from(e).into_response(),
+        }
+    } else {
+        if let Some(bad) = requested.iter().find(|id| !cfg.models.contains_key(*id)) {
+            return ApiError::InvalidParams(format!("未知模型 id“{bad}”")).into_response();
+        }
+        requested
+    };
+
+    let items = match tokio::task::spawn_blocking(move || download_each(&cfg, ids)).await {
+        Ok(v) => v,
+        Err(e) => return ApiError::Internal(format!("下载线程异常：{e}")).into_response(),
+    };
+    Json(json!({ "items": items })).into_response()
+}
+
+/// 逐个下载模型：已有文件直接成功；其余调用下载器，单个失败不阻断（返回中文原因）
+fn download_each(cfg: &Config, ids: Vec<String>) -> Vec<serde_json::Value> {
+    ids.into_iter()
+        .map(|id| {
+            let existing = cfg
+                .model_spec(&id)
+                .map(|s| resolve_model_path(cfg, Path::new(&s.path)).exists())
+                .unwrap_or(false);
+            if existing {
+                return json!({ "id": id, "ok": true, "message": "模型文件已存在，无需下载" });
+            }
+            tracing::info!("开始下载模型“{id}”…");
+            match download_model(cfg, &id) {
+                Ok(()) => {
+                    tracing::info!("模型“{id}”下载完成");
+                    json!({ "id": id, "ok": true, "message": "下载完成" })
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::error!("模型“{id}”下载失败：{msg}");
+                    json!({ "id": id, "ok": false, "message": msg })
+                }
+            }
+        })
+        .collect()
 }
 
 /// POST /tasks：multipart 提交（file + params JSON）→ 202 任务 id

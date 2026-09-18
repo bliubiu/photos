@@ -64,6 +64,7 @@
 | GET | `/tasks/{id}/output` | 下载指定产物 |
 | GET | `/tasks` | 历史列表（读 `task_history`） |
 | GET | `/models` | 模型注册表与校验状态 |
+| POST | `/models/download` | 一键下载指定（缺省为全部缺失）模型 |
 | GET | `/config` | 驱动前端下拉的选项集 |
 | GET | `/ping` | 健康检查 |
 
@@ -207,7 +208,36 @@
 
 `check_status`：`ready` | `missing` | `hash_mismatch` | `cached_ok`（与 `04-模型清单.md` §5 一致）。
 
-### 3.6 GET `/config`
+### 3.6 POST `/models/download`
+
+`Content-Type: application/json`，请求体可省略：
+
+```json
+{ "ids": ["birefnet_lite", "retinaface"] }
+```
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `ids` | string[] | 可选；缺省或空数组时下载全部「文件缺失」（`check_status=missing`）的模型；含未注册 id 返回 `400` |
+
+逐个模型下载到注册表路径（`[models.<id>].path`），下载地址取 `[models.<id>].download.url`。已存在的文件直接跳过视为成功；单个模型失败**不阻断**其余，逐项返回中文原因。
+
+```json
+{
+  "items": [
+    { "id": "retinaface", "ok": false, "message": "模型“retinaface”未配置下载地址（请在配置 [models.retinaface].download.url 填写）" }
+  ]
+}
+```
+
+| 情况 | 状态码 |
+|---|---|
+| 处理完成（含部分失败） | `200` + 逐项结果 |
+| `ids` 含未注册 id | `400` + `code=INVALID_PARAMS` |
+
+说明：模型体积较大（单个可达数百 MB），本端点同步等待下载完成后返回，**耗时较长且无进度推送**；前端以「下载中」状态提示，完成后重新拉取 `GET /models` 刷新就绪状态。
+
+### 3.7 GET `/config`
 
 ```json
 {
@@ -225,7 +255,7 @@
 
 选项来源：`application.toml` + 默认值；驱动前端下拉，前端不硬编码尺寸表。
 
-### 3.7 GET `/ping`
+### 3.8 GET `/ping`
 
 ```json
 { "status": "ok" }

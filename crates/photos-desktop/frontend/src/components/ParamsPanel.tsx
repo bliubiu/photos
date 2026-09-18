@@ -1,7 +1,8 @@
 import { useStore } from "../store";
 
 export default function ParamsPanel() {
-  const { config, models, params, setParams, submit, submitting } = useStore();
+  const { config, models, params, setParams, submit, submitting, downloading, downloadModels } =
+    useStore();
   if (!config) return <section className="text-sm text-gray-500">配置加载中…</section>;
 
   const toggleBg = (id: string) => {
@@ -11,17 +12,23 @@ export default function ParamsPanel() {
     });
   };
 
-  const missing = models.filter((m) => !m.ready).length;
+  const missing = models.filter((m) => m.check_status === "missing").length;
 
   return (
     <section className="rounded-lg bg-white shadow-sm border border-gray-200 p-4 space-y-4">
       <h2 className="text-sm font-semibold text-gray-700">2. 参数设置</h2>
 
       {missing > 0 && (
-        <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-700">
-          有 {missing} 个模型未就绪，处理可能失败。可用 CLI 执行
-          <code className="mx-1 bg-amber-100 px-1 rounded">photos models download all</code>
-          一键下载。
+        <div className="space-y-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-700">
+          <p>有 {missing} 个模型文件缺失，处理会失败，可一键下载。</p>
+          <button
+            type="button"
+            disabled={downloading}
+            onClick={() => void downloadModels()}
+            className="rounded-md bg-amber-600 px-3 py-1.5 font-medium text-white transition hover:bg-amber-700 disabled:opacity-50"
+          >
+            {downloading ? "下载中…（模型较大，请耐心等待）" : `一键下载缺失模型（${missing}）`}
+          </button>
         </div>
       )}
 

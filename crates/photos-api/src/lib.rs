@@ -1,8 +1,9 @@
 //! photos-api：Axum 路由层（M3 实现），挂载 photos-core。
 //!
 //! 契约：docs/05-API契约.md。服务只绑定回环地址（默认 127.0.0.1 随机端口），
-//! 提供 7 个端点（POST /tasks、GET /tasks、GET /tasks/{id}、GET /tasks/{id}/output、
-//! GET /models、GET /config、GET /ping），任务状态机 queued → running → succeeded | failed。
+//! 提供 8 个端点（POST /tasks、GET /tasks、GET /tasks/{id}、GET /tasks/{id}/output、
+//! GET /models、POST /models/download、GET /config、GET /ping），
+//! 任务状态机 queued → running → succeeded | failed。
 
 pub mod artifact;
 pub mod engine_pool;
@@ -52,6 +53,7 @@ pub fn router_with_frontend(
         .route("/ping", get(handlers::ping))
         .route("/config", get(handlers::get_config))
         .route("/models", get(handlers::list_models))
+        .route("/models/download", post(handlers::download_models))
         .route(
             "/tasks",
             post(handlers::create_task).get(handlers::list_tasks),
