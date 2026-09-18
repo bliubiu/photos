@@ -12,14 +12,14 @@ use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_ready};
 use crate::preprocess::{LetterBox, build_input, probability_map};
-use crate::vision::affine::rotate_image_same;
-use crate::vision::beauty::apply_beauty;
+use crate::vision::affine::{rotate_image_same, rotation_affine};
+use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, feature_protect_mask};
 use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
 use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
 use crate::vision::dressing::{self, SuitStyle};
-use crate::vision::face::{decode_retinaface, retinaface_prior_count};
+use crate::vision::face::{FaceBox, FaceDetection, decode_retinaface, retinaface_prior_count};
 use crate::vision::geometry::{
-    RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
+    Point2, RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
 use crate::vision::matting::{feather, morph_open, threshold_mask};
@@ -317,17 +317,22 @@ pub fn run_pipeline(
         _ => rot_img.clone(),
     };
 
-    // 6.6 美颜（可选）：换底色前对换装后原图做磨皮/提亮/美白（美颜不改变 mask 与裁剪框）
+    // 6.6 美颜（可选）：分区磨皮——五官（双眼/眉、鼻、嘴）保护区不磨皮，保留五官锐度；
+    // 美颜不改变 mask 与裁剪框
     let beautified = match &req.beauty {
-        Some(p) if p.enabled => apply_beauty(
-            &dressed,
-            &BeautyConfig {
-                enabled: true,
-                skin_smooth: p.skin_smooth.unwrap_or(cfg.beauty.skin_smooth),
-                brighten: p.brighten.unwrap_or(cfg.beauty.brighten),
-                whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
-            },
-        ),
+        Some(p) if p.enabled => {
+            let protect = beauty_protect_mask(face, w, h, decision.correction());
+            apply_beauty_protected(
+                &dressed,
+                &BeautyConfig {
+                    enabled: true,
+                    skin_smooth: p.skin_smooth.unwrap_or(cfg.beauty.skin_smooth),
+                    brighten: p.brighten.unwrap_or(cfg.beauty.brighten),
+                    whiten: p.whiten.unwrap_or(cfg.beauty.whiten),
+                },
+                Some(&protect),
+            )
+        }
         _ => dressed,
     };
 
@@ -417,6 +422,27 @@ pub fn run_pipeline(
         decision,
         warnings,
     })
+}
+
+/// 五官保护掩膜：检测结果位于原图坐标系，美颜作用于纠偏后图像，故按同一旋转矩阵把
+/// 五官关键点变换到纠偏后坐标系再生成保护掩膜（旋转保距，人脸框尺寸不变、中心随变换移动）
+fn beauty_protect_mask(face: &FaceDetection, w: u32, h: u32, deg: f64) -> GrayImage {
+    let m = rotation_affine(w as f64 / 2.0, h as f64 / 2.0, deg);
+    let landmarks = face.landmarks.map(|p| {
+        let (x, y) = m * (p.x as f32, p.y as f32);
+        Point2::new(x as f64, y as f64)
+    });
+    let center = face.face.center();
+    let (cx, cy) = m * (center.x as f32, center.y as f32);
+    let (fw, fh) = (face.face.width(), face.face.height());
+    let rotated_face = FaceBox {
+        x1: cx - fw / 2.0,
+        y1: cy - fh / 2.0,
+        x2: cx + fw / 2.0,
+        y2: cy + fh / 2.0,
+        score: face.face.score,
+    };
+    feature_protect_mask(w, h, &face_feature_regions(&rotated_face, &landmarks))
 }
 
 /// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（letterbox 逆变换 + 阈值化 + 形态学去噪）
@@ -557,6 +583,42 @@ fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
 mod tests {
     use super::*;
     use image::Rgb;
+
+    #[test]
+    fn 美颜五官保护掩膜随纠偏角同步变换() {
+        let face = FaceDetection {
+            face: FaceBox {
+                x1: 100.0,
+                y1: 100.0,
+                x2: 200.0,
+                y2: 200.0,
+                score: 0.99,
+            },
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(150.0, 165.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+        };
+        // 未纠偏：五官保护区落在原坐标
+        let mask = beauty_protect_mask(&face, 300, 300, 0.0);
+        assert!(mask.get_pixel(125, 140)[0] > 200, "左眼应被保护");
+        assert!(mask.get_pixel(150, 185)[0] > 200, "嘴中心应被保护");
+        // 绕图像中心 (150,150) 顺时针 90°：(x,y) → (150-(y-150), 150+(x-150))
+        // 左眼 (125,140) → (160,125)；嘴中心 (150,185) → (115,150)
+        let rotated = beauty_protect_mask(&face, 300, 300, 90.0);
+        for (name, x, y) in [("左眼", 160u32, 125u32), ("嘴中心", 115, 150)] {
+            assert!(
+                rotated.get_pixel(x, y)[0] > 200,
+                "纠偏后{name}({x},{y})应被保护，实际 {}",
+                rotated.get_pixel(x, y)[0]
+            );
+        }
+        // 远离五官的背景不受保护
+        assert_eq!(rotated.get_pixel(280, 20)[0], 0);
+    }
 
     #[test]
     fn 最小闭环输出标准证件照() {

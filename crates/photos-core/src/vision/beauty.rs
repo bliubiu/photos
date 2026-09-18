@@ -1,10 +1,13 @@
 //! 美颜算子：磨皮（双边滤波）、提亮、美白（肤色区域向白调整）。
 //! 纯 Rust 实现（image + imageproc），参数来自配置 `[beauty]` 段。
 
-use image::{GrayImage, Rgb, RgbImage};
+use image::{GrayImage, Luma, Rgb, RgbImage};
 use imageproc::filter::bilateral_filter;
 
 use crate::config::BeautyConfig;
+use crate::vision::face::FaceBox;
+use crate::vision::geometry::Point2;
+use crate::vision::matting::feather;
 
 /// 双边滤波窗口边长（像素，越大越糊）
 const BILATERAL_WINDOW: u32 = 5;
@@ -12,30 +15,126 @@ const BILATERAL_WINDOW: u32 = 5;
 const BILATERAL_SIGMA_COLOR: f32 = 32.0;
 /// 空间相似度 sigma
 const BILATERAL_SIGMA_SPATIAL: f32 = 4.0;
+/// 五官保护区域羽化 sigma（避免保护边界出现硬过渡）
+const FEATURE_FEATHER_SIGMA: f32 = 1.5;
+
+/// 五官保护区域（椭圆，图像坐标）：磨皮避让五官，保留眼睛/眉毛/鼻/嘴锐度
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeatureRegion {
+    /// 椭圆中心 x
+    pub cx: f32,
+    /// 椭圆中心 y
+    pub cy: f32,
+    /// 横向半径
+    pub rx: f32,
+    /// 纵向半径
+    pub ry: f32,
+}
+
+/// 由人脸框与 5 关键点（左眼、右眼、鼻尖、左嘴角、右嘴角）推导五官保护区域：
+/// 双眼（含眉，中心上移 0.05 脸高）、鼻、嘴各一个椭圆
+pub fn face_feature_regions(face: &FaceBox, landmarks: &[Point2; 5]) -> Vec<FeatureRegion> {
+    let fw = face.width().max(1.0);
+    let fh = face.height().max(1.0);
+    // 双眼（含眉：中心上移 0.05 脸高，纵向半径覆盖眉区）
+    let mut regions = Vec::with_capacity(4);
+    for eye in [&landmarks[0], &landmarks[1]] {
+        regions.push(FeatureRegion {
+            cx: eye.x as f32,
+            cy: (eye.y - 0.05 * fh as f64) as f32,
+            rx: 0.17 * fw,
+            ry: 0.12 * fh,
+        });
+    }
+    // 鼻
+    regions.push(FeatureRegion {
+        cx: landmarks[2].x as f32,
+        cy: landmarks[2].y as f32,
+        rx: 0.14 * fw,
+        ry: 0.13 * fh,
+    });
+    // 嘴（两嘴角中点）
+    regions.push(FeatureRegion {
+        cx: ((landmarks[3].x + landmarks[4].x) / 2.0) as f32,
+        cy: ((landmarks[3].y + landmarks[4].y) / 2.0) as f32,
+        rx: 0.22 * fw,
+        ry: 0.10 * fh,
+    });
+    regions
+}
+
+/// 生成五官保护掩膜（255 = 保护不磨皮，0 = 可磨皮；椭圆边界高斯羽化）
+pub fn feature_protect_mask(w: u32, h: u32, regions: &[FeatureRegion]) -> GrayImage {
+    let mut mask = GrayImage::from_pixel(w, h, Luma([0u8]));
+    if w == 0 || h == 0 {
+        return mask;
+    }
+    for r in regions {
+        if r.rx <= 0.0 || r.ry <= 0.0 {
+            continue;
+        }
+        let x1 = (r.cx - r.rx).floor().max(0.0) as u32;
+        let x2 = (r.cx + r.rx).ceil().clamp(0.0, w as f32) as u32;
+        let y1 = (r.cy - r.ry).floor().max(0.0) as u32;
+        let y2 = (r.cy + r.ry).ceil().clamp(0.0, h as f32) as u32;
+        for y in y1..y2 {
+            for x in x1..x2 {
+                let dx = (x as f32 + 0.5 - r.cx) / r.rx;
+                let dy = (y as f32 + 0.5 - r.cy) / r.ry;
+                if dx * dx + dy * dy <= 1.0 {
+                    mask.put_pixel(x, y, Luma([255]));
+                }
+            }
+        }
+    }
+    // 羽化保护边界，避免磨皮/非磨皮之间出现硬过渡
+    feather(&mask, FEATURE_FEATHER_SIGMA)
+}
 
 /// 对 RGB 图应用美颜：磨皮 → 提亮 → 美白。
 /// `params.enabled == false` 时原样返回。
 pub fn apply_beauty(img: &RgbImage, params: &BeautyConfig) -> RgbImage {
+    apply_beauty_protected(img, params, None)
+}
+
+/// 带五官保护的分区美颜：磨皮仅作用于保护区外（提亮/美白不受影响）
+pub fn apply_beauty_protected(
+    img: &RgbImage,
+    params: &BeautyConfig,
+    protect: Option<&GrayImage>,
+) -> RgbImage {
     if !params.enabled {
         return img.clone();
     }
-    let mut out = smooth(img, params.skin_smooth);
+    let mut out = smooth(img, params.skin_smooth, protect);
     out = brighten(&out, params.brighten);
     whiten(&mut out, params.whiten);
     out
 }
 
-/// 磨皮：逐通道双边滤波后与原图按强度混合（保留五官细节）
-fn smooth(img: &RgbImage, strength: f64) -> RgbImage {
+/// 磨皮：逐通道双边滤波后与原图按强度混合；`protect` 为 255 的像素不参与混合（保留五官）
+fn smooth(img: &RgbImage, strength: f64, protect: Option<&GrayImage>) -> RgbImage {
     if strength <= 0.0 {
         return img.clone();
     }
     let s = strength.min(1.0);
+    let (w, _h) = img.dimensions();
+    let mask = protect.filter(|m| m.dimensions() == img.dimensions());
     let filtered = bilateral_rgb(img);
     let mut out = img.clone();
-    for (p, q) in out.pixels_mut().zip(filtered.pixels()) {
+    for (i, (p, q)) in out.pixels_mut().zip(filtered.pixels()).enumerate() {
+        let weight = match mask {
+            Some(m) => {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                s * (1.0 - m.get_pixel(x, y)[0] as f64 / 255.0)
+            }
+            None => s,
+        };
+        if weight <= 0.0 {
+            continue;
+        }
         for c in 0..3 {
-            let v = p[c] as f64 * (1.0 - s) + q[c] as f64 * s;
+            let v = p[c] as f64 * (1.0 - weight) + q[c] as f64 * weight;
             p[c] = v.round().clamp(0.0, 255.0) as u8;
         }
     }
@@ -250,5 +349,68 @@ mod tests {
         let before = img.get_pixel(16, 16)[0];
         let after = out.get_pixel(16, 16)[0];
         assert!(after > before);
+    }
+
+    /// 五官保护掩膜：给定人脸框与 5 关键点，五官中心被保护、背景不受保护
+    #[test]
+    fn 五官保护掩膜覆盖五官中心() {
+        let face = FaceBox {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 200.0,
+            y2: 200.0,
+            score: 0.99,
+        };
+        let landmarks = [
+            Point2::new(125.0, 140.0),
+            Point2::new(175.0, 140.0),
+            Point2::new(150.0, 165.0),
+            Point2::new(133.0, 185.0),
+            Point2::new(167.0, 185.0),
+        ];
+        let regions = face_feature_regions(&face, &landmarks);
+        assert_eq!(regions.len(), 4, "双眼 + 鼻 + 嘴共 4 个保护区");
+        let mask = feature_protect_mask(300, 300, &regions);
+        assert_eq!(mask.dimensions(), (300, 300));
+        for (name, x, y) in [
+            ("左眼", 125u32, 140u32),
+            ("右眼", 175, 140),
+            ("鼻尖", 150, 165),
+            ("嘴中心", 150, 185),
+        ] {
+            assert!(
+                mask.get_pixel(x, y)[0] > 200,
+                "{name}({x},{y}) 应落入五官保护区，实际 {}",
+                mask.get_pixel(x, y)[0]
+            );
+        }
+        // 远离人脸处不受保护
+        assert_eq!(mask.get_pixel(5, 5)[0], 0);
+        assert_eq!(mask.get_pixel(290, 290)[0], 0);
+    }
+
+    /// 分区磨皮：保护区内像素不变，保护区外正常磨皮
+    #[test]
+    fn 五官保护区不磨皮而皮肤区磨皮() {
+        let img = noisy_skin_image();
+        // 左半 0..32 为五官保护区，右半为皮肤区
+        let mut protect = GrayImage::from_pixel(64, 64, Luma([0u8]));
+        for y in 0..64 {
+            for x in 0..32 {
+                protect.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = apply_beauty_protected(&img, &cfg(true, 1.0, 0.0, 0.0), Some(&protect));
+        // 保护区内像素逐点不变
+        assert_eq!(out.get_pixel(5, 5), img.get_pixel(5, 5));
+        assert_eq!(out.get_pixel(31, 40), img.get_pixel(31, 40));
+        // 保护区外磨皮生效：局部方差显著下降（避开保护区边界的过渡带）
+        let crop = |image: &RgbImage| image::imageops::crop_imm(image, 36, 0, 28, 64).to_image();
+        let before = local_variance(&crop(&img));
+        let after = local_variance(&crop(&out));
+        assert!(
+            after < before * 0.5,
+            "保护区外磨皮后方差 {after} 应显著低于磨皮前 {before}"
+        );
     }
 }
