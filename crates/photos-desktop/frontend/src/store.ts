@@ -23,6 +23,14 @@ export interface ParamsState {
   backgrounds: string[];
   layout: string | null;
   effect: boolean;
+  /** AI 美颜开关（磨皮 / 提亮 / 美白） */
+  beautyEnabled: boolean;
+  /** 磨皮强度 0..=1 */
+  beautySkinSmooth: number;
+  /** 提亮强度 0..=1 */
+  beautyBrighten: number;
+  /** 美白强度 0..=1 */
+  beautyWhiten: number;
   rotate: number | null; // null = 自动
   transparent: boolean; // 额外输出透明底 PNG
   bgImage: string | null; // 自定义背景图路径
@@ -42,6 +50,9 @@ export interface Preset {
 }
 
 const PRESET_KEY = "photos.presets";
+
+/** 美颜强度默认值（与 photos-core `[beauty]` 默认值一致，前端调整后随请求显式下发） */
+export const BEAUTY_DEFAULTS = { skinSmooth: 0.3, brighten: 0.2, whiten: 0.1 };
 
 /** 读取本地预设（解析失败或隐私模式不可用时返回空列表） */
 function loadPresets(): Preset[] {
@@ -128,6 +139,12 @@ function toSubmitParams(params: ParamsState): SubmitParams {
     rotate: params.rotate,
     layout: params.layout,
     effect_image: params.effect,
+    beauty: {
+      enabled: params.beautyEnabled,
+      skin_smooth: params.beautySkinSmooth,
+      brighten: params.beautyBrighten,
+      whiten: params.beautyWhiten,
+    },
     transparent: params.transparent,
     bg_image: params.bgImage,
     output_format: params.outputFormat,
@@ -172,6 +189,10 @@ export const useStore = create<AppState>((set, get) => ({
     backgrounds: ["white"],
     layout: null,
     effect: false,
+    beautyEnabled: false,
+    beautySkinSmooth: BEAUTY_DEFAULTS.skinSmooth,
+    beautyBrighten: BEAUTY_DEFAULTS.brighten,
+    beautyWhiten: BEAUTY_DEFAULTS.whiten,
     rotate: null,
     transparent: false,
     bgImage: null,
@@ -205,6 +226,10 @@ export const useStore = create<AppState>((set, get) => ({
           backgrounds: [config.backgrounds[0]?.id ?? "white"],
           layout: null,
           effect: false,
+          beautyEnabled: false,
+          beautySkinSmooth: BEAUTY_DEFAULTS.skinSmooth,
+          beautyBrighten: BEAUTY_DEFAULTS.brighten,
+          beautyWhiten: BEAUTY_DEFAULTS.whiten,
           rotate: null,
           transparent: false,
           bgImage: null,

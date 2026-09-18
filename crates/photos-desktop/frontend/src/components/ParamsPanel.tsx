@@ -312,6 +312,67 @@ export default function ParamsPanel() {
         输出通用效果图（保持原尺寸）
       </label>
 
+      <div className="space-y-2 rounded-md border border-gray-200 px-3 py-2">
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <input
+            type="checkbox"
+            checked={params.beautyEnabled}
+            onChange={(e) => setParams({ beautyEnabled: e.target.checked })}
+          />
+          AI 美颜（磨皮 / 提亮 / 美白）
+        </label>
+        {params.beautyEnabled ? (
+          <div className="space-y-2">
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">
+                磨皮强度：{Math.round(params.beautySkinSmooth * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={params.beautySkinSmooth}
+                onChange={(e) => setParams({ beautySkinSmooth: Number(e.target.value) })}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">
+                提亮强度：{Math.round(params.beautyBrighten * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={params.beautyBrighten}
+                onChange={(e) => setParams({ beautyBrighten: Number(e.target.value) })}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] text-gray-500">
+                美白强度：{Math.round(params.beautyWhiten * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={params.beautyWhiten}
+                onChange={(e) => setParams({ beautyWhiten: Number(e.target.value) })}
+                className="w-full"
+              />
+            </div>
+          </div>
+        ) : (
+          <p className="text-[11px] text-gray-400">
+            磨皮按五官保护区加权，不糊五官；强度缺省与全局配置 [beauty] 一致。
+          </p>
+        )}
+      </div>
+
       <label className="flex items-center gap-2 text-xs text-gray-600">
         <input
           type="checkbox"

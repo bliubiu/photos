@@ -91,6 +91,17 @@ export interface TaskList {
   items: TaskItem[];
 }
 
+/** 美颜参数（enabled 开关；强度缺省取全局配置 `[beauty]` 默认值，0..=1） */
+export interface BeautyParams {
+  enabled: boolean;
+  /** 磨皮强度 */
+  skin_smooth: number;
+  /** 提亮强度 */
+  brighten: number;
+  /** 美白强度 */
+  whiten: number;
+}
+
 export interface SubmitParams {
   mode: string;
   size: string;
@@ -98,6 +109,8 @@ export interface SubmitParams {
   rotate: number | null;
   layout: string | null;
   effect_image: boolean;
+  /** 美颜（磨皮 / 提亮 / 美白，仅 enabled 为 true 时生效） */
+  beauty: BeautyParams;
   /** 额外输出透明底 PNG */
   transparent: boolean;
   /** 自定义背景图（服务端本地路径） */
@@ -214,6 +227,7 @@ export async function submitTask(file: File, params: SubmitParams): Promise<stri
       rotate: params.rotate,
       layout: params.layout,
       effect_image: params.effect_image,
+      beauty: params.beauty,
       transparent: params.transparent,
       bg_image: params.bg_image,
       output_format: params.output_format,
