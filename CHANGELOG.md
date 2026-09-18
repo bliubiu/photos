@@ -2,6 +2,18 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.24] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【姿态纠偏·居中平移校正】`vision::affine` 新增 `centering_shift`（旋转后人脸框中心相对画面中心的偏移取负为校正平移量，任一路超「短边 × 8%」钳制上限则放弃居中，避免把人像移出画面露出大黑边）、`rotate_translate_affine` / `rotate_translate_image_same` / `rotate_translate_image`（旋转 + 居中平移合成**单个仿射矩阵**一次 warp，像素只插值一次，原图/Mask 插值策略不变）与 `transform_face`（人脸框与 5 关键点用同一投影变换到纠偏后坐标系，供美颜保护掩膜、裁剪框无二次旋转对位）；`workflow::step_rotate` 仅在**确有旋转（角度非零）**时执行居中——0 度场景人像本无偏离、保持原构图不搬动
+- 【姿态纠偏】`step_rotate` 现在把人脸框/关键点同步变换到纠偏后坐标系，`workflow::beauty_protect_mask` 不再二次旋转（消除双重变换错位）
+
+### 📈 Improvements 性能/体验优化
+- 【姿态纠偏】居中平移与旋转正交：非旋转裁切/换底路径零行为变化，既有流水线输出完全兼容
+
+### 📚 Docs 文档更新
+- `docs/07-能力增强.md`：§一.9 补居中平移校正落地说明（与旋转定序、钳制上限）
+
 ## [2026.09.18.23] - 0.1.0
 
 ### ✨ New Features 新增功能

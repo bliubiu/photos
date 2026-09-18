@@ -18,7 +18,10 @@ use crate::inference::{InferenceEngine, TensorData};
 use crate::metrics::{StageTimer, TaskMetrics};
 use crate::pipeline::{BgOutput, CUSTOM_BG_ID, ProcessRequest};
 use crate::preprocess::{LetterBox, build_input_with, probability_map};
-use crate::vision::affine::{rotate_image, rotate_image_same, rotation_affine};
+use crate::vision::affine::{
+    centering_shift, rotate_translate_affine, rotate_translate_image, rotate_translate_image_same,
+    transform_face,
+};
 use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, feature_protect_mask};
 use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
 use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
@@ -654,10 +657,23 @@ fn step_pose(ctx: &mut PipelineCtx) -> CoreResult<()> {
     Ok(())
 }
 
-/// 同步几何纠偏（同一仿射矩阵变换原图与 mask；无 mask 时仅变换原图）
+/// 同步几何纠偏：同一仿射矩阵变换原图与 mask；确有旋转（非零角度）时把人像整体偏移
+/// 一并平移到画面中心（钳制上限内），人脸框与关键点同步变换到纠偏后坐标系。
+/// 角度为 0（无需纠偏）时保持原图不动、不居中也基准平移。
 fn step_rotate(ctx: &mut PipelineCtx) -> CoreResult<()> {
     let timer = StageTimer::start(STAGE_ROTATE);
     let decision = ctx.decision.ok_or_else(|| missing_step(STEP_POSE))?;
+    let deg = decision.correction();
+    let (shift_x, shift_y) = match &ctx.face {
+        // 仅在有旋转偏离时居中（旋转会把人像带偏，0 度场景无偏差、保持原构图）
+        Some(face) if deg != 0.0 => {
+            let (w, h) = ctx
+                .dimensions()
+                .ok_or_else(|| missing_step(STEP_READ_IMAGE))?;
+            centering_shift(w, h, deg, face.face.center()).unwrap_or((0.0, 0.0))
+        }
+        _ => (0.0, 0.0),
+    };
     let (rot_img, rot_mask) = {
         let img = ctx
             .img
@@ -665,14 +681,29 @@ fn step_rotate(ctx: &mut PipelineCtx) -> CoreResult<()> {
             .ok_or_else(|| missing_step(STEP_READ_IMAGE))?;
         match ctx.mask.as_ref() {
             Some(mask) => {
-                let (i, m) = rotate_image_same(img, mask, decision.correction())?;
+                let (i, m) = rotate_translate_image_same(img, mask, deg, shift_x, shift_y)?;
                 (i, Some(m))
             }
-            None => (rotate_image(img, decision.correction()), None),
+            None => (rotate_translate_image(img, deg, shift_x, shift_y), None),
         }
     };
     ctx.rot_img = Some(rot_img);
     ctx.rot_mask = rot_mask;
+    // 人脸框/关键点同步变换到纠偏后坐标系：后续美颜保护掩膜与裁剪框按新坐标对位，
+    // 不再需要二次旋转
+    if let Some(face) = ctx.face.as_ref() {
+        let (w, h) = ctx
+            .dimensions()
+            .ok_or_else(|| missing_step(STEP_READ_IMAGE))?;
+        let m = rotate_translate_affine(
+            w as f64 / 2.0,
+            h as f64 / 2.0,
+            deg,
+            shift_x,
+            shift_y,
+        );
+        ctx.face = Some(transform_face(face, m));
+    }
     timer.stop(ctx.metrics);
     Ok(())
 }
@@ -774,9 +805,9 @@ fn step_beauty(ctx: &mut PipelineCtx) -> CoreResult<()> {
         _ => return Ok(()),
     };
     let timer = StageTimer::start(STAGE_BEAUTY);
-    let decision = ctx.decision.ok_or_else(|| missing_step(STEP_POSE))?;
+    // face 已由 step_rotate 变换到纠偏后坐标系，此处不再二次旋转
     let protect = match (&ctx.face, ctx.dimensions()) {
-        (Some(face), Some((w, h))) => Some(beauty_protect_mask(face, w, h, decision.correction())),
+        (Some(face), Some((w, h))) => Some(beauty_protect_mask(face, w, h)),
         // 未启用人脸检测时无五官保护区，整体美颜
         _ => None,
     };
@@ -996,25 +1027,10 @@ fn probability_mask(
     Ok(distance_feather(&soft, MASK_THRESHOLD, MASK_FEATHER_PX))
 }
 
-/// 五官保护掩膜：检测结果位于原图坐标系，美颜作用于纠偏后图像，故按同一旋转矩阵把
-/// 五官关键点变换到纠偏后坐标系再生成保护掩膜（旋转保距，人脸框尺寸不变、中心随变换移动）
-fn beauty_protect_mask(face: &FaceDetection, w: u32, h: u32, deg: f64) -> GrayImage {
-    let m = rotation_affine(w as f64 / 2.0, h as f64 / 2.0, deg);
-    let landmarks = face.landmarks.map(|p| {
-        let (x, y) = m * (p.x as f32, p.y as f32);
-        Point2::new(x as f64, y as f64)
-    });
-    let center = face.face.center();
-    let (cx, cy) = m * (center.x as f32, center.y as f32);
-    let (fw, fh) = (face.face.width(), face.face.height());
-    let rotated_face = FaceBox {
-        x1: cx - fw / 2.0,
-        y1: cy - fh / 2.0,
-        x2: cx + fw / 2.0,
-        y2: cy + fh / 2.0,
-        score: face.face.score,
-    };
-    feature_protect_mask(w, h, &face_feature_regions(&rotated_face, &landmarks))
+/// 五官保护掩膜：输入 `face` 已处于纠偏后坐标系（由 `step_rotate` 变换），
+/// 直接用其人脸框与关键点生成保护掩膜
+fn beauty_protect_mask(face: &FaceDetection, w: u32, h: u32) -> GrayImage {
+    feature_protect_mask(w, h, &face_feature_regions(&face.face, &face.landmarks))
 }
 
 /// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；髋/膝可用时改用三路融合；缺失时降级并记录告警。
@@ -1098,8 +1114,9 @@ fn pitch_warning(face: &FaceDetection) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::PipelineConfig;
+    use crate::vision::affine::rotation_affine;
     use crate::vision::crop::CropRect;
-    use image::Rgb;
+    use image::{Luma, Rgb};
 
     /// 测试用步骤：把读图结果整体提亮固定值（验证自定义步骤注册与执行）
     fn 提亮步骤(ctx: &mut PipelineCtx) -> CoreResult<()> {
@@ -1288,7 +1305,8 @@ mod tests {
 
     #[test]
     fn 美颜五官保护掩膜随纠偏角同步变换() {
-        let face = FaceDetection {
+        // 原始人脸坐标（纠偏前）
+        let original = FaceDetection {
             face: FaceBox {
                 x1: 100.0,
                 y1: 100.0,
@@ -1305,21 +1323,22 @@ mod tests {
             ],
         };
         // 未纠偏：五官保护区落在原坐标
-        let mask = beauty_protect_mask(&face, 300, 300, 0.0);
+        let mask = beauty_protect_mask(&original, 300, 300);
         assert!(mask.get_pixel(125, 140)[0] > 200, "左眼应被保护");
         assert!(mask.get_pixel(150, 185)[0] > 200, "嘴中心应被保护");
         // 绕图像中心 (150,150) 顺时针 90°：(x,y) → (150-(y-150), 150+(x-150))
-        // 左眼 (125,140) → (160,125)；嘴中心 (150,185) → (115,150)
-        let rotated = beauty_protect_mask(&face, 300, 300, 90.0);
+        let m = rotation_affine(150.0, 150.0, 90.0);
+        let rotated = transform_face(&original, m);
+        let mask = beauty_protect_mask(&rotated, 300, 300);
         for (name, x, y) in [("左眼", 160u32, 125u32), ("嘴中心", 115, 150)] {
             assert!(
-                rotated.get_pixel(x, y)[0] > 200,
+                mask.get_pixel(x, y)[0] > 200,
                 "纠偏后{name}({x},{y})应被保护，实际 {}",
-                rotated.get_pixel(x, y)[0]
+                mask.get_pixel(x, y)[0]
             );
         }
         // 远离五官的背景不受保护
-        assert_eq!(rotated.get_pixel(280, 20)[0], 0);
+        assert_eq!(mask.get_pixel(280, 20)[0], 0);
     }
 
     #[test]
@@ -1535,5 +1554,129 @@ mod tests {
             effective_steps(&cfg, None),
             vec![STEP_READ_IMAGE.to_string()]
         );
+    }
+
+    #[test]
+    fn 确有旋转时纠偏并居中同步人脸框() {
+        // 构造带人脸与旋转决策的上下文，直接执行纠偏步骤
+        let cfg = Config::default();
+        let mut metrics = TaskMetrics::new();
+        let req = ProcessRequest {
+            input: std::path::PathBuf::from("不存在.jpg"),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: Some(10.0),
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+            steps: None,
+        };
+        let mut engine = crate::inference::FakeEngine::new();
+        let suite = cfg.mode("balanced").unwrap().clone();
+        let (_, size) = cfg.resolve_size("one_inch").unwrap();
+        let mut ctx = PipelineCtx::new(
+            &cfg,
+            &mut engine,
+            &req,
+            &mut metrics,
+            suite,
+            size,
+            vec![("white".into(), cfg.background("white").unwrap().clone())],
+        );
+        // 100x100 图 + 掩膜；人脸略偏画面中心 (48,52)（距离 √8≈2.8 < 8%×100 钳制上限）
+        let img = RgbImage::from_pixel(100, 100, Rgb([10, 20, 30]));
+        ctx.img = Some(img);
+        ctx.mask = Some(GrayImage::from_pixel(100, 100, Luma([255u8])));
+        ctx.face = Some(FaceDetection {
+            face: FaceBox {
+                x1: 43.0,
+                y1: 47.0,
+                x2: 53.0,
+                y2: 57.0,
+                score: 0.99,
+            },
+            landmarks: [
+                Point2::new(47.0, 49.0),
+                Point2::new(51.0, 49.0),
+                Point2::new(49.0, 51.0),
+                Point2::new(47.0, 53.0),
+                Point2::new(51.0, 53.0),
+            ],
+        });
+        ctx.decision = Some(RotationDecision::Auto(10.0));
+        step_rotate(&mut ctx).unwrap();
+        let rot = ctx.rot_img.as_ref().unwrap();
+        assert_eq!(rot.dimensions(), (100, 100));
+        // 人手设置的自动纠偏 10°：人脸框被变换到纠偏后坐标系，不再等于原框
+        let face = ctx.face.as_ref().unwrap().face;
+        assert!(
+            (face.x1 - 43.0).abs() > 0.1 || (face.y1 - 47.0).abs() > 0.1,
+            "应有旋转变换，实际 {face:?}"
+        );
+        // 掩膜同步输出
+        assert!(ctx.rot_mask.is_some());
+    }
+
+    #[test]
+    fn 零角度纠偏保持原图与人脸框不变() {
+        let cfg = Config::default();
+        let mut metrics = TaskMetrics::new();
+        let req = ProcessRequest {
+            input: std::path::PathBuf::from("不存在.jpg"),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: Some(0.0),
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+            steps: None,
+        };
+        let mut engine = crate::inference::FakeEngine::new();
+        let suite = cfg.mode("balanced").unwrap().clone();
+        let (_, size) = cfg.resolve_size("one_inch").unwrap();
+        let mut ctx = PipelineCtx::new(
+            &cfg,
+            &mut engine,
+            &req,
+            &mut metrics,
+            suite,
+            size,
+            vec![("white".into(), cfg.background("white").unwrap().clone())],
+        );
+        let img = RgbImage::from_pixel(100, 100, Rgb([10, 20, 30]));
+        ctx.img = Some(img.clone());
+        ctx.mask = Some(GrayImage::from_pixel(100, 100, Luma([5u8])));
+        ctx.face = Some(FaceDetection {
+            face: FaceBox {
+                x1: 43.0,
+                y1: 47.0,
+                x2: 53.0,
+                y2: 57.0,
+                score: 0.99,
+            },
+            landmarks: [
+                Point2::new(47.0, 49.0),
+                Point2::new(51.0, 49.0),
+                Point2::new(49.0, 51.0),
+                Point2::new(47.0, 53.0),
+                Point2::new(51.0, 53.0),
+            ],
+        });
+        ctx.decision = Some(RotationDecision::Manual(0.0));
+        step_rotate(&mut ctx).unwrap();
+        // 零角度：原样返回，人脸框保持原坐标
+        assert_eq!(ctx.rot_img.as_ref().unwrap(), &img);
+        let face = ctx.face.as_ref().unwrap().face;
+        assert!((face.x1 - 43.0).abs() < 1e-3 && (face.y1 - 47.0).abs() < 1e-3);
+        // 居中平移只在有旋转时生效：0 度不搬动
+        assert_eq!(ctx.rot_mask.as_ref().unwrap().get_pixel(1, 1)[0], 5);
     }
 }
