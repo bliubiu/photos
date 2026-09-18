@@ -2,6 +2,15 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.23] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【姿态纠偏·置信度加权融合】`KeypointSet` 扩展携带原始置信度（`scores: [f32; 17]`），关键点硬过滤阈值由 0.3 下调至 0.2（`SCORE_HARD_THRESHOLD`）——0.2~0.3 的低分点保留坐标、在融合阶段自动降权，不再被一刀切丢弃；`vision::geometry` 新增 `confidence_scale`（低于 0.5 按比例衰减）与 `fused_angle_weighted` / `fused_angle_with_torso_weighted`（两路/三路均按置信度缩放后归一化，置信度恒为 1 时退化为原固定权重）；`workflow::fused_measured` 接线（眼/肩路置信度取两点较低者，躯干路取肩中点与下半身中点的较低置信度），**低置信噪声关键点不再主导融合角**
+- 【姿态纠偏】`KeypointSet` 新增 `eyes_conf` / `shoulders_conf` / `lower_ref`（下半身参考中点 + 置信度，沿袭髋→膝选择）
+
+### 📚 Docs 文档更新
+- `docs/07-能力增强.md`：§一.9 补置信度加权融合落地说明
+
 ## [2026.09.18.22] - 0.1.0
 
 ### ✨ New Features 新增功能

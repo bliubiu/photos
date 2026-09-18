@@ -26,8 +26,8 @@ use crate::vision::dressing::{self, SuitStyle};
 use crate::vision::face::{DecodeTransform, FaceBox, FaceDetection, decode_retinaface};
 use crate::vision::geometry::{
     PITCH_FRONTAL_RATIO, PITCH_RATIO_TOLERANCE, Point2, RotationDecision, SIDE_FACE_YAW_DEG,
-    decide_rotation, fused_angle, fused_angle_with_torso, head_angle, pitch_ratio_from_landmarks,
-    shoulder_angle, torso_angle, yaw_from_landmarks,
+    decide_rotation, fused_angle_weighted, fused_angle_with_torso_weighted, head_angle,
+    pitch_ratio_from_landmarks, shoulder_angle, torso_angle, yaw_from_landmarks,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
 use crate::vision::matting::{distance_feather, levelset_alpha};
@@ -1017,19 +1017,31 @@ fn beauty_protect_mask(face: &FaceDetection, w: u32, h: u32, deg: f64) -> GrayIm
     feature_protect_mask(w, h, &face_feature_regions(&rotated_face, &landmarks))
 }
 
-/// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；髋/膝可用时改用三路融合；缺失时降级并记录告警
+/// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；髋/膝可用时改用三路融合；缺失时降级并记录告警。
+/// 各路置信度参与加权：低置信路自动降权、其余路归一补足，防噪声点主导（两路/三路口径一致）。
 fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
     let head = kps.eyes().map(|(l, r)| head_angle(&l, &r));
+    let head_conf = kps.eyes_conf();
     let shoulder = kps.shoulders().map(|(l, r)| shoulder_angle(&l, &r));
+    let shoulder_conf = kps.shoulders_conf();
     // 躯干垂直度：肩中点 → 髋（缺失退回膝）中点，二者缺一时无法求解
-    let torso = match (kps.shoulder_mid(), kps.lower_mid()) {
-        (Some(s), Some(lower)) => Some(torso_angle(&s, &lower)),
+    let torso_data = (shoulder_mid_with_conf(kps), kps.lower_ref());
+    let torso = match (&torso_data.0, &torso_data.1) {
+        (Some((s, _)), Some((lower, _))) => Some(torso_angle(s, lower)),
         _ => None,
     };
     match (head, shoulder, torso) {
-        // 髋/膝可用 → 三路融合，额外修复高低肩之外的侧身倾斜
-        (Some(h), Some(s), Some(t)) => fused_angle_with_torso(h, s, t),
-        (Some(h), Some(s), None) => fused_angle(h, s),
+        // 髋/膝可用 → 三路置信度加权融合，额外修复高低肩之外的侧身倾斜
+        (Some(h), Some(s), Some(t)) => {
+            // 躯干轴由肩中点与下半身中点构成：取两路置信度较低者（瓶颈为准）
+            let torso_conf = torso_data
+                .0
+                .map(|(_, c)| c)
+                .unwrap_or(0.0)
+                .min(torso_data.1.map(|(_, c)| c).unwrap_or(0.0));
+            fused_angle_with_torso_weighted(h, head_conf, s, shoulder_conf, t, torso_conf)
+        }
+        (Some(h), Some(s), None) => fused_angle_weighted(h, head_conf, s, shoulder_conf),
         (Some(h), None, _) => {
             warnings.push("未检测到双肩，仅用头部角度".into());
             h
@@ -1043,6 +1055,16 @@ fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
             0.0
         }
     }
+}
+
+/// 双肩中点及置信度（双肩缺失返回 None）
+fn shoulder_mid_with_conf(kps: &KeypointSet) -> Option<(Point2, f64)> {
+    kps.shoulders().map(|(l, r)| {
+        (
+            Point2::new((l.x + r.x) / 2.0, (l.y + r.y) / 2.0),
+            kps.shoulders_conf(),
+        )
+    })
 }
 
 /// 侧脸告警：由人脸 5 点关键点（左眼、右眼、鼻尖）估算 yaw，超过阈值时返回中文提示。
@@ -1305,12 +1327,19 @@ mod tests {
         use crate::vision::keypoint::{
             LEFT_EYE, LEFT_HIP, LEFT_SHOULDER, RIGHT_EYE, RIGHT_HIP, RIGHT_SHOULDER,
         };
-        let mut kps = KeypointSet { points: [None; 17] };
+        let mut kps = KeypointSet {
+            points: [None; 17],
+            scores: [0.0; 17],
+        };
         // 双眼、双肩水平（角度 0）
         kps.points[LEFT_EYE] = Some(Point2::new(40.0, 40.0));
         kps.points[RIGHT_EYE] = Some(Point2::new(60.0, 40.0));
+        kps.scores[LEFT_EYE] = 0.99;
+        kps.scores[RIGHT_EYE] = 0.99;
         kps.points[LEFT_SHOULDER] = Some(Point2::new(20.0, 100.0));
         kps.points[RIGHT_SHOULDER] = Some(Point2::new(80.0, 100.0));
+        kps.scores[LEFT_SHOULDER] = 0.99;
+        kps.scores[RIGHT_SHOULDER] = 0.99;
         let mut w = Vec::new();
         // 无髋/膝 → 退化为两路（0.6×0 + 0.4×0 = 0），无告警
         assert!(fused_measured(&kps, &mut w).abs() < 1e-9);
@@ -1321,9 +1350,40 @@ mod tests {
         let hip_mid_x = 50.0 - dx;
         kps.points[LEFT_HIP] = Some(Point2::new(hip_mid_x - 5.0, 280.0));
         kps.points[RIGHT_HIP] = Some(Point2::new(hip_mid_x + 5.0, 280.0));
+        kps.scores[LEFT_HIP] = 0.9;
+        kps.scores[RIGHT_HIP] = 0.9;
         let measured = fused_measured(&kps, &mut w);
         assert!((measured - 2.0).abs() < 0.02, "实际 {measured}");
         assert!(w.is_empty(), "髋部可用时不应告警");
+    }
+
+    #[test]
+    fn 低置信肩线在姿态融合中自动降权() {
+        use crate::vision::keypoint::{LEFT_EYE, LEFT_SHOULDER, RIGHT_EYE, RIGHT_SHOULDER};
+        let mut kps = KeypointSet {
+            points: [None; 17],
+            scores: [0.0; 17],
+        };
+        // 双眼水平（角度 0，高置信）；双肩连线相对水平 -20°（右端更低）但有肩低置信（0.2）
+        let ry = 100.0 + 60.0 * (-20.0f64).to_radians().tan(); // ≈ 78.16
+        kps.points[LEFT_EYE] = Some(Point2::new(40.0, 40.0));
+        kps.points[RIGHT_EYE] = Some(Point2::new(60.0, 40.0));
+        kps.scores[LEFT_EYE] = 0.98;
+        kps.scores[RIGHT_EYE] = 0.98;
+        kps.points[LEFT_SHOULDER] = Some(Point2::new(20.0, 100.0));
+        kps.points[RIGHT_SHOULDER] = Some(Point2::new(80.0, ry));
+        kps.scores[LEFT_SHOULDER] = 0.2;
+        kps.scores[RIGHT_SHOULDER] = 0.99;
+        let mut w = Vec::new();
+        let measured = fused_measured(&kps, &mut w);
+        // 肩线角 = atan2(-21.84, 60) ≈ -20°；置信 0.2 → confidence_scale 0.4 → 权重 0.4×0.4=0.16
+        // 头 0°(0.6) + 肩 -20°(0.16)：融合 = 0.16×(-20)/0.76 ≈ -4.21°（远小于固定权重 0.4×(-20)=-8°）
+        assert!((measured + 3.0).abs() < 2.0, "低置信肩线应被降权，实际 {measured}");
+        assert!(
+            (measured + 8.0).abs() > 3.0,
+            "不得接近固定权重结果 -8°，实际 {measured}"
+        );
+        assert!(w.is_empty(), "点存在只降权，不应告警");
     }
 
     #[test]

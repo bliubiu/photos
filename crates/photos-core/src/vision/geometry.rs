@@ -85,6 +85,49 @@ pub fn fused_angle_with_torso(head: f64, shoulder: f64, torso: f64) -> f64 {
     TORSO_HEAD_WEIGHT * head + TORSO_SHOULDER_WEIGHT * shoulder + TORSO_WEIGHT * torso
 }
 
+/// 置信度缩放：低于 0.5 时按比例衰减（`c / 0.5`），0.5 以上视为可信（不衰减）。
+/// 低置信路自动降权后，其余路权重按归一化补足，防止低分噪声点主导融合角。
+pub fn confidence_scale(conf: f64) -> f64 {
+    let c = conf.clamp(0.0, 1.0);
+    if c >= 0.5 {
+        1.0
+    } else {
+        c / 0.5
+    }
+}
+
+/// 两路置信度加权融合：0.6×头部 + 0.4×肩线，各按置信度缩放后归一化；
+/// 置信度恒为 1 时退化为 [`fused_angle`]。
+pub fn fused_angle_weighted(head: f64, head_conf: f64, shoulder: f64, shoulder_conf: f64) -> f64 {
+    let hw = HEAD_WEIGHT * confidence_scale(head_conf);
+    let sw = SHOULDER_WEIGHT * confidence_scale(shoulder_conf);
+    let sum = hw + sw;
+    if sum <= 0.0 {
+        return HEAD_WEIGHT * head + SHOULDER_WEIGHT * shoulder;
+    }
+    (hw * head + sw * shoulder) / sum
+}
+
+/// 三路置信度加权融合：0.5×头部 + 0.3×肩线 + 0.2×躯干，各按置信度缩放后归一化；
+/// 置信度恒为 1 时退化为 [`fused_angle_with_torso`]。
+pub fn fused_angle_with_torso_weighted(
+    head: f64,
+    head_conf: f64,
+    shoulder: f64,
+    shoulder_conf: f64,
+    torso: f64,
+    torso_conf: f64,
+) -> f64 {
+    let hw = TORSO_HEAD_WEIGHT * confidence_scale(head_conf);
+    let sw = TORSO_SHOULDER_WEIGHT * confidence_scale(shoulder_conf);
+    let tw = TORSO_WEIGHT * confidence_scale(torso_conf);
+    let sum = hw + sw + tw;
+    if sum <= 0.0 {
+        return TORSO_HEAD_WEIGHT * head + TORSO_SHOULDER_WEIGHT * shoulder + TORSO_WEIGHT * torso;
+    }
+    (hw * head + sw * shoulder + tw * torso) / sum
+}
+
 /// 由人脸 5 点关键点（左眼、右眼、鼻尖）估计头部偏转（yaw，度，正负表示左右转）。
 /// 正面时鼻尖投影落在双眼中点；转头时鼻尖向偏转方向偏移，偏移量与双眼半间距之比近似
 /// `sin(yaw)`（自归一化，不依赖脸框宽度这类随偏转同时收缩的参考量）。
@@ -231,6 +274,54 @@ mod tests {
             (TORSO_HEAD_WEIGHT + TORSO_SHOULDER_WEIGHT + TORSO_WEIGHT - 1.0).abs() < 1e-9,
             "三路权重应归一"
         );
+    }
+
+    #[test]
+    fn 置信度缩放单调() {
+        assert_eq!(confidence_scale(1.0), 1.0);
+        assert_eq!(confidence_scale(0.5), 1.0);
+        assert_eq!(confidence_scale(0.25), 0.5);
+        assert_eq!(confidence_scale(0.0), 0.0);
+        assert_eq!(confidence_scale(0.4), 0.8);
+        // 越界钳制
+        assert_eq!(confidence_scale(1.2), 1.0);
+        assert_eq!(confidence_scale(-0.3), 0.0);
+    }
+
+    #[test]
+    fn 全置信加权退化为固定权重() {
+        // 头 10° / 肩 20°：0.6×10 + 0.4×20 = 14
+        let w = fused_angle_weighted(10.0, 1.0, 20.0, 1.0);
+        assert!((w - 14.0).abs() < 1e-9, "实际 {w}");
+        // 三路 0.5×10 + 0.3×20 + 0.2×30 = 17
+        let w3 = fused_angle_with_torso_weighted(10.0, 1.0, 20.0, 1.0, 30.0, 1.0);
+        assert!((w3 - 17.0).abs() < 1e-9, "实际 {w3}");
+    }
+
+    #[test]
+    fn 低置信肩线被自动降权() {
+        // 固定权重结果：0.6×0 + 0.4×20 = 8
+        let fixed = fused_angle(0.0, 20.0);
+        assert!((fixed - 8.0).abs() < 1e-9);
+        // 头 0°（高置信）、肩 20°（低置信）：加权后结果应明显偏向头部（接近 0 而非 8）
+        let w = fused_angle_weighted(0.0, 1.0, 20.0, 0.1);
+        assert!(w > 0.0 && w < 8.0);
+        // 肩置信越低越接近纯头部角
+        let w_low = fused_angle_weighted(0.0, 1.0, 20.0, 0.05);
+        let w_high = fused_angle_weighted(0.0, 1.0, 20.0, 0.45);
+        assert!(w_low < w_high, "置信度越低权重越小：{w_low} vs {w_high}");
+        // 肩线近似不可信时，融合角远离固定权重结果（≥6.67° 偏差）
+        assert!(
+            (w_low - fixed).abs() > 6.0,
+            "低置信不应接近固定权重结果，实际 {w_low}"
+        );
+    }
+
+    #[test]
+    fn 单路基零时兜底固定权重() {
+        // 头/肩置信全 0（钳制后 sum ≤ 0）→ 退回固定权重结果（仍 14）
+        let w = fused_angle_weighted(10.0, 0.0, 20.0, 0.0);
+        assert!((w - 14.0).abs() < 1e-9, "实际 {w}");
     }
 
     #[test]
