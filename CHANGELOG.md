@@ -2,6 +2,17 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.21] - 0.1.0
+
+### 📈 Improvements 性能/体验优化
+- 【推理引擎池·健壮性】**显式错误驱逐**：`EngineLease` 新增 `mark_broken()`——任务因推理层错误（`CoreError::Inference`，如「推理会话锁损坏」、会话创建/装载异常）失败时标记损坏，`Drop` 归还时由 `EnginePool::discard` **丢弃该引擎并释放一个容量位**（`created -= 1` + 唤醒等待者），坏会话不再长期留在池中污染后续任务；业务性失败（未检出人脸、读图失败等）不驱逐，避免健康引擎被无谓重建
+- 【推理引擎池·性能】**启动预热**：`production_engine_factory` 启动时调用 `prewarm_default`——后台线程借出一个引擎、按默认模式（`[general] default_mode`）与默认步骤经 `workflow::required_model_ids` 推导并预装载所需模型后归还池中，首个任务免去冷启动装载开销；**失败仅告警不阻断启动**（模型未就绪 / 推理层异常属预期），后续任务会照常惰性重试
+- 【推理引擎池】`handlers.rs` 任务执行处按上述规则在 `run_pipeline_with_metrics` 返回 `Err(CoreError::Inference(_))` 时调用 `mark_broken`（不使用 `catch_unwind`：release 下 `panic = "abort"` 使其完全失效）
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`：§4.1 推理引擎池补「显式错误驱逐 + 启动预热」两点健壮性说明
+- `docs/07-能力增强.md`：§三.2 补 2026.09.18.21 健壮性说明
+
 ## [2026.09.18.20] - 0.1.0
 
 ### 📈 Improvements 性能/体验优化

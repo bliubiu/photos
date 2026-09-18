@@ -1144,6 +1144,10 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             // 分阶段耗时指标：失败时仍保留已记录阶段，供错误上报定位
             let mut metrics = TaskMetrics::new();
             let r = run_pipeline_with_metrics(&state2.cfg, lease.engine_mut(), &req, &mut metrics);
+            // 推理层失败（会话损坏、装载异常等）会污染引擎：显式驱逐，避免坏会话长期留在池中
+            if matches!(r, Err(photos_core::error::CoreError::Inference(_))) {
+                lease.mark_broken();
+            }
             (r, metrics)
         })
         .await;

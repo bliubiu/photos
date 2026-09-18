@@ -33,6 +33,8 @@ pub struct EngineLease {
     pool: Option<Arc<EnginePool>>,
     /// 借出的引擎（None 表示已归还）
     engine: Option<Box<dyn InferenceEngine>>,
+    /// 引擎已损坏：归还时直接丢弃（不污染池）并释放一个容量位
+    broken: bool,
 }
 
 impl EngineLease {
@@ -41,6 +43,7 @@ impl EngineLease {
         Self {
             pool: None,
             engine: Some(engine),
+            broken: false,
         }
     }
 
@@ -48,12 +51,24 @@ impl EngineLease {
     pub fn engine_mut(&mut self) -> &mut dyn InferenceEngine {
         self.engine.as_mut().expect("引擎借用已释放").as_mut()
     }
+
+    /// 标记引擎已损坏：归还时丢弃该引擎并释放容量位，供后续任务新建健康引擎。
+    ///
+    /// 仅在推理层失败（会话损坏、装载异常等）时调用；业务性失败（未检出人脸、
+    /// 读图失败等）不影响引擎健康，不应调用。
+    pub fn mark_broken(&mut self) {
+        self.broken = true;
+    }
 }
 
 impl Drop for EngineLease {
     fn drop(&mut self) {
         if let (Some(pool), Some(engine)) = (self.pool.take(), self.engine.take()) {
-            pool.put_back(engine);
+            if self.broken {
+                pool.discard();
+            } else {
+                pool.put_back(engine);
+            }
         }
     }
 }
@@ -75,6 +90,7 @@ impl EnginePool {
         EngineLease {
             pool: Some(self.clone()),
             engine: Some(engine),
+            broken: false,
         }
     }
 
@@ -102,6 +118,14 @@ impl EnginePool {
     fn put_back(&self, engine: Box<dyn InferenceEngine>) {
         if let Ok(mut state) = self.state.lock() {
             state.idle.push(engine);
+            self.idle_ready.notify_one();
+        }
+    }
+
+    /// 丢弃一个已损坏引擎：不归还任何会话，释放一个容量位（由 Drop for EngineLease 调用）
+    fn discard(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.created = state.created.saturating_sub(1);
             self.idle_ready.notify_one();
         }
     }
@@ -193,5 +217,22 @@ mod tests {
         let mut lease = EngineLease::owned(Box::new(CountingEngine));
         let tensor = TensorData::new(vec![1], vec![0.0]).unwrap();
         assert!(lease.engine_mut().run("任意", &tensor).unwrap().is_empty());
+    }
+
+    #[test]
+    fn 标记损坏的引擎被驱逐且释放容量位() {
+        let (pool, built) = counter_pool(1);
+        {
+            let mut lease = pool.acquire(10, 10);
+            lease.mark_broken();
+        }
+        assert_eq!(pool.created(), 0, "损坏引擎应被丢弃并释放容量位");
+        // 容量位释放后应能新建健康引擎（而不是复用损坏的那个）
+        let _lease = pool.acquire(10, 10);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "应新建引擎而非复用损坏引擎"
+        );
     }
 }

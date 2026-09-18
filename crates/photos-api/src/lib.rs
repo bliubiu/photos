@@ -101,7 +101,34 @@ pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<EngineFactory> 
         Arc::new(|_, _| photos_core::inference::default_engine()),
         capacity,
     );
+    // 启动预热：异步装载默认模式（balanced）的小模型，首个任务免去冷启动装载开销（失败不阻断）
+    prewarm_default(pool.clone(), cfg);
     Ok(Arc::new(move |w, h| pool.acquire(w, h)))
+}
+
+/// 异步预热默认模式的引擎：与首个任务同构地装载默认步骤所需模型后归还池中，
+/// 使后续任务直接复用已装载的会话。失败仅告警（模型未就绪 / 推理层异常属预期），不阻断启动。
+fn prewarm_default(pool: Arc<EnginePool>, cfg: &Config) {
+    let cfg = cfg.clone();
+    let mode = cfg.general.default_mode.clone();
+    let suite = match cfg.mode(&mode) {
+        Ok(s) => s.clone(),
+        Err(e) => {
+            tracing::warn!("预热默认模式“{mode}”失败：{e}");
+            return;
+        }
+    };
+    let side = cfg.general.max_input_side;
+    std::thread::spawn(move || {
+        let steps = photos_core::workflow::effective_steps(&cfg, None);
+        let ids = photos_core::workflow::required_model_ids(&cfg, &suite, &steps);
+        let mut lease = pool.acquire(side, side);
+        for id in &ids {
+            if let Err(e) = lease.engine_mut().load(&cfg, id, suite.execution_provider) {
+                tracing::warn!("预热模型“{id}”失败（任务执行时将重试）：{e}");
+            }
+        }
+    });
 }
 
 /// 演示引擎工厂：内置 mock 回放（椭圆人形），**仅限显式 `--demo` 或 PHOTOS_DEMO=1**。
