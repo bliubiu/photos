@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
-use image::{GrayImage, RgbImage, RgbaImage};
+use image::{GrayImage, Rgb, RgbImage, RgbaImage};
 use serde::Serialize;
 
 use crate::config::{BackgroundSpec, Config, ModeSuite, SizeSpec};
@@ -778,18 +778,40 @@ fn step_dress(ctx: &mut PipelineCtx) -> CoreResult<()> {
                 ))
             })
             .transpose()?;
+        // 用户真实服装图：RGBA 加载；自带透明通道按 alpha 贴合，否则纯色背景保守去背后贴合
+        // 程序化正装为纯色图像（无背景概念），直接走 RGB 贴合，防止被误判为纯色背景去背
+        let user_garment = params.garment.as_ref();
         let clothes = if style.is_some_and(SuitStyle::is_full) {
             dressing::full_clothes_mask(&parsing)
         } else {
             dressing::clothes_mask(&parsing)
         };
-        let garment = match &params.garment {
-            Some(path) => image::open(path)
-                .map_err(|e| CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display())))?
-                .to_rgb8(),
-            None => dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360),
-        };
-        dressing::fit_garment(rot_img, &garment, &clothes)?
+        match user_garment {
+            Some(path) => {
+                let img = image::open(path)
+                    .map_err(|e| CoreError::Image(format!("读取服装图 {} 失败：{e}", path.display())))?;
+                let rgba = img.to_rgba8();
+                let has_alpha = rgba.pixels().any(|p| p[3] < 250);
+                if has_alpha {
+                    dressing::fit_garment_alpha(rot_img, &rgba, &clothes)?
+                } else {
+                    // 无透明通道：提取 RGB，尝试纯色背景去背；去背后仍按 alpha 贴合
+                    let (gw, gh) = rgba.dimensions();
+                    let mut rgb = RgbImage::new(gw, gh);
+                    for (p, o) in rgba.pixels().zip(rgb.pixels_mut()) {
+                        *o = Rgb([p[0], p[1], p[2]]);
+                    }
+                    match dressing::auto_cutout_pure_background(&rgb) {
+                        Some(cut) => dressing::fit_garment_alpha(rot_img, &cut, &clothes)?,
+                        None => dressing::fit_garment_alpha(rot_img, &rgba, &clothes)?,
+                    }
+                }
+            }
+            None => {
+                let suit = dressing::formal_suit(style.unwrap_or(SuitStyle::Navy), 240, 360);
+                dressing::fit_garment(rot_img, &suit, &clothes)?
+            }
+        }
     };
     ctx.dressed = Some(out);
     timer.stop(ctx.metrics);
@@ -843,6 +865,14 @@ fn step_background(ctx: &mut PipelineCtx) -> CoreResult<()> {
         .map(|m| distance_feather(m, MASK_FEATHER_PX));
     if alpha.is_none() {
         ctx.warn("未启用人像抠图步骤，跳过换底合成并直接裁切当前图像");
+    }
+    if let Some(f) = ctx.face.as_ref() {
+        let fb = f.face;
+        tracing::debug!(
+            "图幅 {}x{} 人脸框 x1={} y1={} x2={} y2={}（宽{} 高{}）目标 {}x{}",
+            w, h, fb.x1, fb.y1, fb.x2, fb.y2, fb.width(), fb.height(),
+            size.width_px, size.height_px
+        );
     }
     // 裁剪框与底色无关，先算一次；无人脸框时退化为居中裁切
     let crop = match ctx.face.as_ref().map(|f| f.face) {

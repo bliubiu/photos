@@ -4,6 +4,8 @@
 //! 脸中心置于裁剪框 `HEAD_HEIGHT_RATIO`（45%）高度处，人脸水平居中；
 //! 第二轮（人像边界修正，需 alpha 掩膜）：左右贴边等比收缩、头顶距顶部
 //! [10%,12%] 两轮调整、底部贴底——与 Hivision 的 `get_box` / `detect_distance` / `move` 等价。
+//! 若人像底部被第一轮裁剪框截断（半身/全身输入，5×脸面积框装不下肩部），则按
+//! 「真实头高（头顶→脸框底）× 肩部扩展系数」重定裁剪高度，保证脖子与肩完整入框。
 
 use crate::error::{CoreError, CoreResult};
 use crate::vision::face::FaceBox;
@@ -19,6 +21,9 @@ pub const HEAD_TOP_MAX: f64 = 0.12;
 pub const HEAD_TOP_MIN: f64 = 0.10;
 /// alpha 视为人像像素的存在阈值（过滤羽化过渡带噪声）
 const PERSON_ALPHA_THRESHOLD: u8 = 8;
+/// 下巴下方保留空间系数（相对真实头高）：底部截断时裁剪框高度按
+/// 「头高 × (1 + 系数) / (1 − 头顶留白)」扩张，使下巴下留有 ~0.9 头高的脖子/肩空间。
+const HEAD_GROUND_FACTOR: f64 = 0.9;
 
 /// 裁剪框（原图坐标）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +72,28 @@ pub fn compute_crop(
     let mut y0 = (fcy - ch * HEAD_HEIGHT_RATIO).clamp(0.0, (img_h as f64 - ch).max(0.0));
 
     // —— 第二轮：alpha 人像边界修正 ——
+    if let Some((_bx0, by0, _bx1, _by1, bottom_clipped)) =
+        alpha.and_then(|a| person_bbox(a, x0, y0, cw, ch))
+    {
+        // 人像底部被第一轮裁剪框截断（bottom_clipped）：半身/全身输入下
+        // 5×脸面积裁剪框会裁掉脖子与肩。以真实头高（头顶→脸框底）重定
+        // 裁剪高度，使下巴下方保留 HEAD_GROUND_FACTOR（0.9）倍头高的空间。
+        if bottom_clipped {
+            let head_h = (face.y2 as f64 - by0).max(1.0);
+            let want_ch = head_h * (1.0 + HEAD_GROUND_FACTOR) / (1.0 - HEAD_TOP_MAX);
+            if want_ch > ch && want_ch <= img_h as f64 {
+                ch = want_ch;
+                cw = want_ch * (target_w as f64 / target_h as f64);
+                let fit = (img_w as f64 / cw).min(img_h as f64 / ch).min(1.0);
+                if fit < 1.0 {
+                    cw *= fit;
+                    ch *= fit;
+                }
+                x0 = (fcx - cw / 2.0).clamp(0.0, (img_w as f64 - cw).max(0.0));
+                y0 = (fcy - ch * HEAD_HEIGHT_RATIO).clamp(0.0, (img_h as f64 - ch).max(0.0));
+            }
+        }
+    }
     if let Some((bx0, by0, bx1, by1, bottom_clipped)) =
         alpha.and_then(|a| person_bbox(a, x0, y0, cw, ch))
     {
@@ -359,6 +386,73 @@ mod tests {
             score: 0.9,
         };
         assert!(compute_crop(&bad, None, 100, 100, 100, 100).is_err());
+    }
+
+    #[test]
+    fn 底部截断时按头高扩展保留肩部空间() {
+        // 半身照：RetinaFace 面框不含头顶，且人像底部延伸出第一轮裁剪框
+        // （bottom_clipped）→ 以真实头高（头顶→脸框底）扩展裁剪框高度，
+        // 使下巴下方保留约 0.9×头高的脖子/肩部空间
+        let face = FaceBox {
+            x1: 140.0,
+            y1: 70.0,
+            x2: 160.0,
+            y2: 110.0, // 脸框高 40
+            score: 0.99,
+        };
+        let mut alpha = GrayImage::new(300, 300);
+        // 头顶 y=55（面框顶上方 15px，模拟含发头顶），人像竖直延伸到图底 → 必然 bottom_clipped
+        for y in 55..300 {
+            for x in 100..200 {
+                alpha.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let r = compute_crop(&face, Some(&alpha), 300, 300, 295, 413).unwrap();
+        // 头高 = 头顶55 → 脸框底105(=面框y2 110 基准? 实际用真实头高 110-55=55)
+        // 期望裁剪高 ≥ 55×(1+0.9)/(1-0.12) ≈ 118.8
+        let head_h = 110.0 - 55.0;
+        let want_ch = head_h * (1.0 + HEAD_GROUND_FACTOR) / (1.0 - HEAD_TOP_MAX);
+        assert!(
+            r.height as f64 >= want_ch * 0.95,
+            "底部截断时应扩展裁剪框：期望高度≥{want_ch:.1}，实际 {}（{r:?}）",
+            r.height
+        );
+        // 下巴（脸框底 110）下方应保留 ~0.9 头高的空间
+        let chin_gap = (r.y + r.height) as f64 - 110.0;
+        assert!(
+            (chin_gap / head_h - HEAD_GROUND_FACTOR).abs() < 0.15,
+            "下巴下方应保留约 0.9×头高空间，实际 {chin_gap:.1}px（头高 {head_h}）"
+        );
+        // 比例保持目标
+        let ratio = r.width as f64 / r.height as f64;
+        assert!((ratio - 295.0 / 413.0).abs() < 0.01, "比例失真 {ratio}");
+    }
+
+    #[test]
+    fn 正常大头照不触发底部扩展() {
+        // 标准证件照式大头照：人像底部恰好不超出第一轮裁剪框 → 保持 Hivision 原始行为
+        let face = FaceBox {
+            x1: 140.0,
+            y1: 80.0,
+            x2: 160.0,
+            y2: 120.0,
+            score: 0.99,
+        };
+        let mut alpha = GrayImage::new(300, 300);
+        for y in 70..180 {
+            for x in 100..200 {
+                alpha.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let r = compute_crop(&face, Some(&alpha), 300, 300, 295, 413).unwrap();
+        // 人像底部 180 < 第一轮裁剪框底 → 不应触发头高扩展（保持面积定标结果）
+        let ratio = r.width as f64 / r.height as f64;
+        assert!((ratio - 295.0 / 413.0).abs() < 0.01, "比例失真 {ratio}");
+        assert!(
+            r.height < 150,
+            "正常大头照不应被过度放大，实际高 {}（{r:?}）",
+            r.height
+        );
     }
 
     #[test]

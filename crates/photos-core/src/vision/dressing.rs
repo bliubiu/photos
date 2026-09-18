@@ -1,7 +1,7 @@
 //! 换装算子：人像解析（LIP 20 类语义分割）→ 衣服区域 mask → 服装贴合 / 程序化正装。
 //! 纯 Rust 实现（image + imageproc + 自研算子），虚拟试衣换装（M4 遗留项落地）。
 
-use image::{GrayImage, Luma, Rgb, RgbImage};
+use image::{GrayImage, Luma, Rgb, RgbImage, Rgba, RgbaImage};
 
 use crate::error::{CoreError, CoreResult};
 use crate::inference::TensorData;
@@ -38,6 +38,13 @@ const GARMENT_SHADING_RANGE: (f32, f32) = (0.6, 1.4);
 
 /// 光影场模糊 sigma 占贴合区域短边的比例（去衣物纹理噪声、保留大范围光照方向）
 const GARMENT_SHADING_SIGMA_RATIO: f32 = 0.05;
+
+/// 自动去背：四角背景色差阈值（欧氏距离；纯色背景通常 < 12）
+const PURE_BG_CORNER_TOL: f32 = 12.0;
+/// 自动去背：背景判定距离下限（≤ 视为背景，透明）
+const PURE_BG_MIN_DIST: f32 = 20.0;
+/// 自动去背：背景判定距离上限（≥ 视为服装，不透明）
+const PURE_BG_MAX_DIST: f32 = 48.0;
 
 /// 程序化正装样式（无外部素材即可生成）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,9 +228,25 @@ pub fn fit_garment_parts(
 
 /// 服装贴合：按衣服 mask 包围盒将服装图等比缩放居中贴合，边缘按衣服 mask 羽化合成。
 /// 头发/脸/手臂等保留区天然不受覆盖（不属于衣服 mask）；未检出衣服时原样返回。
+/// 服装图为不透明（无透明通道）时走此入口；透明服装图请使用 `fit_garment_alpha`。
+/// 程序化纯色正装使用原图明暗调制（`apply_shading = true`）增加光影质感。
 pub fn fit_garment(
     portrait: &RgbImage,
     garment: &RgbImage,
+    clothes: &GrayImage,
+) -> CoreResult<RgbImage> {
+    let (gw, gh) = garment.dimensions();
+    let opaque = GrayImage::from_pixel(gw, gh, Luma([255u8]));
+    fit_garment_impl(portrait, garment, &opaque, clothes, true)
+}
+
+/// 服装贴合（带透明通道）：服装图 alpha 通道雕刻贴合形状，透明区不覆盖原人像。
+/// 适用于真实服装照片抠底图（如 PNG 透明背景），杜绝「整张贴图含背景块」；
+/// 用法与 `fit_garment` 一致，服装图为 `RgbaImage`。真实服装自带光影与明暗，
+/// 不再用原图衣服区调制亮度（避免色相被带偏）。
+pub fn fit_garment_alpha(
+    portrait: &RgbImage,
+    garment: &RgbaImage,
     clothes: &GrayImage,
 ) -> CoreResult<RgbImage> {
     if portrait.dimensions() != clothes.dimensions() {
@@ -235,11 +258,47 @@ pub fn fit_garment(
             clothes.height()
         )));
     }
+    let (gw, gh) = garment.dimensions();
+    let mut rgb = RgbImage::new(gw, gh);
+    let mut alpha = GrayImage::new(gw, gh);
+    for (p, (r, a)) in garment.pixels().zip(rgb.pixels_mut().zip(alpha.pixels_mut())) {
+        *r = Rgb([p[0], p[1], p[2]]);
+        *a = Luma([p[3]]);
+    }
+    fit_garment_impl(portrait, &rgb, &alpha, clothes, false)
+}
+
+/// 服装贴合共享内核：按衣服 mask 包围盒将服装图等比缩放居中贴合，边缘按衣服 mask 羽化合成。
+/// 服装图 alpha 面具雕刻形状（透明区不覆盖人像，保留内外轮廓）；头发/脸/手臂等保留区
+/// 天然不受覆盖（不属于衣服 mask）；未检出衣服时原样返回。
+fn fit_garment_impl(
+    portrait: &RgbImage,
+    garment: &RgbImage,
+    garment_alpha: &GrayImage,
+    clothes: &GrayImage,
+    apply_shading: bool,
+) -> CoreResult<RgbImage> {
+    if portrait.dimensions() != clothes.dimensions() {
+        return Err(CoreError::Image(format!(
+            "人像与衣服 mask 尺寸不一致：{}x{} vs {}x{}",
+            portrait.width(),
+            portrait.height(),
+            clothes.width(),
+            clothes.height()
+        )));
+    }
+    let (gw, gh) = garment.dimensions();
+    let (aw, ah) = garment_alpha.dimensions();
+    if (gw, gh) != (aw, ah) {
+        return Err(CoreError::Image(format!(
+            "服装图与 alpha 面具尺寸不一致：{}x{} vs {}x{}",
+            gw, gh, aw, ah
+        )));
+    }
     let Some((x0, y0, x1, y1)) = bounding_box(clothes) else {
         return Ok(portrait.clone());
     };
     let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
-    let (gw, gh) = garment.dimensions();
     if gw == 0 || gh == 0 {
         return Err(CoreError::Image("服装图为空".into()));
     }
@@ -250,16 +309,28 @@ pub fn fit_garment(
     let gx = x0 + (bw - tw) / 2;
     let gy = y0 + (bh - th) / 2;
     let fit = image::imageops::resize(garment, tw, th, image::imageops::FilterType::Triangle);
-    // alpha = 衣服 mask 局部区域，羽化平滑边缘
+    let fit_alpha =
+        image::imageops::resize(garment_alpha, tw, th, image::imageops::FilterType::Triangle);
+    // alpha = 衣服 mask 局部 × 服装图 alpha（塑造服装自身形状）
     let mut alpha = GrayImage::from_pixel(tw, th, Luma([0u8]));
     for y in 0..th {
         for x in 0..tw {
-            alpha.put_pixel(x, y, Luma([clothes.get_pixel(gx + x, gy + y)[0]]));
+            let mask = clothes.get_pixel(gx + x, gy + y)[0];
+            let ga = fit_alpha.get_pixel(x, y)[0];
+            alpha.put_pixel(
+                x,
+                y,
+                Luma([((mask as f32 * ga as f32 / 255.0).round() as u16).min(255) as u8]),
+            );
         }
     }
     let alpha = super::matting::feather(&alpha, GARMENT_FEATHER_SIGMA);
-    // 光影合成：以原图衣服区域的明暗起伏（含光照方向与衣物褶皱）调制服装亮度
-    let shade = shading_factors(portrait, clothes, gx, gy, tw, th);
+    // 光影合成：程序化正装以原图衣服区域明暗起伏调制亮度；真实服装自带光影，跳过调制
+    let shade = if apply_shading {
+        shading_factors(portrait, clothes, gx, gy, tw, th)
+    } else {
+        vec![1.0; (tw * th) as usize]
+    };
     // 合成：out = 服装 × alpha + 原人像 × (1 - alpha)
     let mut out = portrait.clone();
     for y in 0..th {
@@ -295,6 +366,71 @@ fn shade_pixel(px: Rgb<u8>, factor: f32) -> Rgb<u8> {
         (px[1] as f32 * factor).round().clamp(0.0, 255.0) as u8,
         (px[2] as f32 * factor).round().clamp(0.0, 255.0) as u8,
     ])
+}
+
+/// 保守纯色背景自动去背：检测服装图四角颜色一致则判定为纯色背景，将接近背景色的
+/// 像素置透明返回 `RgbaImage`；背景不统一（四角色差过大）时返回 None 保持原图。
+/// 用于真实服装图（干净纯色底）无需手工抠底即可贴合。
+pub fn auto_cutout_pure_background(img: &RgbImage) -> Option<RgbaImage> {
+    let (w, h) = img.dimensions();
+    if w < 8 || h < 8 {
+        return None;
+    }
+    // 采样四角中心小块的均值作为背景参考色
+    let corner = |cx: u32, cy: u32| -> [f32; 3] {
+        let (mut s, mut n) = ([0f64; 3], 0usize);
+        for dy in 0..4u32 {
+            for dx in 0..4u32 {
+                let x = (cx * 7 + dx).min(w - 1);
+                let y = (cy * 7 + dy).min(h - 1);
+                let p = img.get_pixel(x, y);
+                for (i, c) in [p[0], p[1], p[2]].iter().enumerate() {
+                    s[i] += *c as f64;
+                }
+                n += 1;
+            }
+        }
+        [
+            (s[0] / n as f64) as f32,
+            (s[1] / n as f64) as f32,
+            (s[2] / n as f64) as f32,
+        ]
+    };
+    let corners = [corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1)];
+    // 背景色差阈值：四角两两最大欧氏距离（纯色背景通常 < 12）
+    let max_diff = (0..corners.len())
+        .flat_map(|i| (i + 1..corners.len()).map(move |j| (i, j)))
+        .map(|(i, j)| {
+            let (a, b) = (corners[i], corners[j]);
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        })
+        .fold(0.0f32, f32::max);
+    if max_diff > PURE_BG_CORNER_TOL {
+        return None;
+    }
+    let bg = [
+        (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4.0,
+        (corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) / 4.0,
+        (corners[0][2] + corners[1][2] + corners[2][2] + corners[3][2]) / 4.0,
+    ];
+    // 接近背景色阈值：低于该值视为背景（透明），高于该值视为服装（不透明），之间渐变过渡
+    let mut out = RgbaImage::new(w, h);
+    for (p, o) in img.pixels().zip(out.pixels_mut()) {
+        let d = ((p[0] as f32 - bg[0]).powi(2)
+            + (p[1] as f32 - bg[1]).powi(2)
+            + (p[2] as f32 - bg[2]).powi(2))
+        .sqrt();
+        let a = if d <= PURE_BG_MIN_DIST {
+            0.0
+        } else if d >= PURE_BG_MAX_DIST {
+            255.0
+        } else {
+            let t = (d - PURE_BG_MIN_DIST) / (PURE_BG_MAX_DIST - PURE_BG_MIN_DIST);
+            t * 255.0
+        };
+        *o = Rgba([p[0], p[1], p[2], a.round().clamp(0.0, 255.0) as u8]);
+    }
+    Some(out)
 }
 
 /// 服装贴合区域的光影场：输出逐像素亮度调制系数（1.0 = 与原图衣服区平均亮度一致）。
@@ -741,5 +877,95 @@ mod tests {
             image: &top,
         }];
         assert!(fit_garment_parts(&portrait, &parsing, &parts).is_err());
+    }
+
+    #[test]
+    fn 透明通道服装仅覆盖不透明区域() {
+        // 人像 40x40 灰底；衣服 mask 全图矩形式；服装图为 4x4 RGBA：仅中央 2x2 不透明红，
+        // 四周透明。贴合后四周应保持原灰底，中央非透明区应出现服装红。
+        let portrait = RgbImage::from_pixel(40, 40, Rgb([200, 200, 200]));
+        let clothes = GrayImage::from_pixel(40, 40, Luma([255u8]));
+        let mut garment = RgbaImage::new(4, 4);
+        for (p, o) in garment.pixels_mut().enumerate() {
+            let (x, y) = ((p % 4) as u32, (p / 4) as u32);
+            let a = if (1..3).contains(&x) && (1..3).contains(&y) { 255 } else { 0 };
+            *o = Rgba([200, 30, 30, a]);
+        }
+        let out = fit_garment_alpha(&portrait, &garment, &clothes).unwrap();
+        // 包围盒为全图 (40x40)，服装图被等比放大至填满；透明边角应回落到原灰底
+        assert_eq!(*out.get_pixel(3, 3), Rgb([200, 200, 200]));
+        assert_eq!(*out.get_pixel(36, 3), Rgb([200, 200, 200]));
+        // 中央服装区应为偏红
+        let c = *out.get_pixel(20, 20);
+        assert!(c[0] > 150 && c[2] < 100, "中央应偏红，实际 {c:?}");
+    }
+
+    #[test]
+    fn 无透明通道服装行为与原贴合一致() {
+        // 全不透明服装图经 alpha 路径应等价于原 RGB 贴合
+        let portrait = RgbImage::from_pixel(40, 40, Rgb([200, 200, 200]));
+        let clothes = GrayImage::from_pixel(40, 40, Luma([255u8]));
+        let rgb = RgbImage::from_pixel(4, 4, Rgb([200, 30, 30]));
+        let rgba = RgbaImage::from_pixel(4, 4, Rgba([200, 30, 30, 255]));
+        let a = fit_garment(&portrait, &rgb, &clothes).unwrap();
+        let b = fit_garment_alpha(&portrait, &rgba, &clothes).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn 纯色背景自动去背为透明() {
+        // 40x40 白底，中央 20x20 藏青色（避开四角采样区） → 四角一致白 → 去背后四角透明、中央保留
+        let mut img = RgbImage::from_pixel(40, 40, Rgb([255, 255, 255]));
+        for y in 14..26 {
+            for x in 14..26 {
+                img.put_pixel(x, y, Rgb([31, 56, 100]));
+            }
+        }
+        let cut = auto_cutout_pure_background(&img).expect("应识别纯色背景");
+        assert_eq!(cut.get_pixel(2, 2)[3], 0, "左下角应为背景透明");
+        assert_eq!(cut.get_pixel(38, 38)[3], 0, "右下角应为背景透明");
+        assert_eq!(cut.get_pixel(20, 20)[3], 255, "中央服装应不透明");
+    }
+
+    #[test]
+    fn 非统一背景不去背() {
+        // 四角色差异大（渐变/复杂背景）→ 保守策略返回 None
+        let mut img = RgbImage::new(20, 20);
+        for y in 0..20 {
+            for x in 0..20 {
+                img.put_pixel(x, y, Rgb([(x * 12) as u8, (y * 12) as u8, 0]));
+            }
+        }
+        assert!(auto_cutout_pure_background(&img).is_none());
+    }
+
+    #[test]
+    fn 过小图像不去背() {
+        let img = RgbImage::new(4, 4);
+        assert!(auto_cutout_pure_background(&img).is_none());
+    }
+
+    #[test]
+    fn 真实服装不受原图明暗调制() {
+        // 服装图全不透明纯藏青；原图衣服区分别用暗色与亮色。
+        // alpha 路径（真实服装）应保持藏青本色；RGB 路径（程序化正装）受明暗调制。
+        let clothes = GrayImage::from_pixel(40, 40, Luma([255u8]));
+        let dark = RgbImage::from_pixel(40, 40, Rgb([10, 10, 30]));
+        let light = RgbImage::from_pixel(40, 40, Rgb([230, 230, 240]));
+        let gar_rgb = RgbImage::from_pixel(4, 4, Rgb([31, 56, 100]));
+        let gar_rgba = RgbaImage::from_pixel(4, 4, Rgba([31, 56, 100, 255]));
+        let a_dark = fit_garment(&dark, &gar_rgb, &clothes).unwrap();
+        let a_light = fit_garment(&light, &gar_rgb, &clothes).unwrap();
+        let b_dark = fit_garment_alpha(&dark, &gar_rgba, &clothes).unwrap();
+        let b_light = fit_garment_alpha(&light, &gar_rgba, &clothes).unwrap();
+        // 程序化正装：明暗不同的原图应产生不同亮度
+        let dc = *a_dark.get_pixel(20, 20);
+        let lc = *a_light.get_pixel(20, 20);
+        assert_ne!(dc, lc, "程序化正装应因原图明暗而变化：{dc:?} vs {lc:?}");
+        // 真实服装：保持本色，不受原图明暗影响
+        let bc = *b_dark.get_pixel(20, 20);
+        let bc2 = *b_light.get_pixel(20, 20);
+        assert_eq!(bc, bc2, "真实服装不应受原图明暗调制：{bc:?} vs {bc2:?}");
+        assert!(bc[0] >= 31 && bc[2] > 80, "真实服装应接近藏青本色，实际 {bc:?}");
     }
 }

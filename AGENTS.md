@@ -220,7 +220,8 @@
 
 - https://github.com/aoguai/LiYing 
 - https://github.com/Zeyi-Lin/HivisionIDPhotos
-- rembg（RMBG 推理生态参考，非实现依赖）
+- https://github.com/photoprism/photoprism
+- https://github.com/immich-app/immich
 - 架构决策：`docs/adr/0001-纯Rust图像栈.md`
 
 

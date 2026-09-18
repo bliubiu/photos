@@ -24,3 +24,6 @@ gen/
 # IDE 工具目录
 .trae/
 
+
+# 会话/工作区本地状态目录
+.workbuddy/

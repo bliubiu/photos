@@ -1045,6 +1045,9 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
 ///   RMBG/MODNet/hivision_modnet 为 (x/255 − 0.5)/0.5（即 [−1,1]）
 /// - RetinaFace：RGB 0-255 减均值 (104,117,123)，letterbox
 /// - 其余（MoveNet 等）：内置默认
+///
+/// 注：MTCNN 三级联在 `vision::mtcnn` 内自建张量（含 (x−127.5)/128 归一化与
+/// [1,W,H,3] 宽高语义），不经声明式预处理。
 fn builtin_preprocess(id: &str) -> Preprocess {
     match id {
         "retinaface" => Preprocess {
