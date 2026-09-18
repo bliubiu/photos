@@ -4,6 +4,7 @@ import UploadPanel from "./components/UploadPanel";
 import ParamsPanel from "./components/ParamsPanel";
 import BatchPanel from "./components/BatchPanel";
 import PreviewPanel from "./components/PreviewPanel";
+import LivePreviewPanel from "./components/LivePreviewPanel";
 import HistoryList from "./components/HistoryList";
 
 export default function App() {
@@ -37,8 +38,9 @@ export default function App() {
           <ParamsPanel />
           <BatchPanel />
         </section>
-        <section className="lg:col-span-2">
+        <section className="lg:col-span-2 space-y-6">
           <PreviewPanel />
+          <LivePreviewPanel />
         </section>
       </main>
 

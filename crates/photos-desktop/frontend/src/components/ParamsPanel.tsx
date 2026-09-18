@@ -3,11 +3,26 @@ import { useState } from "react";
 import { useStore } from "../store";
 
 export default function ParamsPanel() {
-  const { config, models, params, setParams, submit, submitting, downloading, downloadModels } =
-    useStore();
+  const {
+    config,
+    models,
+    params,
+    setParams,
+    submit,
+    submitting,
+    downloading,
+    downloadModels,
+    presets,
+    savePreset,
+    applyPreset,
+    deletePreset,
+  } = useStore();
   // 自定义底色/尺寸输入值（仅在启用时写入 store）
   const [bgColor, setBgColor] = useState("#3a7afe");
   const [sizeMm, setSizeMm] = useState({ w: 35, h: 45, dpi: 300 });
+  // 预设：当前选中项与待保存名称
+  const [presetId, setPresetId] = useState("");
+  const [presetName, setPresetName] = useState("");
   if (!config) return <section className="text-sm text-gray-500">配置加载中…</section>;
 
   const toggleBg = (id: string) => {
@@ -31,6 +46,63 @@ export default function ParamsPanel() {
   return (
     <section className="rounded-lg bg-white shadow-sm border border-gray-200 p-4 space-y-4">
       <h2 className="text-sm font-semibold text-gray-700">2. 参数设置</h2>
+
+      <div className="space-y-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+        <label className="block text-xs text-gray-500">我的常用参数</label>
+        <div className="flex items-center gap-2">
+          <select
+            value={presetId}
+            onChange={(e) => setPresetId(e.target.value)}
+            className="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+          >
+            <option value="">{presets.length > 0 ? "选择预设…" : "暂无预设"}</option>
+            {presets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={!presetId}
+            onClick={() => applyPreset(presetId)}
+            className="rounded-md border border-gray-300 px-2 py-1.5 text-xs text-gray-600 transition hover:border-gray-400 disabled:opacity-50"
+          >
+            套用
+          </button>
+          <button
+            type="button"
+            disabled={!presetId}
+            onClick={() => {
+              deletePreset(presetId);
+              setPresetId("");
+            }}
+            className="rounded-md border border-gray-300 px-2 py-1.5 text-xs text-gray-600 transition hover:border-red-300 hover:text-red-600 disabled:opacity-50"
+          >
+            删除
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={presetName}
+            placeholder="预设名称，如「一寸白底」"
+            onChange={(e) => setPresetName(e.target.value)}
+            className="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              savePreset(presetName);
+              setPresetName("");
+            }}
+            className="shrink-0 rounded-md bg-gray-700 px-2 py-1.5 text-xs text-white transition hover:bg-gray-800"
+          >
+            保存当前参数
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-400">同名预设将覆盖；预设仅保存在本机浏览器。</p>
+      </div>
 
       {missing > 0 && (
         <div className="space-y-2 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-700">

@@ -33,6 +33,36 @@ export interface ParamsState {
   pdf: boolean; // 排版相纸额外输出 PDF
 }
 
+/** 参数预设（「我的常用参数」）：名称 + 参数快照，持久化到 localStorage */
+export interface Preset {
+  id: string;
+  name: string;
+  createdAt: string;
+  params: ParamsState;
+}
+
+const PRESET_KEY = "photos.presets";
+
+/** 读取本地预设（解析失败或隐私模式不可用时返回空列表） */
+function loadPresets(): Preset[] {
+  try {
+    const raw = localStorage.getItem(PRESET_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw) as Preset[];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistPresets(list: Preset[]) {
+  try {
+    localStorage.setItem(PRESET_KEY, JSON.stringify(list));
+  } catch {
+    // 写入失败（如隐私模式）不影响本次会话使用
+  }
+}
+
 /** 批量项状态：上传中 → 处理中 → 成功 / 失败 */
 export type BatchStatus = "uploading" | "processing" | "succeeded" | "failed";
 
@@ -56,6 +86,8 @@ interface AppState {
   detail: TaskDetail | null;
   files: File[];
   params: ParamsState;
+  /** 「我的常用参数」预设（localStorage 持久化） */
+  presets: Preset[];
   /** 本次批量的逐项进度（空数组表示无批量任务） */
   batch: BatchItem[];
   /** 本次批量使用的提交参数（失败重试沿用同一套参数） */
@@ -68,6 +100,11 @@ interface AppState {
   init: () => Promise<void>;
   setFiles: (files: File[]) => void;
   setParams: (patch: Partial<ParamsState>) => void;
+  /** 以当前参数保存预设（同名覆盖） */
+  savePreset: (name: string) => void;
+  /** 套用预设到参数面板 */
+  applyPreset: (id: string) => void;
+  deletePreset: (id: string) => void;
   setSelected: (id: string | null) => void;
   setTaskFilter: (patch: Partial<TaskFilter>) => void;
   refreshTasks: () => Promise<void>;
@@ -149,6 +186,7 @@ export const useStore = create<AppState>((set, get) => ({
   submitting: false,
   downloading: false,
   error: null,
+  presets: loadPresets(),
 
   async init() {
     try {
@@ -188,6 +226,35 @@ export const useStore = create<AppState>((set, get) => ({
 
   setParams(patch) {
     set({ params: { ...get().params, ...patch } });
+  },
+
+  savePreset(name) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      set({ error: "请输入预设名称" });
+      return;
+    }
+    // 同名视为覆盖，避免预设列表堆积重复项
+    const preset: Preset = {
+      id: `preset_${Date.now().toString(36)}`,
+      name: trimmed,
+      createdAt: new Date().toISOString(),
+      params: { ...get().params },
+    };
+    const next = [...get().presets.filter((p) => p.name !== trimmed), preset];
+    persistPresets(next);
+    set({ presets: next, error: null });
+  },
+
+  applyPreset(id) {
+    const preset = get().presets.find((p) => p.id === id);
+    if (preset) set({ params: { ...preset.params } });
+  },
+
+  deletePreset(id) {
+    const next = get().presets.filter((p) => p.id !== id);
+    persistPresets(next);
+    set({ presets: next });
   },
 
   setSelected(id) {
