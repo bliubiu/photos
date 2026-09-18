@@ -22,6 +22,21 @@ pub type EngineBuilder = Arc<dyn Fn(u32, u32) -> Box<dyn InferenceEngine> + Send
 struct PoolState {
     idle: HashMap<String, Vec<Box<dyn InferenceEngine>>>,
     created: usize,
+    /// 当前因容量已满而阻塞等待归还的任务数（可观测性口径）
+    waiting: usize,
+}
+
+/// 引擎池指标快照（`GET /metrics` 数据源）
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PoolMetrics {
+    /// 池容量上限（同时存活的引擎数）
+    pub capacity: usize,
+    /// 当前已创建的引擎数
+    pub created: usize,
+    /// 当前等待空闲引擎归还的任务数
+    pub waiting: usize,
+    /// 各运行模式的空闲引擎数
+    pub idle_by_mode: Vec<(String, usize)>,
 }
 
 /// 进程级引擎池
@@ -110,6 +125,23 @@ impl EnginePool {
         self.state.lock().unwrap().created
     }
 
+    /// 引擎池指标快照：容量、已建/等待数、各模式空闲桶（`GET /metrics` 数据源）
+    pub fn metrics(&self) -> PoolMetrics {
+        let state = self.state.lock().unwrap();
+        let mut idle_by_mode: Vec<(String, usize)> = state
+            .idle
+            .iter()
+            .map(|(m, bucket)| (m.clone(), bucket.len()))
+            .collect();
+        idle_by_mode.sort_by(|a, b| a.0.cmp(&b.0));
+        PoolMetrics {
+            capacity: self.capacity,
+            created: state.created,
+            waiting: state.waiting,
+            idle_by_mode,
+        }
+    }
+
     fn take(&self, mode: &str, w: u32, h: u32) -> Box<dyn InferenceEngine> {
         let mut state = self.state.lock().unwrap();
         loop {
@@ -134,7 +166,10 @@ impl EnginePool {
                 drop(victim); // 释放旧会话（可能较慢），不持锁
                 return (self.builder)(w, h);
             }
+            // 无可用引擎：计入等待指标后阻塞，归还时唤醒
+            state.waiting += 1;
             state = self.idle_ready.wait(state).unwrap();
+            state.waiting = state.waiting.saturating_sub(1);
         }
     }
 
@@ -290,5 +325,49 @@ mod tests {
             2,
             "应新建引擎而非复用损坏引擎"
         );
+    }
+
+    #[test]
+    fn 指标快照反映容量已建与各模式空闲桶() {
+        let (pool, _built) = counter_pool(3);
+        assert_eq!(
+            pool.metrics(),
+            PoolMetrics {
+                capacity: 3,
+                created: 0,
+                waiting: 0,
+                idle_by_mode: Vec::new(),
+            },
+            "初始快照应全空"
+        );
+        {
+            let _speed = pool.acquire("speed", 10, 10);
+            let _balanced = pool.acquire("balanced", 10, 10);
+        }
+        let m = pool.metrics();
+        assert_eq!(m.created, 2);
+        assert_eq!(m.waiting, 0);
+        assert_eq!(m.idle_by_mode, vec![("balanced".to_string(), 1), ("speed".to_string(), 1)]);
+    }
+
+    #[test]
+    fn 等待中的任务计入指标() {
+        let (pool, _built) = counter_pool(1);
+        // 借满容量
+        let _held = pool.acquire("balanced", 10, 10);
+        // 在另一线程发起二次借用：容量已满且无空闲被驱逐，应阻塞等待并计入 waiting
+        let p2 = pool.clone();
+        let waiter = std::thread::spawn(move || {
+            let _ = p2.acquire("speed", 10, 10);
+        });
+        // 等待线程进入 take 阻塞：自旋确认 waiting 为 1（避免时序抖动）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while pool.metrics().waiting == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(pool.metrics().waiting, 1, "阻塞中的借用应计入等待指标");
+        drop(_held);
+        waiter.join().unwrap();
+        assert_eq!(pool.metrics().waiting, 0, "归还唤醒后等待计应清零");
     }
 }

@@ -27,7 +27,7 @@ use photos_core::pipeline::{ProcessRequest, run_pipeline_with_metrics};
 use photos_core::storage::{NewTask, Store, TaskFilter, TaskRecord};
 
 use crate::artifact;
-use crate::engine_pool::EngineLease;
+use crate::engine_pool::{EngineLease, EnginePool};
 use crate::error::{ApiError, model_missing};
 
 /// 引擎工厂：按运行模式与图片尺寸借出推理引擎（真实 OrtEngine 复用进程级池中**同模式桶**
@@ -47,14 +47,18 @@ pub struct AppState {
     pub model_precheck: bool,
     /// 推理并发上限（信号量；批量提交时排队执行，避免挤爆 CPU）
     pub slots: Arc<tokio::sync::Semaphore>,
+    /// 进程级引擎池（生产模式启用；demo/测试无池时为 None）
+    pub engine_pool: Option<Arc<EnginePool>>,
 }
 
 impl AppState {
-    /// 构建状态；打开 data_dir/photos.db，创建 out/tmp 目录
+    /// 构建状态；打开 data_dir/photos.db，创建 out/tmp 目录。
+    /// `engine_pool`：进程级引擎池（生产模式启用；demo/测试传 None）。
     pub fn new(
         cfg: Config,
         engine_factory: EngineFactory,
         model_precheck: bool,
+        engine_pool: Option<Arc<EnginePool>>,
     ) -> photos_core::error::CoreResult<Self> {
         let store = Store::open(Path::new(&cfg.general.data_dir).join("photos.db").as_path())?;
         let out_dir = PathBuf::from(&cfg.general.data_dir).join("out");
@@ -71,6 +75,7 @@ impl AppState {
             upload_dir,
             model_precheck,
             slots,
+            engine_pool,
         })
     }
 
@@ -1441,6 +1446,21 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
     };
     // 耗时统一保留一位小数，便于前端直接展示
     let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    // 引擎池指标（生产模式启用；无池时报告 null，前端可据此隐藏面板）
+    let engine_pool = state.engine_pool.as_ref().map(|pool| {
+        let m = pool.metrics();
+        let idle_by_mode = m
+            .idle_by_mode
+            .iter()
+            .map(|(mode, n)| json!({ "mode": mode, "idle": n }))
+            .collect::<Vec<_>>();
+        json!({
+            "capacity": m.capacity,
+            "created": m.created,
+            "waiting": m.waiting,
+            "idle_by_mode": idle_by_mode,
+        })
+    });
     Json(json!({
         "tasks": {
             "total": counts.iter().map(|(_, n)| *n).sum::<i64>(),
@@ -1455,6 +1475,7 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
             .map(|s| json!({ "stage": s.stage, "avg_ms": round1(s.avg_ms), "samples": s.samples }))
             .collect::<Vec<_>>(),
         "errors": { "total": errors },
+        "engine_pool": engine_pool,
     }))
     .into_response()
 }

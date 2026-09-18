@@ -664,7 +664,8 @@ fn 并发上限取自配置() {
     let factory: EngineFactory = Arc::new(|_mode, w, h| {
         photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
     });
-    let state = photos_api::handlers::AppState::new(t.cfg.clone(), factory, false).unwrap();
+    let state = photos_api::handlers::AppState::new(t.cfg.clone(), factory, false, None)
+        .unwrap();
     assert_eq!(state.slots.available_permits(), 3);
 }
 
@@ -1347,6 +1348,8 @@ async fn 指标聚合与错误上报端点() {
         "实际：{agg:?}"
     );
     assert_eq!(metrics["errors"]["total"], 1);
+    // 无池场景（demo）：engine_pool 为 null，前端据此隐藏引擎池面板
+    assert!(metrics["engine_pool"].is_null());
 
     // GET /errors：失败任务的结构化错误记录
     let (status, errors) = send(&app, get_request("/errors")).await;
@@ -1586,4 +1589,42 @@ async fn 模型版本查询切换与回滚() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
     assert_eq!(json["code"], "MODEL_MISSING");
+}
+
+#[tokio::test]
+async fn 引擎池指标并入metrics() {
+    let t = TestApp::new();
+    // 池容量 2：先借出一个引擎保持占用，再验证 /metrics 的 engine_pool 指标
+    let pool = photos_api::engine_pool::EnginePool::new(
+        Arc::new(|w, h| {
+            Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+        }),
+        2,
+    );
+    let acquired = pool.clone();
+    let factory: EngineFactory = Arc::new(move |mode, w, h| acquired.acquire(&mode, w, h));
+    let app = photos_api::router_with_frontend(t.cfg.clone(), factory, false, Some(pool.clone()), None);
+
+    // 未借出：created 空、容量 2、无等待
+    let (status, metrics) = send(&app, get_request("/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metrics["engine_pool"]["capacity"], 2);
+    assert_eq!(metrics["engine_pool"]["created"], 0);
+    assert_eq!(metrics["engine_pool"]["waiting"], 0);
+    let idle = metrics["engine_pool"]["idle_by_mode"].as_array().unwrap();
+    assert!(idle.is_empty(), "无空闲引擎时列表应为空：{idle:?}");
+
+    // 借出一个 balanced 引擎：created 增 1、空闲桶空
+    {
+        let _lease = pool.acquire("balanced", 10, 10);
+        let (_, metrics) = send(&app, get_request("/metrics")).await;
+        assert_eq!(metrics["engine_pool"]["created"], 1);
+        assert!(metrics["engine_pool"]["idle_by_mode"].as_array().unwrap().is_empty());
+    }
+
+    // 归还后：空闲桶出现 balanced=1
+    let (_, metrics) = send(&app, get_request("/metrics")).await;
+    assert_eq!(metrics["engine_pool"]["created"], 1);
+    assert_eq!(metrics["engine_pool"]["idle_by_mode"][0]["mode"], "balanced");
+    assert_eq!(metrics["engine_pool"]["idle_by_mode"][0]["idle"], 1);
 }

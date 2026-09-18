@@ -2,6 +2,17 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.25] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【可观测性·引擎池指标】`engine_pool.rs` 新增 `PoolMetrics` 快照（`capacity` 池容量、`created` 当前已建引擎数、`waiting` 阻塞等待归还的任务数、`idle_by_mode` 各运行模式空闲引擎桶），`EnginePool::metrics` 从锁内读取，不干扰借出/归还路径；池引用经 `production_engine_factory` / `serve_with_factory` / `router_with_frontend` 传入 `AppState.engine_pool`，**`GET /metrics` 新增 `engine_pool` 字段**——生产启用时输出上述指标，demo/测试等无池场景为 `null`（前端可据此隐藏引擎池面板）
+
+### 📈 Improvements 性能/体验优化
+- 【可观测性】引擎池容量余量、等待任务数、各模式空闲情况可直接观测，便于定位批量处理瓶颈（容量不足导致排队）
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`、`docs/05-API契约.md`（§3.12 `/metrics` 响应新增 `engine_pool`）、`docs/06-运行使用手册.md`、`docs/07-能力增强.md`（§四可观测性）：补引擎池指标说明
+
 ## [2026.09.18.24] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -34,17 +34,19 @@ pub fn frontend_dir() -> Option<PathBuf> {
 
 /// 组装应用路由（注入状态；测试可用自定义引擎工厂）
 pub fn router(cfg: Config, engine_factory: EngineFactory, model_precheck: bool) -> Router {
-    router_with_frontend(cfg, engine_factory, model_precheck, frontend_dir())
+    router_with_frontend(cfg, engine_factory, model_precheck, None, frontend_dir())
 }
 
-/// 组装应用路由，可选挂载前端静态资源（同源托管）
+/// 组装应用路由，可选挂载前端静态资源（同源托管）。
+/// `engine_pool`：进程级引擎池（生产模式启用；demo/测试传 None，`/metrics` 的 engine_pool 置 null）
 pub fn router_with_frontend(
     cfg: Config,
     engine_factory: EngineFactory,
     model_precheck: bool,
+    engine_pool: Option<Arc<EnginePool>>,
     frontend: Option<PathBuf>,
 ) -> Router {
-    let state = match AppState::new(cfg, engine_factory, model_precheck) {
+    let state = match AppState::new(cfg, engine_factory, model_precheck, engine_pool) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             tracing::error!("初始化应用状态失败：{e}");
@@ -86,7 +88,8 @@ pub fn router_with_frontend(
 /// 池容量取 `[server] max_concurrent_tasks`，任务从池中借用引擎，复用已装载的模型会话，
 /// 免去每个任务重复装载模型的开销。
 /// **无 ort 时返回 Err**，禁止静默降级 demo（演示请显式使用 [`demo_engine_factory`]）。
-pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<EngineFactory> {
+/// 返回池引用，供 `GET /metrics` 输出引擎池指标。
+pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<(EngineFactory, Arc<EnginePool>)> {
     if !photos_core::inference::ORT_BUILT {
         anyhow::bail!(
             "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法以真实模式启动 serve/桌面版。\n\
@@ -105,7 +108,11 @@ pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<EngineFactory> 
     );
     // 启动预热：异步装载默认模式（balanced）的小模型，首个任务免去冷启动装载开销（失败不阻断）
     prewarm_default(pool.clone(), cfg);
-    Ok(Arc::new(move |mode, w, h| pool.acquire(&mode, w, h)))
+    let factory_pool = pool.clone();
+    let factory: EngineFactory = Arc::new(move |mode: String, w: u32, h: u32| {
+        factory_pool.acquire(&mode, w, h)
+    });
+    Ok((factory, pool))
 }
 
 /// 异步预热默认模式的引擎：与首个任务同构地装载默认步骤所需模型后归还池中，
@@ -142,17 +149,20 @@ pub fn demo_engine_factory() -> EngineFactory {
 }
 
 /// 根据 `PHOTOS_DEMO` 环境变量选择工厂：`1`/`true`/`yes` → demo，否则要求 ort。
-/// 桌面壳等无法传 `--demo` 的入口使用。
-pub fn engine_factory_from_env(cfg: &Config) -> anyhow::Result<EngineFactory> {
+/// 桌面壳等无法传 `--demo` 的入口使用。返回工厂与引擎池（demo 无池，返回 None）。
+pub fn engine_factory_from_env(
+    cfg: &Config,
+) -> anyhow::Result<(EngineFactory, Option<Arc<EnginePool>>)> {
     let demo = std::env::var("PHOTOS_DEMO")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     if demo {
         tracing::warn!("PHOTOS_DEMO 已启用：使用演示引擎，输出非真实 AI 推理结果");
         eprintln!("警告：演示模式已启用（PHOTOS_DEMO），输出为模拟数据，非真实证件照");
-        return Ok(demo_engine_factory());
+        return Ok((demo_engine_factory(), None));
     }
-    production_engine_factory(cfg)
+    let (factory, pool) = production_engine_factory(cfg)?;
+    Ok((factory, Some(pool)))
 }
 
 /// 绑定回环地址（端口 0 = 随机），返回监听器与地址（供 serve / 桌面壳使用）
@@ -170,35 +180,36 @@ pub async fn run_server(app: Router, listener: tokio::net::TcpListener) -> anyho
 
 /// `photos serve` 入口（同步）：生产模式启动本地 HTTP 服务（需 ort），直至 Ctrl+C
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
-    let factory = production_engine_factory(&cfg)?;
-    serve_with_factory(cfg, "127.0.0.1", 0, factory)
+    let (factory, pool) = production_engine_factory(&cfg)?;
+    serve_with_factory(cfg, "127.0.0.1", 0, factory, Some(pool))
 }
 
 /// 指定主机与端口启动生产服务（端口 0 = 随机）；**无 ort 直接失败，不静默 demo**
 pub fn serve_with(cfg: Config, host: &str, port: u16) -> anyhow::Result<()> {
-    let factory = production_engine_factory(&cfg)?;
-    serve_with_factory(cfg, host, port, factory)
+    let (factory, pool) = production_engine_factory(&cfg)?;
+    serve_with_factory(cfg, host, port, factory, Some(pool))
 }
 
 /// 显式演示模式：内置 mock 引擎（`--demo`）
 pub fn serve_demo_with(cfg: Config, host: &str, port: u16) -> anyhow::Result<()> {
     eprintln!("警告：serve 处于演示模式（--demo），输出为模拟数据，非真实证件照");
     tracing::warn!("serve 演示模式：使用内置 mock 引擎");
-    serve_with_factory(cfg, host, port, demo_engine_factory())
+    serve_with_factory(cfg, host, port, demo_engine_factory(), None)
 }
 
-/// 用给定引擎工厂启动服务
+/// 用给定引擎工厂启动服务（`engine_pool` 为进程级引擎池，None 表示无池）
 pub fn serve_with_factory(
     cfg: Config,
     host: &str,
     port: u16,
     engine_factory: EngineFactory,
+    engine_pool: Option<Arc<EnginePool>>,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let app = router(cfg, engine_factory, true);
+        let app = router_with_frontend(cfg, engine_factory, true, engine_pool, frontend_dir());
         let listener = tokio::net::TcpListener::bind((host, port)).await?;
         let addr = listener.local_addr()?;
         tracing::info!("证件照本地服务已启动：http://{addr}");

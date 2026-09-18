@@ -410,12 +410,22 @@
     { "stage": "人脸检测", "avg_ms": 96.7, "samples": 10 },
     { "stage": "人像抠图", "avg_ms": 420.1, "samples": 10 }
   ],
-  "errors": { "total": 1 }
+  "errors": { "total": 1 },
+  "engine_pool": {
+    "capacity": 4,
+    "created": 2,
+    "waiting": 0,
+    "idle_by_mode": [
+      { "mode": "balanced", "idle": 1 },
+      { "mode": "quality", "idle": 1 }
+    ]
+  }
 }
 ```
 
 - `elapsed_ms.samples` 为参与均值计算的已完成任务数（无数据时为 0，`avg` 为 0）。
 - `stages` 仅统计 `succeeded` 且已落库指标的任务，按阶段名升序。
+- `engine_pool`：进程级引擎池指标（生产模式启用）；`capacity` 池容量上限、`created` 当前已建引擎数、`waiting` 阻塞等待归还的任务数、`idle_by_mode` 各运行模式空闲引擎桶（空列表表示无空闲）。demo / 测试等无池场景为 `null`，前端可据此隐藏引擎池面板。
 - 无外部依赖（无 Prometheus 等），数据源为 sqlite `task_history` 与 `error_log`。
 
 ### 3.13 GET `/errors`
