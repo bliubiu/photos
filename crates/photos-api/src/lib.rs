@@ -5,6 +5,7 @@
 //! GET /models、GET /config、GET /ping），任务状态机 queued → running → succeeded | failed。
 
 pub mod artifact;
+pub mod engine_pool;
 pub mod error;
 pub mod handlers;
 
@@ -17,6 +18,8 @@ use tower_http::services::ServeDir;
 
 use handlers::{AppState, EngineFactory};
 use photos_core::config::Config;
+
+use crate::engine_pool::{EngineLease, EnginePool};
 
 /// 定位前端构建产物目录（同源静态托管；找不到返回 None 即不托管）
 pub fn frontend_dir() -> Option<PathBuf> {
@@ -63,9 +66,11 @@ pub fn router_with_frontend(
     }
 }
 
-/// 生产引擎工厂：仅返回真实 OrtEngine（feature=ort）。
+/// 生产引擎工厂：仅返回真实 OrtEngine（feature=ort），并启用**进程级引擎池**——
+/// 池容量取 `[server] max_concurrent_tasks`，任务从池中借用引擎，复用已装载的模型会话，
+/// 免去每个任务重复装载模型的开销。
 /// **无 ort 时返回 Err**，禁止静默降级 demo（演示请显式使用 [`demo_engine_factory`]）。
-pub fn production_engine_factory() -> anyhow::Result<EngineFactory> {
+pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<EngineFactory> {
     if !photos_core::inference::ORT_BUILT {
         anyhow::bail!(
             "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法以真实模式启动 serve/桌面版。\n\
@@ -74,17 +79,24 @@ pub fn production_engine_factory() -> anyhow::Result<EngineFactory> {
              或显式演示模式：photos serve --demo（输出为模拟数据，非真实证件照）"
         );
     }
-    Ok(Arc::new(|_, _| photos_core::inference::default_engine()))
+    let capacity = cfg.server.max_concurrent_tasks;
+    tracing::info!("推理引擎池已启用：容量 {capacity}（任务复用已装载模型的引擎）");
+    let pool = EnginePool::new(
+        Arc::new(|_, _| photos_core::inference::default_engine()),
+        capacity,
+    );
+    Ok(Arc::new(move |w, h| pool.acquire(w, h)))
 }
 
 /// 演示引擎工厂：内置 mock 回放（椭圆人形），**仅限显式 `--demo` 或 PHOTOS_DEMO=1**。
+/// 演示引擎按输入尺寸回放，不入池（每次新建）。
 pub fn demo_engine_factory() -> EngineFactory {
-    Arc::new(|w, h| Box::new(photos_core::pipeline::demo_balanced_engine(w, h)))
+    Arc::new(|w, h| EngineLease::owned(Box::new(photos_core::pipeline::demo_balanced_engine(w, h))))
 }
 
 /// 根据 `PHOTOS_DEMO` 环境变量选择工厂：`1`/`true`/`yes` → demo，否则要求 ort。
 /// 桌面壳等无法传 `--demo` 的入口使用。
-pub fn engine_factory_from_env() -> anyhow::Result<EngineFactory> {
+pub fn engine_factory_from_env(cfg: &Config) -> anyhow::Result<EngineFactory> {
     let demo = std::env::var("PHOTOS_DEMO")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
@@ -93,7 +105,7 @@ pub fn engine_factory_from_env() -> anyhow::Result<EngineFactory> {
         eprintln!("警告：演示模式已启用（PHOTOS_DEMO），输出为模拟数据，非真实证件照");
         return Ok(demo_engine_factory());
     }
-    production_engine_factory()
+    production_engine_factory(cfg)
 }
 
 /// 绑定回环地址（端口 0 = 随机），返回监听器与地址（供 serve / 桌面壳使用）
@@ -111,12 +123,14 @@ pub async fn run_server(app: Router, listener: tokio::net::TcpListener) -> anyho
 
 /// `photos serve` 入口（同步）：生产模式启动本地 HTTP 服务（需 ort），直至 Ctrl+C
 pub fn serve(cfg: Config) -> anyhow::Result<()> {
-    serve_with_factory(cfg, "127.0.0.1", 0, production_engine_factory()?)
+    let factory = production_engine_factory(&cfg)?;
+    serve_with_factory(cfg, "127.0.0.1", 0, factory)
 }
 
 /// 指定主机与端口启动生产服务（端口 0 = 随机）；**无 ort 直接失败，不静默 demo**
 pub fn serve_with(cfg: Config, host: &str, port: u16) -> anyhow::Result<()> {
-    serve_with_factory(cfg, host, port, production_engine_factory()?)
+    let factory = production_engine_factory(&cfg)?;
+    serve_with_factory(cfg, host, port, factory)
 }
 
 /// 显式演示模式：内置 mock 引擎（`--demo`）

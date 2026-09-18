@@ -1,0 +1,197 @@
+//! 进程级推理引擎池：任务执行时借出引擎、结束后归还，避免每个任务重复装载 ONNX 会话
+//! （模型装载是批量处理的主要固定开销）。
+//!
+//! 池容量取 `[server] max_concurrent_tasks`：并发任务各持一个引擎互不阻塞，空闲引擎留在
+//! 池中复用（已装载的模型会话常驻，含按需加载的换装解析模型）。
+
+use std::sync::{Arc, Condvar, Mutex};
+
+use photos_core::inference::InferenceEngine;
+
+/// 引擎构造器：按输入图尺寸构造引擎（真实引擎忽略尺寸；演示引擎按尺寸回放）
+pub type EngineBuilder = Arc<dyn Fn(u32, u32) -> Box<dyn InferenceEngine> + Send + Sync>;
+
+/// 池内状态（空闲引擎列表 + 已建引擎数）
+#[derive(Default)]
+struct PoolState {
+    idle: Vec<Box<dyn InferenceEngine>>,
+    created: usize,
+}
+
+/// 进程级引擎池
+pub struct EnginePool {
+    builder: EngineBuilder,
+    /// 同时存活的引擎上限（至少 1）
+    capacity: usize,
+    state: Mutex<PoolState>,
+    idle_ready: Condvar,
+}
+
+/// 借出的引擎：`Drop` 时归还引擎池
+pub struct EngineLease {
+    /// 归还目标（None = 一次性引擎，用完丢弃）
+    pool: Option<Arc<EnginePool>>,
+    /// 借出的引擎（None 表示已归还）
+    engine: Option<Box<dyn InferenceEngine>>,
+}
+
+impl EngineLease {
+    /// 一次性引擎（演示/测试等按尺寸回放的引擎不入池）
+    pub fn owned(engine: Box<dyn InferenceEngine>) -> Self {
+        Self {
+            pool: None,
+            engine: Some(engine),
+        }
+    }
+
+    /// 可变借用引擎（流水线需要 `&mut dyn InferenceEngine`）
+    pub fn engine_mut(&mut self) -> &mut dyn InferenceEngine {
+        self.engine.as_mut().expect("引擎借用已释放").as_mut()
+    }
+}
+
+impl Drop for EngineLease {
+    fn drop(&mut self) {
+        if let (Some(pool), Some(engine)) = (self.pool.take(), self.engine.take()) {
+            pool.put_back(engine);
+        }
+    }
+}
+
+impl EnginePool {
+    /// 新建引擎池（容量为同时存活的引擎上限，至少 1）
+    pub fn new(builder: EngineBuilder, capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            builder,
+            capacity: capacity.max(1),
+            state: Mutex::new(PoolState::default()),
+            idle_ready: Condvar::new(),
+        })
+    }
+
+    /// 借出引擎：优先复用空闲引擎；未达容量上限时新建；已达上限时等待其他任务归还
+    pub fn acquire(self: &Arc<Self>, w: u32, h: u32) -> EngineLease {
+        let engine = self.take(w, h);
+        EngineLease {
+            pool: Some(self.clone()),
+            engine: Some(engine),
+        }
+    }
+
+    /// 已建引擎数（测试与可观测性用）
+    pub fn created(&self) -> usize {
+        self.state.lock().unwrap().created
+    }
+
+    fn take(&self, w: u32, h: u32) -> Box<dyn InferenceEngine> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if let Some(engine) = state.idle.pop() {
+                return engine;
+            }
+            if state.created < self.capacity {
+                state.created += 1;
+                // 建模可能耗时较长（装载 ONNX 会话），不持锁构造
+                drop(state);
+                return (self.builder)(w, h);
+            }
+            state = self.idle_ready.wait(state).unwrap();
+        }
+    }
+
+    fn put_back(&self, engine: Box<dyn InferenceEngine>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.idle.push(engine);
+            self.idle_ready.notify_one();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use photos_core::config::{Config, ExecutionProvider};
+    use photos_core::error::CoreResult;
+    use photos_core::inference::TensorData;
+
+    use super::*;
+
+    /// 计数引擎：仅用于观测构造次数
+    struct CountingEngine;
+
+    impl InferenceEngine for CountingEngine {
+        fn load(
+            &mut self,
+            _cfg: &Config,
+            _model_id: &str,
+            _provider: ExecutionProvider,
+        ) -> CoreResult<()> {
+            Ok(())
+        }
+
+        fn run(&self, _model_id: &str, _input: &TensorData) -> CoreResult<Vec<TensorData>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// 计数池：返回池与构造次数计数器
+    fn counter_pool(capacity: usize) -> (Arc<EnginePool>, Arc<AtomicUsize>) {
+        let built = Arc::new(AtomicUsize::new(0));
+        let counter = built.clone();
+        let pool = EnginePool::new(
+            Arc::new(move |_, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Box::new(CountingEngine) as Box<dyn InferenceEngine>
+            }),
+            capacity,
+        );
+        (pool, built)
+    }
+
+    #[test]
+    fn 归还后复用同一引擎() {
+        let (pool, built) = counter_pool(1);
+        {
+            let mut lease = pool.acquire(100, 100);
+            let tensor = TensorData::new(vec![1], vec![0.0]).unwrap();
+            assert!(lease.engine_mut().run("任意", &tensor).unwrap().is_empty());
+        }
+        let _lease = pool.acquire(100, 100);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            1,
+            "第二次借用应复用池中引擎，不得重复构造"
+        );
+        assert_eq!(pool.created(), 1);
+    }
+
+    #[test]
+    fn 借出至容量上限后归还再复用() {
+        let (pool, built) = counter_pool(2);
+        let first = pool.acquire(10, 10);
+        let second = pool.acquire(10, 10);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "两个并发借出应各建一个引擎"
+        );
+        drop(first);
+        let third = pool.acquire(10, 10);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "归还后应复用空闲引擎，不得新建第三个"
+        );
+        drop((second, third));
+        assert_eq!(pool.created(), 2);
+        assert_eq!(built.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn 一次性引擎不入池() {
+        let mut lease = EngineLease::owned(Box::new(CountingEngine));
+        let tensor = TensorData::new(vec![1], vec![0.0]).unwrap();
+        assert!(lease.engine_mut().run("任意", &tensor).unwrap().is_empty());
+    }
+}

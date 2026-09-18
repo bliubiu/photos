@@ -2,6 +2,17 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.2] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【性能】新增**进程级推理引擎池** `crates/photos-api/src/engine_pool.rs`：`EnginePool` 按容量（取 `[server] max_concurrent_tasks`）缓存已装载模型的引擎，任务执行时经借用守卫 `EngineLease` 借出、结束自动归还；池空且未达上限时新建，达上限时等待归还（构造不持锁，装载期间不阻塞其他任务）
+- 【性能】`EngineFactory` 改为「按输入尺寸借出引擎」：生产工厂 `production_engine_factory(&Config)` 池化后，连续任务与批量处理复用同一批 ONNX 会话（含按需加载的换装解析模型 `parsing_lip`），免去每张图重复装载模型；`engine_factory_from_env` 同步接收配置
+- 【演示/测试】演示引擎工厂与测试注入改用 `EngineLease::owned`（一次性引擎，不入池），保持「按输入尺寸回放」语义不变
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`：资源限制章节补充推理引擎池说明（容量、常驻模型内存上限、不入池的一次性引擎）
+- `docs/07-能力增强.md`：推理引擎复用标记为已落地（2026.09.18.2）
+
 ## [2026.09.18.1] - 0.1.0
 
 ### ✨ New Features 新增功能

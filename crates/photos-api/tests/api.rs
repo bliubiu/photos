@@ -3,6 +3,7 @@
 //! 用 demo 引擎工厂 + 临时 data_dir，避免依赖真实模型与污染仓库数据。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -35,7 +36,7 @@ impl TestApp {
 
     fn app(&self) -> axum::Router {
         let factory: EngineFactory = Arc::new(|w, h| {
-            Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+            photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
         });
         router(self.cfg.clone(), factory, false)
     }
@@ -569,10 +570,39 @@ async fn 分页查询() {
 fn 并发上限取自配置() {
     let t = TestApp::new_with(|cfg| cfg.server.max_concurrent_tasks = 3);
     let factory: EngineFactory = Arc::new(|w, h| {
-        Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+        photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
     });
     let state = photos_api::handlers::AppState::new(t.cfg.clone(), factory, false).unwrap();
     assert_eq!(state.slots.available_permits(), 3);
+}
+
+#[tokio::test]
+async fn 引擎池复用连续任务() {
+    let t = TestApp::new();
+    let built = Arc::new(AtomicUsize::new(0));
+    let counter = built.clone();
+    // 池容量 1：连续任务应复用同一引擎（模型只装载一次）
+    let pool = photos_api::engine_pool::EnginePool::new(
+        Arc::new(move |w, h| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::new(demo_balanced_engine(w, h)) as Box<dyn photos_core::inference::InferenceEngine>
+        }),
+        1,
+    );
+    let acquired = pool.clone();
+    let factory: EngineFactory = Arc::new(move |w, h| acquired.acquire(w, h));
+    let app = router(t.cfg.clone(), factory, false);
+
+    for _ in 0..2 {
+        let (_, detail) = create_and_wait(&app, &t.out_dir()).await;
+        assert_eq!(
+            detail["status"], "succeeded",
+            "任务失败：{}",
+            detail["message"]
+        );
+    }
+    assert_eq!(built.load(Ordering::SeqCst), 1, "两个任务应复用同一引擎");
+    assert_eq!(pool.created(), 1);
 }
 
 #[tokio::test]

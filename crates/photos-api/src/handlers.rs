@@ -13,17 +13,17 @@ use serde::Deserialize;
 use serde_json::json;
 
 use photos_core::config::Config;
-use photos_core::inference::InferenceEngine;
 use photos_core::model::{CheckStatus, check_models};
 use photos_core::pipeline::{ProcessRequest, run_pipeline};
 use photos_core::storage::{NewTask, Store};
 
 use crate::artifact;
+use crate::engine_pool::EngineLease;
 use crate::error::{ApiError, model_missing};
 
-/// 引擎工厂：按输入图片尺寸构造推理引擎（真实 OrtEngine / 演示 FakeEngine；测试注入 stub）。
-/// 尺寸参数用于演示引擎（demo_balanced_engine 需按图宽高回放），真实引擎忽略。
-pub type EngineFactory = Arc<dyn Fn(u32, u32) -> Box<dyn InferenceEngine> + Send + Sync>;
+/// 引擎工厂：按输入图片尺寸借出推理引擎（真实 OrtEngine 复用进程级池中的引擎 / 演示
+/// FakeEngine 每次新建；测试注入 stub）。尺寸参数用于演示引擎（需按图宽高回放），真实引擎忽略。
+pub type EngineFactory = Arc<dyn Fn(u32, u32) -> EngineLease + Send + Sync>;
 
 /// 应用状态（Config 只读共享；Store 由 Mutex 串行化 sqlite 访问）
 pub struct AppState {
@@ -564,8 +564,9 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             // 与流水线内部预缩放对齐：引擎按缩放后尺寸构造
             let (w, h) =
                 photos_core::pipeline::limited_dimensions(w, h, state2.cfg.general.max_input_side);
-            let mut engine = (state2.engine_factory)(w, h);
-            run_pipeline(&state2.cfg, engine.as_mut(), &req)
+            // 借出引擎（生产模式来自进程级池，复用已装载模型的引擎；用完自动归还）
+            let mut lease = (state2.engine_factory)(w, h);
+            run_pipeline(&state2.cfg, lease.engine_mut(), &req)
         })
         .await;
 
