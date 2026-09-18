@@ -29,7 +29,7 @@ use crate::vision::geometry::{
     fused_angle_with_torso, head_angle, shoulder_angle, torso_angle, yaw_from_landmarks,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
-use crate::vision::matting::{feather, morph_open, threshold_mask};
+use crate::vision::matting::{distance_feather, levelset_alpha};
 use crate::vision::mtcnn::{CASCADE_FACE_ID, cascade_model_ids, detect_mtcnn_cascade};
 
 /// 内置步骤 id：读图
@@ -80,10 +80,10 @@ const FACE_SCORE_THRESHOLD: f32 = 0.5;
 const NMS_IOU_THRESHOLD: f32 = 0.4;
 /// 抠图概率 mask 阈值（[0,1] 输出按 ×255 后阈值化）
 const MASK_THRESHOLD: u8 = 128;
-/// 形态学开运算半径
-const MASK_MORPH_RADIUS: u32 = 1;
-/// 边缘羽化高斯 sigma
-const MASK_FEATHER_SIGMA: f32 = 1.0;
+/// 软阈值（level-set）过渡带宽：保留发丝等亚像素半透明像素
+const MASK_SOFT_RANGE: u8 = 48;
+/// 距离场羽化过渡带宽度（像素）
+const MASK_FEATHER_PX: f32 = 2.0;
 /// 头顶留白 = 0.2 × 脸高
 const CROP_TOP_RATIO: f64 = 0.2;
 /// 下巴余量 = 0.1 × 脸高
@@ -835,14 +835,14 @@ fn step_background(ctx: &mut PipelineCtx) -> CoreResult<()> {
     let alpha = ctx
         .rot_mask
         .as_ref()
-        .map(|m| feather(m, MASK_FEATHER_SIGMA));
+        .map(|m| distance_feather(m, MASK_THRESHOLD, MASK_FEATHER_PX));
     if alpha.is_none() {
         ctx.warn("未启用人像抠图步骤，跳过换底合成并直接裁切当前图像");
     }
     let cleaned = {
         let base = ctx.base_image().ok_or_else(|| missing_step(STEP_ROTATE))?;
         match &alpha {
-            Some(a) => decontaminate(base, a),
+            Some(a) => decontaminate(base, a, MASK_FEATHER_PX as u32),
             None => base.clone(),
         }
     };
@@ -979,7 +979,8 @@ fn limit_input_side(img: RgbImage, max_side: u32) -> RgbImage {
     image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
-/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸二值 mask（letterbox 逆变换 + 阈值化 + 形态学去噪）
+/// 概率 mask 张量 `[1,1,H,W]`（行主序）→ 原图尺寸软阈值 alpha（letterbox 逆变换 +
+/// 软阈值 + 距离场羽化）
 fn probability_mask(
     out: &TensorData,
     w: u32,
@@ -987,8 +988,8 @@ fn probability_mask(
     letterbox: Option<&LetterBox>,
 ) -> CoreResult<GrayImage> {
     let prob = probability_map(out, w, h, letterbox)?;
-    let bin = threshold_mask(&prob, MASK_THRESHOLD);
-    Ok(morph_open(&bin, MASK_MORPH_RADIUS))
+    let soft = levelset_alpha(&prob, MASK_THRESHOLD, MASK_SOFT_RANGE);
+    Ok(distance_feather(&soft, MASK_THRESHOLD, MASK_FEATHER_PX))
 }
 
 /// 五官保护掩膜：检测结果位于原图坐标系，美颜作用于纠偏后图像，故按同一旋转矩阵把

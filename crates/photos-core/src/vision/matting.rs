@@ -1,8 +1,14 @@
-//! 抠图后处理：概率 mask 阈值化 → 形态学开运算去噪 → 边缘羽化（高斯模糊）。
+//! 抠图后处理：概率 mask 软阈值（level-set）→ 形态学闭运算清理 → 距离场羽化。
+//!
+//! 相较早期「硬阈值 + 开运算 + 整图高斯羽化」：软阈值保留发丝等亚像素 alpha，
+//! 闭运算填孔且不删除细结构，距离场羽化只在过渡带渐降（主体恒 255、外部恒 0）。
 
 use image::{GrayImage, Luma};
-use imageproc::distance_transform::Norm;
-use imageproc::morphology::open;
+use imageproc::distance_transform::{Norm, distance_transform};
+use imageproc::morphology::close;
+
+/// 距离场羽化前的形态学闭运算半径（填充 mask 内部小孔）
+const CLOSE_RADIUS: u32 = 1;
 
 /// 概率 mask（[0,255] 灰度）阈值化得到二值 mask
 pub fn threshold_mask(mask: &GrayImage, threshold: u8) -> GrayImage {
@@ -14,18 +20,76 @@ pub fn threshold_mask(mask: &GrayImage, threshold: u8) -> GrayImage {
     out
 }
 
-/// 形态学开运算（先腐蚀后膨胀），去除孤立噪点（半径 ≥ 1）
-pub fn morph_open(img: &GrayImage, radius: u32) -> GrayImage {
+/// 形态学闭运算（先膨胀后腐蚀）：填充内部小孔，且不像开运算那样删除细结构（发丝）
+pub fn morph_close(img: &GrayImage, radius: u32) -> GrayImage {
     let k = radius.clamp(1, u8::MAX as u32) as u8;
-    open(img, Norm::LInf, k)
+    close(img, Norm::LInf, k)
 }
 
-/// 边缘羽化：高斯模糊，将硬边 mask 过渡平滑（sigma > 0 时生效）
+/// 边缘羽化：高斯模糊（sigma > 0 时生效）。
+///
+/// 仍用于五官保护掩膜、服装掩膜等需要各向同性平滑的场景；抠图 mask 请改用
+/// [`distance_feather`]，避免整图高斯把发丝过渡糊化。
 pub fn feather(img: &GrayImage, sigma: f32) -> GrayImage {
     if sigma <= 0.0 {
         return img.clone();
     }
     image::imageops::blur(img, sigma)
+}
+
+/// 软阈值（level-set）alpha：概率在 `[threshold - soft_range/2, threshold + soft_range/2]`
+/// 区间内用 smoothstep 平滑过渡，保留发丝等亚像素半透明像素；`soft_range = 0` 退化为硬阈值。
+pub fn levelset_alpha(prob: &GrayImage, threshold: u8, soft_range: u8) -> GrayImage {
+    if soft_range == 0 {
+        return threshold_mask(prob, threshold);
+    }
+    let lo = threshold as f32 - soft_range as f32 / 2.0;
+    let span = soft_range as f32;
+    let mut out = GrayImage::new(prob.width(), prob.height());
+    for (x, y, p) in prob.enumerate_pixels() {
+        let r = ((p[0] as f32 - lo) / span).clamp(0.0, 1.0);
+        // smoothstep：一阶导在两端为 0，过渡带无折角
+        let s = r * r * (3.0 - 2.0 * r);
+        out.put_pixel(x, y, Luma([(s * 255.0).round() as u8]));
+    }
+    out
+}
+
+/// 距离场羽化：对二值骨架（alpha ≥ threshold）做闭运算清理后求有符号距离，
+/// 主体内部恒 255、外部恒 0，仅过渡带（约 ±`feather_px`）内渐降并与输入软 alpha 取较小值。
+///
+/// 过渡带形状贴合骨架（各向异性），不会像整图高斯那样把细发丝糊穿。
+pub fn distance_feather(alpha: &GrayImage, threshold: u8, feather_px: f32) -> GrayImage {
+    let (w, h) = alpha.dimensions();
+    let bin = morph_close(&threshold_mask(alpha, threshold), CLOSE_RADIUS);
+    // 补图：非零像素为源，故原前景像素得到「到最近背景像素的距离」
+    let mut inv = GrayImage::new(w, h);
+    for (x, y, p) in bin.enumerate_pixels() {
+        inv.put_pixel(x, y, Luma([if p[0] == 0 { 255 } else { 0 }]));
+    }
+    let d_in = distance_transform(&inv, Norm::L2);
+    let d_out = distance_transform(&bin, Norm::L2);
+    let f = feather_px.max(1.0);
+    let mut out = GrayImage::new(w, h);
+    for (x, y, p) in alpha.enumerate_pixels() {
+        let inside = bin.get_pixel(x, y)[0] > 0;
+        let ramp = if inside {
+            (d_in.get_pixel(x, y)[0] as f32 / f).clamp(0.0, 1.0)
+        } else {
+            1.0 - (d_out.get_pixel(x, y)[0] as f32 / f).clamp(0.0, 1.0)
+        };
+        let da = (ramp * 255.0).round() as u8;
+        let v = if da == 0 {
+            0
+        } else if da == 255 {
+            255
+        } else {
+            // 过渡带：保留输入软 alpha 的亚像素信息，同时受距离场上限约束
+            p[0].min(da)
+        };
+        out.put_pixel(x, y, Luma([v]));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -45,23 +109,21 @@ mod tests {
     }
 
     #[test]
-    fn 开运算去除孤立噪点() {
-        // 6x6：中心 4x4 块 + 两角孤立点
-        let px = vec![
-            255, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 255, 255, 255, 255, 0, 0, 255, 255,
-            255, 255, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 255,
-        ];
-        let m = gray(&px, 6, 6);
-        let o = morph_open(&m, 1);
-        let vals: Vec<u8> = o.pixels().map(|p| p[0]).collect();
-        // 两角孤立点被去除
-        assert_eq!(vals[0], 0);
-        assert_eq!(vals[35], 0);
-        // 中心 2x2（(2,2)~(3,3)）保留
-        assert_eq!(vals[2 * 6 + 2], 255);
-        assert_eq!(vals[2 * 6 + 3], 255);
-        assert_eq!(vals[3 * 6 + 2], 255);
-        assert_eq!(vals[3 * 6 + 3], 255);
+    fn 闭运算填孔且保留细结构() {
+        // 5x5 全前景、中心为孔
+        let mut px = vec![255u8; 25];
+        px[12] = 0;
+        let m = gray(&px, 5, 5);
+        let c = morph_close(&m, 1);
+        assert_eq!(c.get_pixel(2, 2)[0], 255, "内部孔洞应被填充");
+
+        // 5x5 中的 1px 宽竖线（发丝）：闭运算后仍保留（开运算会腐蚀掉）
+        let mut line = vec![0u8; 25];
+        for y in 0..5 {
+            line[y * 5 + 2] = 255;
+        }
+        let l = morph_close(&gray(&line, 5, 5), 1);
+        assert_eq!(l.get_pixel(2, 2)[0], 255, "1px 细结构不应被删除");
     }
 
     #[test]
@@ -72,5 +134,65 @@ mod tests {
         // 全 0 mask 羽化后仍接近 0
         assert!(f.pixels().all(|p| p[0] < 10));
         assert_eq!(feather(&m, 0.0), m);
+    }
+
+    #[test]
+    fn 软阈值过渡带单调且端点饱和() {
+        let px: Vec<u8> = (0..=255u8).collect();
+        let m = gray(&px, 256, 1);
+        let a = levelset_alpha(&m, 128, 48);
+        let vals: Vec<u8> = a.pixels().map(|p| p[0]).collect();
+        // 过渡带下界 128-24=104：104 之前为 0，152 之后为 255
+        assert_eq!(vals[0], 0);
+        assert_eq!(vals[103], 0);
+        assert_eq!(vals[152], 255);
+        assert_eq!(vals[255], 255);
+        // 过渡带内单调不减，且中点约为半透明
+        for i in 104..152 {
+            assert!(vals[i] <= vals[i + 1], "过渡带应单调不减：{i}");
+        }
+        assert!(vals[128] > 100 && vals[128] < 160, "中点应接近半透明");
+    }
+
+    #[test]
+    fn 软阈值零范围退化为硬阈值() {
+        let m = gray(&[0, 127, 128, 255], 4, 1);
+        assert_eq!(levelset_alpha(&m, 128, 0), threshold_mask(&m, 128));
+    }
+
+    #[test]
+    fn 距离场羽化主体恒255外部恒0() {
+        // 16x16：中心 8x8 为前景
+        let mut px = vec![0u8; 256];
+        for y in 4..12 {
+            for x in 4..12 {
+                px[y * 16 + x] = 255;
+            }
+        }
+        let a = distance_feather(&gray(&px, 16, 16), 128, 2.0);
+        assert_eq!(a.get_pixel(8, 8)[0], 255, "主体内部应恒为 255");
+        assert_eq!(a.get_pixel(0, 0)[0], 0, "外部应恒为 0");
+        // 沿边界法线：由外向内单调不减（0 → 过渡带 → 主体 255）
+        let row: Vec<u8> = (0..16).map(|x| a.get_pixel(x, 8)[0]).collect();
+        for i in 0..4 {
+            assert!(row[i] <= row[i + 1], "边界外侧应向外单调不增：{i}");
+        }
+        for i in 4..10 {
+            assert!(row[i] <= row[i + 1], "边界内侧应向中心单调不减：{i}");
+        }
+        assert!(row[4] > 0 && row[4] < 255, "骨架边界应位于过渡带内");
+    }
+
+    #[test]
+    fn 距离场羽化保留细发丝() {
+        // 16x16 中的 1px 宽竖线：旧链路「开运算」会把整条线腐蚀掉，新链路应保留半透明
+        let mut px = vec![0u8; 256];
+        for y in 2..14 {
+            px[y * 16 + 8] = 255;
+        }
+        let a = distance_feather(&gray(&px, 16, 16), 128, 2.0);
+        let v = a.get_pixel(8, 8)[0];
+        assert!(v > 0, "细发丝不应被删除");
+        assert!(v < 255, "1px 细结构应呈半透明过渡");
     }
 }

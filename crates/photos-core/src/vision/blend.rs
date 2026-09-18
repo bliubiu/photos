@@ -4,7 +4,7 @@
 
 use image::{GrayImage, Rgb, RgbImage, Rgba, RgbaImage};
 use imageproc::distance_transform::Norm;
-use imageproc::morphology::dilate;
+use imageproc::morphology::{dilate, erode};
 
 /// 去色边生效的 alpha 下界（低于此值前景几乎不可见，解混会放大噪声）
 pub const DECONTAMINATE_MIN_ALPHA: u8 = 26;
@@ -82,16 +82,28 @@ pub fn estimate_background_color(fg: &RgbImage, alpha: &GrayImage) -> [u8; 3] {
 ///
 /// 解混模型：观测色 `C = F×α + B×(1-α)` → 前景色 `F = (C - B×(1-α)) / α`，
 /// 其中 `B` 为 [`estimate_background_color`] 估计的原始背景色。
-/// alpha 过高（纯前景）或过低（几乎不可见）的像素保持原样，避免噪声放大。
-pub fn decontaminate(fg: &RgbImage, alpha: &GrayImage) -> RgbImage {
+/// `trimap_radius` 给出「内部核心」半径：距骨架边界超过该半径的主体像素保持原样，
+/// 避免薄纱、发内层等主体内部半透明像素被误解混；alpha 过高（纯前景）或过低
+/// （几乎不可见）的像素同样跳过，避免噪声放大。
+pub fn decontaminate(fg: &RgbImage, alpha: &GrayImage, trimap_radius: u32) -> RgbImage {
     assert_eq!(
         fg.dimensions(),
         alpha.dimensions(),
         "前景与 alpha 尺寸必须一致"
     );
     let bg = estimate_background_color(fg, alpha);
+    // trimap：腐蚀出内部核心（距边界 > trimap_radius 的主体区域），核心内不做解混
+    let bin = super::matting::threshold_mask(alpha, 1);
+    let core = erode(
+        &bin,
+        Norm::LInf,
+        trimap_radius.clamp(1, u8::MAX as u32) as u8,
+    );
     let mut out = fg.clone();
     for (x, y, p) in fg.enumerate_pixels() {
+        if core.get_pixel(x, y)[0] > 0 {
+            continue;
+        }
         let a = alpha.get_pixel(x, y)[0];
         if !(DECONTAMINATE_MIN_ALPHA..DECONTAMINATE_MAX_ALPHA).contains(&a) {
             continue;
@@ -231,7 +243,7 @@ mod tests {
         )
         .unwrap();
         let alpha = GrayImage::from_raw(2, 1, vec![0u8, 128]).unwrap();
-        let clean = decontaminate(&fg, &alpha);
+        let clean = decontaminate(&fg, &alpha, 2);
         // 全透明像素保持原样
         assert_eq!(clean.get_pixel(0, 0), &Rgb([200, 100, 50]));
         // 半透明像素解混回接近纯黑（去白边）
@@ -243,7 +255,36 @@ mod tests {
         // 纯前景像素不被改动
         let fg2 = RgbImage::from_pixel(1, 1, Rgb([12, 34, 56]));
         let a2 = GrayImage::from_pixel(1, 1, Luma([255u8]));
-        assert_eq!(decontaminate(&fg2, &a2).get_pixel(0, 0), &Rgb([12, 34, 56]));
+        assert_eq!(
+            decontaminate(&fg2, &a2, 2).get_pixel(0, 0),
+            &Rgb([12, 34, 56])
+        );
+    }
+
+    #[test]
+    fn 去色边跳过主体内部核心() {
+        // 7x1：α=[0,0,128,128,128,255,255]，腐蚀半径 2 后仅 x=4 位于内部核心
+        let fg = RgbImage::from_raw(
+            7,
+            1,
+            vec![
+                200, 100, 50, 200, 100, 50, 10, 10, 10, 10, 10, 10, 120, 120, 120, 10, 10, 10, 10,
+                10, 10,
+            ],
+        )
+        .unwrap();
+        let alpha = GrayImage::from_raw(7, 1, vec![0u8, 0, 128, 128, 128, 255, 255]).unwrap();
+        let clean = decontaminate(&fg, &alpha, 2);
+        assert_eq!(
+            clean.get_pixel(4, 0),
+            &Rgb([120, 120, 120]),
+            "主体内部核心不应被解混"
+        );
+        assert_ne!(
+            clean.get_pixel(3, 0),
+            &Rgb([10, 10, 10]),
+            "过渡带半透明像素应被解混"
+        );
     }
 
     #[test]

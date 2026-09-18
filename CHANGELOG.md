@@ -2,6 +2,18 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.20] - 0.1.0
+
+### 📈 Improvements 性能/体验优化
+- 【抠图质量·mask 链路】原「硬阈值（128）→ 形态学开运算（半径 1）→ 整图高斯羽化（σ=1.0）」替换为「**软阈值（level-set）→ 形态学闭运算 → 距离场羽化**」：① 新增 `vision::matting::levelset_alpha(prob, threshold, soft_range)`——概率在 `[threshold ± soft_range/2]`（默认 `[104, 152]`）区间内以 **smoothstep** 平滑过渡，保留发丝等亚像素半透明像素（原硬阈值直接二值化丢弃），过渡带无折角，`soft_range = 0` 退化为硬阈值；② `morph_open` 改为 `morph_close`（`vision::matting::morph_close`）——闭运算填内部小孔，且**不像开运算那样把 1px 宽的发丝整条腐蚀掉**（原链路中该步比二值化更伤发丝）；③ 新增 `vision::matting::distance_feather(alpha, threshold, feather_px)`——对二值骨架求**有符号距离场**（补图作源得 `d_in`、原图作源得 `d_out`，`inside ? d_in : -d_out`），主体内部恒 255、外部恒 0，仅约 ±`feather_px`（默认 2px）过渡带内渐降并与输入软 alpha 取较小值；过渡带形状**贴合骨架（各向异性）**，不再像整图高斯那样把细发丝糊穿。`feather`（整图高斯）保留给五官保护掩膜、服装掩膜等需要各向同性平滑的场景
+- 【抠图质量·去色边】`vision::blend::decontaminate` **trimap 化**（签名新增 `trimap_radius`）：先 `threshold_mask(alpha, 1)` 再 `erode` 出**内部核心**，距骨架边界超过半径（= 羽化宽度）的主体像素跳过颜色解混，避免薄纱、发内层等主体内部半透明像素被误解混（原实现对全图 `[26, 250)` 区间的 alpha 一律解混）
+- 【抠图质量·链路】`workflow.rs` 接线：`probability_mask` 改为 `probability_map → levelset_alpha → distance_feather`；换底前的二次羽化（修正旋转插值边缘）同样改用 `distance_feather`，`decontaminate` 传入 `MASK_FEATHER_PX`；常量 `MASK_MORPH_RADIUS` / `MASK_FEATHER_SIGMA` 替换为 `MASK_SOFT_RANGE = 48` / `MASK_FEATHER_PX = 2.0`
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`：抠图链路框图（Step 4 后处理、Step 6 羽化）同步为软阈值 + 闭运算 + 距离场羽化
+- `docs/03-实施计划.md`：M1 第 5 项抠图后处理描述同步
+- `docs/07-能力增强.md`：§一.1 补「mask 链路已升级（2026.09.18.20）」状态说明（三个算子、trimap 化、新链路顺序）
+
 ## [2026.09.18.19] - 0.1.0
 
 ### ✨ New Features 新增功能
