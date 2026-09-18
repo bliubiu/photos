@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useStore } from "./store";
 import UploadPanel from "./components/UploadPanel";
 import ParamsPanel from "./components/ParamsPanel";
+import BatchPanel from "./components/BatchPanel";
 import PreviewPanel from "./components/PreviewPanel";
 import HistoryList from "./components/HistoryList";
 
@@ -34,6 +35,7 @@ export default function App() {
         <section className="lg:col-span-1 space-y-6">
           <UploadPanel />
           <ParamsPanel />
+          <BatchPanel />
         </section>
         <section className="lg:col-span-2">
           <PreviewPanel />

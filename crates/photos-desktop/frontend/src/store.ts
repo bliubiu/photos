@@ -10,7 +10,7 @@ import {
   fetchModels,
   fetchTaskDetail,
   fetchTasks,
-  submitTasks,
+  submitTask,
 } from "./api";
 
 export interface ParamsState {
@@ -26,6 +26,19 @@ export interface ParamsState {
   customSize: string | null; // 自定义尺寸标识（mm:宽x高@DPI），null = 用内置尺寸
 }
 
+/** 批量项状态：上传中 → 处理中 → 成功 / 失败 */
+export type BatchStatus = "uploading" | "processing" | "succeeded" | "failed";
+
+/** 批量项（保留原文件，供失败重试） */
+export interface BatchItem {
+  name: string;
+  file: File;
+  id: string | null;
+  status: BatchStatus;
+  message?: string | null;
+  elapsed_ms?: number | null;
+}
+
 interface AppState {
   config: AppConfig | null;
   models: { id: string; ready: boolean; check_status: string; message: string }[];
@@ -34,6 +47,10 @@ interface AppState {
   detail: TaskDetail | null;
   files: File[];
   params: ParamsState;
+  /** 本次批量的逐项进度（空数组表示无批量任务） */
+  batch: BatchItem[];
+  /** 本次批量使用的提交参数（失败重试沿用同一套参数） */
+  lastPayload: SubmitParams | null;
   submitting: boolean;
   /** 模型一键下载进行中 */
   downloading: boolean;
@@ -45,8 +62,31 @@ interface AppState {
   setSelected: (id: string | null) => void;
   refreshTasks: () => Promise<void>;
   refreshDetail: () => Promise<void>;
+  refreshBatch: () => Promise<void>;
   submit: () => Promise<void>;
+  retryFailed: () => Promise<void>;
   downloadModels: () => Promise<void>;
+}
+
+/** 参数面板状态 → 提交参数（自定义底色/尺寸以字符串追加，服务端归一化为文件名安全 id） */
+function toSubmitParams(params: ParamsState): SubmitParams {
+  return {
+    mode: params.mode,
+    size: params.customSize ?? params.size,
+    backgrounds: params.customBg ? [...params.backgrounds, params.customBg] : params.backgrounds,
+    rotate: params.rotate,
+    layout: params.layout,
+    effect_image: params.effect,
+    transparent: params.transparent,
+    bg_image: params.bgImage,
+  };
+}
+
+/** 任务终态判定（queued/running 视为处理中） */
+function toBatchStatus(status: string): BatchStatus {
+  if (status === "succeeded") return "succeeded";
+  if (status === "failed") return "failed";
+  return "processing";
 }
 
 /** 模型列表状态映射（GET /models → 前端状态） */
@@ -78,6 +118,8 @@ export const useStore = create<AppState>((set, get) => ({
     customBg: null,
     customSize: null,
   },
+  batch: [],
+  lastPayload: null,
   submitting: false,
   downloading: false,
   error: null,
@@ -144,32 +186,68 @@ export const useStore = create<AppState>((set, get) => ({
       set({ error: "请先选择要处理的图片" });
       return;
     }
-    set({ submitting: true, error: null });
+    const payload = toSubmitParams(params);
+    set({
+      submitting: true,
+      error: null,
+      files: [],
+      selectedId: null,
+      detail: null,
+      batch: files.map((f) => ({ name: f.name, file: f, id: null, status: "uploading" })),
+      lastPayload: payload,
+    });
     try {
-      // 自定义底色/尺寸以字符串形式追加，服务端归一化为文件名安全 id
-      const backgrounds = params.customBg
-        ? [...params.backgrounds, params.customBg]
-        : params.backgrounds;
-      const payload: SubmitParams = {
-        mode: params.mode,
-        size: params.customSize ?? params.size,
-        backgrounds,
-        rotate: params.rotate,
-        layout: params.layout,
-        effect_image: params.effect,
-        transparent: params.transparent,
-        bg_image: params.bgImage,
-      };
-      const ids = await submitTasks(files, payload);
-      // 选中第一个新任务并开启轮询
-      set({ selectedId: ids[0] ?? null, detail: null, files: [] });
+      await uploadBatch(payload);
       await get().refreshTasks();
-      pollUntilSettled(ids);
+      pollBatch();
     } catch (e) {
       set({ error: (e as Error).message });
     } finally {
       set({ submitting: false });
     }
+  },
+
+  async retryFailed() {
+    const payload = get().lastPayload;
+    if (!payload) return;
+    const { batch } = get();
+    if (!batch.some((i) => i.status === "failed")) return;
+    set({ submitting: true, error: null, batch: resetFailed(batch) });
+    try {
+      await uploadBatch(payload);
+      await get().refreshTasks();
+      pollBatch();
+    } catch (e) {
+      set({ error: (e as Error).message });
+    } finally {
+      set({ submitting: false });
+    }
+  },
+
+  /** 拉取批量中「处理中」项的详情，更新进度（同时刷新选中项的预览） */
+  async refreshBatch() {
+    const { batch } = get();
+    if (!batch.some((i) => i.status === "processing")) return;
+    const next = await Promise.all(
+      batch.map(async (item) => {
+        if (item.status !== "processing" || !item.id) return item;
+        try {
+          const detail = await fetchTaskDetail(item.id);
+          if (useStore.getState().selectedId === item.id) {
+            useStore.setState({ detail });
+          }
+          return {
+            ...item,
+            status: toBatchStatus(detail.status),
+            message: detail.message,
+            elapsed_ms: detail.elapsed_ms,
+          };
+        } catch {
+          return item;
+        }
+      }),
+    );
+    set({ batch: next });
   },
 
   async downloadModels() {
@@ -195,33 +273,41 @@ export const useStore = create<AppState>((set, get) => ({
   },
 }));
 
-/** 轮询任务详情直至终态（succeeded/failed），随后刷新列表 */
-function pollUntilSettled(ids: string[]) {
-  let timer: number | undefined;
-  const tick = async () => {
-    const remaining: string[] = [];
-    for (const id of ids) {
-      try {
-        const detail = await fetchTaskDetail(id);
-        if (detail.status === "succeeded" || detail.status === "failed") {
-          if (useStore.getState().selectedId === id) {
-            useStore.setState({ detail });
-          }
-        } else {
-          remaining.push(id);
-        }
-      } catch {
-        remaining.push(id);
+/** 逐个提交批量中「待上传」项（逐项记录成功/失败，单个失败不阻断其余） */
+async function uploadBatch(payload: SubmitParams) {
+  const next = [...useStore.getState().batch];
+  for (let i = 0; i < next.length; i++) {
+    if (next[i].status !== "uploading") continue;
+    try {
+      const id = await submitTask(next[i].file, payload);
+      next[i] = { ...next[i], id, status: "processing", message: null };
+      // 选中首个提交成功的任务作为预览对象
+      if (useStore.getState().selectedId === null) {
+        useStore.setState({ selectedId: id, detail: null });
       }
+    } catch (e) {
+      next[i] = { ...next[i], status: "failed", message: (e as Error).message };
     }
-    if (remaining.length > 0 && useStore.getState().selectedId) {
-      timer = window.setTimeout(tick, 500);
+    useStore.setState({ batch: [...next] });
+  }
+}
+
+/** 失败项重置为「待上传」（供一键重试） */
+function resetFailed(batch: BatchItem[]): BatchItem[] {
+  return batch.map((item): BatchItem =>
+    item.status === "failed" ? { ...item, status: "uploading", message: null } : item,
+  );
+}
+
+/** 轮询批量任务直至全部终态，随后刷新历史列表 */
+function pollBatch() {
+  const tick = async () => {
+    await useStore.getState().refreshBatch();
+    if (useStore.getState().batch.some((i) => i.status === "processing")) {
+      window.setTimeout(() => void tick(), 500);
     } else {
       await useStore.getState().refreshTasks();
     }
   };
   void tick();
-  return () => {
-    if (timer) window.clearTimeout(timer);
-  };
 }

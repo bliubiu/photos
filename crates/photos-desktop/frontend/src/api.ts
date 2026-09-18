@@ -135,32 +135,28 @@ export async function fetchTaskDetail(id: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/tasks/${id}`);
 }
 
-/** 批量提交任务：逐个上传（每个文件一个任务），返回任务 id 列表 */
-export async function submitTasks(files: File[], params: SubmitParams): Promise<string[]> {
-  const ids: string[] = [];
-  for (const file of files) {
-    const form = new FormData();
-    form.append("file", file);
-    form.append(
-      "params",
-      JSON.stringify({
-        mode: params.mode,
-        size: params.size,
-        backgrounds: params.backgrounds,
-        rotate: params.rotate,
-        layout: params.layout,
-        effect_image: params.effect_image,
-        transparent: params.transparent,
-        bg_image: params.bg_image,
-      }),
-    );
-    const created = await request<{ id: string; status: string }>("/tasks", {
-      method: "POST",
-      body: form,
-    });
-    ids.push(created.id);
-  }
-  return ids;
+/** 提交单个任务：上传一个文件，返回任务 id（批量逐个调用，便于逐项展示进度与失败重试） */
+export async function submitTask(file: File, params: SubmitParams): Promise<string> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append(
+    "params",
+    JSON.stringify({
+      mode: params.mode,
+      size: params.size,
+      backgrounds: params.backgrounds,
+      rotate: params.rotate,
+      layout: params.layout,
+      effect_image: params.effect_image,
+      transparent: params.transparent,
+      bg_image: params.bg_image,
+    }),
+  );
+  const created = await request<{ id: string; status: string }>("/tasks", {
+    method: "POST",
+    body: form,
+  });
+  return created.id;
 }
 
 /** 产物下载地址（同源，直接可用于 <a> 或 <img>） */
