@@ -1,6 +1,6 @@
 //! MTCNN 三级联人脸检测（P-Net → R-Net → O-Net）。
 //! 模型来源：linxiaohui/mtcnn-opencv（与 yiyuezhuo 同套 ONNX）。
-//! 归一化：`(x - 127.5) * 0.0078125`；R/ONet 输入为 NHWC。
+//! 归一化：`(x - 127.5) * 0.0078125`；三级输入均为 NHWC（P-Net 空间维动态）。
 
 use image::RgbImage;
 use image::imageops::FilterType;
@@ -71,9 +71,9 @@ pub fn detect_mtcnn_cascade(
         let sw = ((img_w as f32 * scale).ceil() as u32).max(12);
         let sh = ((img_h as f32 * scale).ceil() as u32).max(12);
         let scaled = image::imageops::resize(img, sw, sh, FilterType::Triangle);
-        let input = mtcnn_nchw(&scaled);
-        // P-Net 全卷积：动态尺寸 [1,3,sh,sw]
-        let tensor = TensorData::new(vec![1, 3, sh as i64, sw as i64], input)?;
+        // Keras 导出的 P-Net 输入为 NHWC [1,H,W,3]（图内首层 Transpose NCHW）
+        let input = mtcnn_nhwc(&scaled);
+        let tensor = TensorData::new(vec![1, sh as i64, sw as i64, 3], input)?;
         let outs = engine.run(PNET_ID, &tensor)?;
         let proposals = pnet_decode(&outs, scale, THRESHOLDS[0])?;
         let kept = nms_boxes(&proposals, 0.5);
@@ -163,20 +163,19 @@ fn pyramid_scales(w: u32, h: u32) -> Vec<f32> {
     scales
 }
 
-/// RGB → (x-127.5)/128 NCHW
-fn mtcnn_nchw(img: &RgbImage) -> Vec<f32> {
+/// RGB → (x-127.5)/128 NHWC（Keras MTCNN 输入布局）
+fn mtcnn_nhwc(img: &RgbImage) -> Vec<f32> {
     let (w, h) = img.dimensions();
-    let mut chw = vec![0.0f32; 3 * (w * h) as usize];
+    let mut out = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {
         for x in 0..w {
             let p = img.get_pixel(x, y);
-            let i = (y * w + x) as usize;
-            chw[i] = (p[0] as f32 - 127.5) * 0.0078125;
-            chw[(w * h) as usize + i] = (p[1] as f32 - 127.5) * 0.0078125;
-            chw[2 * (w * h) as usize + i] = (p[2] as f32 - 127.5) * 0.0078125;
+            for c in 0..3 {
+                out.push((p[c] as f32 - 127.5) * 0.0078125);
+            }
         }
     }
-    chw
+    out
 }
 
 /// 从输出张量识别 heatmap(2ch) / bbox(4ch)（按通道数，不依赖输出顺序）

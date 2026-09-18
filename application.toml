@@ -18,19 +18,19 @@ concurrency = 2
 path = "models/pnet.onnx"
 sha256 = "07a69013008e612c4d2ad31b09645038911dfec67411cd68ccd0da55ca291a35"
 download.url = "https://github.com/yiyuezhuo/mtcnn-onnxruntime/blob/main/mtcnn_ort/pnet.onnx"
-input_dims = [1, 3, 12, 12]
+input_dims = [1, 12, 12, 3]
 
 [models.mtcnn_rnet]
 path = "models/rnet.onnx"
 sha256 = "de0f837f02b57e1e85959c3ae5c46bcd16162e6e95be5db8794e3c7c85a89004"
 download.url = "https://github.com/yiyuezhuo/mtcnn-onnxruntime/blob/main/mtcnn_ort/rnet.onnx"
-input_dims = [1, 3, 24, 24]
+input_dims = [1, 24, 24, 3]
 
 [models.mtcnn_onet]
 path = "models/onet.onnx"
 sha256 = "d80f19b44f72e45dd2b7d01384d56994220f60d9417b2a7fbba9041ef1d75e52"
 download.url = "https://github.com/yiyuezhuo/mtcnn-onnxruntime/blob/main/mtcnn_ort/onet.onnx"
-input_dims = [1, 3, 48, 48]
+input_dims = [1, 48, 48, 3]
 
 [models.retinaface]
 path = "models/retinaface_r50.onnx"

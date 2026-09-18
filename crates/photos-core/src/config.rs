@@ -477,9 +477,9 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
     let mut m = BTreeMap::new();
     for (id, path, dims) in [
         // MTCNN 完整三级联（逻辑 speed 套件 face 仍叫 mtcnn）
-        ("mtcnn_pnet", "models/pnet.onnx", vec![1, 3, 12, 12]),
-        ("mtcnn_rnet", "models/rnet.onnx", vec![1, 3, 24, 24]),
-        ("mtcnn_onet", "models/onet.onnx", vec![1, 3, 48, 48]),
+        ("mtcnn_pnet", "models/pnet.onnx", vec![1, 12, 12, 3]),
+        ("mtcnn_rnet", "models/rnet.onnx", vec![1, 24, 24, 3]),
+        ("mtcnn_onet", "models/onet.onnx", vec![1, 48, 48, 3]),
         (
             "retinaface",
             "models/retinaface_r50.onnx",

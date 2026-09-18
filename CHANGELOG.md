@@ -2,6 +2,15 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.4] - 0.1.0
+
+### 🐛 Bug Fixes  问题修复
+- 【MTCNN】修复 P-Net 推理输入布局错误：P-Net 由 NCHW `[1,3,H,W]` 改为 NHWC `[1,H,W,3]`（全卷积、空间维动态，与 R/ONet 一致），此前 speed 模式人脸检测无法命中的问题
+- 【配置】`mtcnn_pnet/rnet/onet` 的 `input_dims` 元数据由 NCHW 修正为真实 NHWC（`[1,12,12,3]` / `[1,24,24,3]` / `[1,48,48,3]`），`application.toml`、`docs/examples/application.toml` 与内置默认值同步
+
+### 📚 Docs 文档更新
+- `docs/04-模型清单.md`：MTCNN 三级的输入 dims 与布局修正为 NHWC
+
 ## [2026.09.18.3] - 0.1.0
 
 ### ✨ New Features 新增功能
