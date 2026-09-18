@@ -242,7 +242,7 @@ pub fn download_model(cfg: &Config, model_id: &str) -> CoreResult<()> {
                 break;
             }
             Err(e) => {
-                last_err = format!("{e}");
+                last_err = e.to_string();
                 let _ = std::fs::remove_file(&tmp);
                 if attempt < DOWNLOAD_MAX_RETRIES {
                     continue;
@@ -484,7 +484,6 @@ mod tests {
         spec.sha256 = expected.to_string();
         spec.download = Some(crate::config::ModelDownload {
             url: Some(url.into()),
-            ..Default::default()
         });
         cfg
     }
@@ -552,7 +551,7 @@ mod tests {
         // 即使下载地址无效（未启动 server），已存在也应直接通过
         let cfg = download_cfg(dir.path(), "http://127.0.0.1:1/不存在.onnx", "");
         assert_eq!(
-            std::fs::read(&cfg.model_spec("retinaface").unwrap().path.as_str()).unwrap(),
+            std::fs::read(cfg.model_spec("retinaface").unwrap().path.as_str()).unwrap(),
             std::fs::read(&target).unwrap()
         );
         ensure_model_downloaded(&cfg, "retinaface").unwrap();

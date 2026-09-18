@@ -20,7 +20,7 @@ pub enum Commands {
     /// 查看模型注册表状态 / 一键下载模型
     Models(ModelsArgs),
     /// 处理证件照（单图或文件夹批量，一次出齐多底色/效果图/排版）
-    Process(ProcessArgs),
+    Process(Box<ProcessArgs>),
     /// 启动本地 HTTP 服务（WebUI，M3）
     Serve(ServeArgs),
     /// 启动桌面版（Tauri 2，内嵌服务 + WebView）

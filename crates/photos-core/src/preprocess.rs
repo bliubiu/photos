@@ -35,6 +35,7 @@ pub struct ModelInput {
 /// 依据模型 input_dims 构造推理输入：
 /// - NCHW（通道在 dims[1]）：等比缩放 + 灰边填充（letterbox），返回逆变换参数
 /// - NHWC（通道在最后一维）：直接 resize（MoveNet 官方约定），坐标为归一化，无需逆变换
+///
 /// `retinaface` 为 true 时采用 RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)，不归一化
 /// （见 HivisionIDPhotos/hivision/creator/retinaface/inference.py）
 pub fn build_input(img: &RgbImage, dims: &[i64], retinaface: bool) -> CoreResult<ModelInput> {

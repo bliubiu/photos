@@ -2,6 +2,15 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.11] - 0.1.0
+
+### 📈 Improvements 性能/体验优化
+- 【代码质量】清理全仓 clippy 编译警告，建立**零警告基线**（`cargo clippy --all-targets` 无任何 warning）：
+  - **人脸解码参数聚合**：`decode_retinaface` / `decode_fused_mtcnn` / `decode_mtcnn` 的输入尺寸与 letterbox 逆变换参数聚合为 `DecodeTransform`，消除 `too_many_arguments`
+  - **CLI 枚举瘦身**：`Commands::Process` 改为 `Box<ProcessArgs>`，消除 `large_enum_variant`（枚举由 ≥440 字节降至指针级）
+  - **MT-CNN 类型解说**：拆分分数/回归返回类型抽取 `Reg4` / `ScoreReg` 别名，消除 `type_complexity`
+  - **其余 lint 清理**：`question_mark`、`new_without_default`（`OrtEngine` 补 `Default`）、`let_unit_value`、`manual_pattern_char_comparison`、`useless_format`、`needless_range_loop`、`manual_range_contains`、`print_literal`、`needless_update`、`needless_borrows_for_generic_args`、`doc_lazy_continuation`
+
 ## [2026.09.18.10] - 0.1.0
 
 ### ✨ New Features 新增功能

@@ -88,7 +88,7 @@ fn report(cfg: &Config, json: bool) -> Result<()> {
         ready_count(&statuses),
         statuses.len()
     );
-    println!("{:<16} {:<8} {}", "模型", "状态", "说明");
+    println!("{:<16} {:<8} 说明", "模型", "状态");
     for s in &statuses {
         println!("{:<16} {:<8} {}", s.id, s.check_status.as_str(), s.message);
     }

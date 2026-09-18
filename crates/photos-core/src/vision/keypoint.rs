@@ -94,7 +94,7 @@ pub fn decode_movenet(tensor: &TensorData, img_w: u32, img_h: u32) -> CoreResult
     }
     let row_len = cols as usize;
     let mut points = [None; 17];
-    for i in 0..17 {
+    for (i, slot) in points.iter_mut().enumerate() {
         let base = i * row_len;
         let y = tensor.data[base] as f64;
         let x = tensor.data[base + 1] as f64;
@@ -103,7 +103,7 @@ pub fn decode_movenet(tensor: &TensorData, img_w: u32, img_h: u32) -> CoreResult
         } else {
             1.0
         };
-        points[i] = (score > 0.3).then(|| Point2::new(x * img_w as f64, y * img_h as f64));
+        *slot = (score > 0.3).then(|| Point2::new(x * img_w as f64, y * img_h as f64));
     }
     Ok(KeypointSet { points })
 }

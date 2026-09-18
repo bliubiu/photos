@@ -17,7 +17,9 @@ use crate::vision::beauty::{apply_beauty_protected, face_feature_regions, featur
 use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
 use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
 use crate::vision::dressing::{self, SuitStyle};
-use crate::vision::face::{FaceBox, FaceDetection, decode_retinaface, retinaface_prior_count};
+use crate::vision::face::{
+    DecodeTransform, FaceBox, FaceDetection, decode_retinaface, retinaface_prior_count,
+};
 use crate::vision::geometry::{
     Point2, RotationDecision, SIDE_FACE_YAW_DEG, decide_rotation, fused_angle,
     fused_angle_with_torso, head_angle, shoulder_angle, torso_angle, yaw_from_landmarks,
@@ -212,14 +214,16 @@ pub fn run_pipeline(
             &face_outs[2],
             FACE_SCORE_THRESHOLD,
             NMS_IOU_THRESHOLD,
-            (
-                face_spec.input_dims[2] as u32,
-                face_spec.input_dims[3] as u32,
-            ),
-            scale_x,
-            scale_y,
-            pad_x,
-            pad_y,
+            DecodeTransform {
+                image_size: (
+                    face_spec.input_dims[2] as u32,
+                    face_spec.input_dims[3] as u32,
+                ),
+                scale_x,
+                scale_y,
+                pad_x,
+                pad_y,
+            },
         )?
     };
     // 级联 id 校验（测试/配置完整性）

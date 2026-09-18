@@ -93,7 +93,7 @@ pub fn decontaminate(fg: &RgbImage, alpha: &GrayImage) -> RgbImage {
     let mut out = fg.clone();
     for (x, y, p) in fg.enumerate_pixels() {
         let a = alpha.get_pixel(x, y)[0];
-        if a < DECONTAMINATE_MIN_ALPHA || a >= DECONTAMINATE_MAX_ALPHA {
+        if !(DECONTAMINATE_MIN_ALPHA..DECONTAMINATE_MAX_ALPHA).contains(&a) {
             continue;
         }
         let af = a as f32 / 255.0;

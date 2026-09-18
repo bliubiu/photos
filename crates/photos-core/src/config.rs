@@ -506,10 +506,9 @@ fn parse_custom_size(raw: &str) -> Option<(String, SizeSpec)> {
     let s = raw.trim().replace(['×', 'X'], "x");
     let (is_px, body) = if let Some(b) = s.strip_prefix("px:").or_else(|| s.strip_prefix("px_")) {
         (true, b)
-    } else if let Some(b) = s.strip_prefix("mm:").or_else(|| s.strip_prefix("mm_")) {
-        (false, b)
     } else {
-        return None;
+        let b = s.strip_prefix("mm:").or_else(|| s.strip_prefix("mm_"))?;
+        (false, b)
     };
 
     if is_px {

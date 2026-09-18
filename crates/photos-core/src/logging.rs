@@ -70,7 +70,7 @@ impl Write for DualSink {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let _ = self.stdout.flush()?;
+        self.stdout.flush()?;
         self.file.flush()
     }
 }
@@ -265,7 +265,7 @@ fn secret_value_range(s: &str) -> Option<(usize, usize)> {
             let eq_len = after.len_utf8();
             let value_start = key_len + eq_len;
             let value_len = s[value_start..]
-                .find(|c| c == ' ' || c == ',' || c == ';' || c == '\n' || c == '\t')
+                .find([' ', ',', ';', '\n', '\t'])
                 .unwrap_or(s[value_start..].len());
             if value_len == 0 {
                 continue;

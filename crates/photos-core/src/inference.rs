@@ -144,6 +144,13 @@ impl OrtEngine {
 }
 
 #[cfg(feature = "ort")]
+impl Default for OrtEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "ort")]
 impl InferenceEngine for OrtEngine {
     fn load(
         &mut self,

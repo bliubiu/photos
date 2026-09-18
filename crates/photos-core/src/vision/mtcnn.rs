@@ -464,11 +464,13 @@ fn refine_stage(
     Ok(fix_boxes(&kept, img_w, img_h))
 }
 
+/// 单个候选的 4 项 bbox 回归（左/上/右/下）
+type Reg4 = (f32, f32, f32, f32);
+/// 分数与回归的分解结果
+type ScoreReg = (Vec<f32>, Vec<Reg4>);
+
 /// 批次输出：scores[N] + regs[N,4]（按元素数与 shape 推断）
-fn split_score_reg(
-    outs: &[TensorData],
-    n: usize,
-) -> CoreResult<(Vec<f32>, Vec<(f32, f32, f32, f32)>)> {
+fn split_score_reg(outs: &[TensorData], n: usize) -> CoreResult<ScoreReg> {
     let mut scores = None;
     let mut regs = None;
     for t in outs {

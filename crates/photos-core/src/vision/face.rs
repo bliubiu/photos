@@ -139,19 +139,33 @@ fn decode_landm(lm: &[f32], prior: &[f32; 4]) -> [f32; 10] {
 /// - scores 张量 `[1, N]`（或 `[N]`，或真实模型 `[1, N, 2]` 取人脸分数列）：各候选分数
 /// - boxes 张量 `[1, N, 4]`（或 `[N, 4]`）：prior 回归偏移（Hivision 官方模型的 loc）
 /// - landmarks 张量 `[1, N, 10]`（或 `[N, 10]`）：5 点偏移（左眼、右眼、鼻尖、左嘴角、右嘴角）
-/// 流程：prior 解码 → 低分过滤 → NMS → 坐标还原（scale_x/scale_y 与 pad 提供 letterbox 逆变换）。
+///
+/// 流程：prior 解码 → 低分过滤 → NMS → 坐标还原（`scale_*` / `pad_*` 提供 letterbox 逆变换）。
+///
+/// 模型坐标 → 原图坐标的还原参数（letterbox 逆变换 + 模型输入尺寸）
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeTransform {
+    /// 模型输入尺寸（宽, 高）
+    pub image_size: (u32, u32),
+    /// 水平缩放系数
+    pub scale_x: f32,
+    /// 垂直缩放系数
+    pub scale_y: f32,
+    /// 水平填充像素（左）
+    pub pad_x: f32,
+    /// 垂直填充像素（上）
+    pub pad_y: f32,
+}
+
 pub fn decode_retinaface(
     scores: &TensorData,
     boxes: &TensorData,
     landmarks: &TensorData,
     score_threshold: f32,
     iou_threshold: f32,
-    image_size: (u32, u32),
-    scale_x: f32,
-    scale_y: f32,
-    pad_x: f32,
-    pad_y: f32,
+    transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
+    let DecodeTransform { image_size, scale_x, scale_y, pad_x, pad_y } = transform;
     if boxes.data.len() % 4 != 0 {
         return Err(CoreError::Image(format!(
             "检测框张量长度 {} 不是 4 的倍数",
@@ -369,12 +383,9 @@ fn decode_fused_mtcnn(
     landmarks: &TensorData,
     score_threshold: f32,
     iou_threshold: f32,
-    image_size: (u32, u32),
-    scale_x: f32,
-    scale_y: f32,
-    pad_x: f32,
-    pad_y: f32,
+    transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
+    let DecodeTransform { image_size, scale_x, scale_y, pad_x, pad_y } = transform;
     let n = boxes.data.len() / 4;
     if n == 0 {
         return Err(CoreError::Image("MTCNN 融合输出无检测框".into()));
@@ -489,12 +500,9 @@ pub fn decode_mtcnn(
     outputs: &[TensorData],
     score_threshold: f32,
     iou_threshold: f32,
-    input_size: (u32, u32),
-    scale_x: f32,
-    scale_y: f32,
-    pad_x: f32,
-    pad_y: f32,
+    transform: DecodeTransform,
 ) -> CoreResult<Vec<FaceDetection>> {
+    let DecodeTransform { image_size: input_size, scale_x, scale_y, pad_x, pad_y } = transform;
     if outputs.is_empty() {
         return Err(CoreError::Image("MTCNN 输出为空".into()));
     }
@@ -506,11 +514,13 @@ pub fn decode_mtcnn(
             lm,
             score_threshold,
             iou_threshold,
-            input_size,
-            scale_x,
-            scale_y,
-            pad_x,
-            pad_y,
+            DecodeTransform {
+                image_size: input_size,
+                scale_x,
+                scale_y,
+                pad_x,
+                pad_y,
+            },
         );
     }
     // 否则按 P-Net：找 2 通道 heatmap 与 4 通道回归
@@ -632,11 +642,13 @@ mod tests {
             &TensorData::new(vec![n as i64, 10], vec![0.0; n * 10]).unwrap(),
             0.5,
             0.5,
-            (64, 64),
-            2.0,
-            2.0,
-            10.0,
-            20.0,
+            DecodeTransform {
+                image_size: (64, 64),
+                scale_x: 2.0,
+                scale_y: 2.0,
+                pad_x: 10.0,
+                pad_y: 20.0,
+            },
         )
         .unwrap();
         // A、D、C 均保留（D 与 C IoU 0.25 < 0.5）
@@ -666,11 +678,13 @@ mod tests {
                 &lm,
                 0.5,
                 0.5,
-                (64, 64),
-                1.0,
-                1.0,
-                0.0,
-                0.0
+                DecodeTransform {
+                    image_size: (64, 64),
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    pad_x: 0.0,
+                    pad_y: 0.0
+                }
             )
             .is_err()
         );
@@ -681,11 +695,13 @@ mod tests {
                 &TensorData::new(vec![1, 10], vec![0.0; 10]).unwrap(),
                 0.5,
                 0.5,
-                (64, 64),
-                1.0,
-                1.0,
-                0.0,
-                0.0
+                DecodeTransform {
+                    image_size: (64, 64),
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    pad_x: 0.0,
+                    pad_y: 0.0
+                }
             )
             .is_err()
         );
@@ -697,7 +713,23 @@ mod tests {
         let s = TensorData::new(vec![2], vec![0.9, 0.8]).unwrap();
         let b = TensorData::new(vec![2, 4], vec![0.0; 8]).unwrap();
         let lm = TensorData::new(vec![2, 10], vec![0.0; 20]).unwrap();
-        assert!(decode_retinaface(&s, &b, &lm, 0.5, 0.5, (64, 64), 1.0, 1.0, 0.0, 0.0).is_err());
+        assert!(
+        decode_retinaface(
+            &s,
+            &b,
+            &lm,
+            0.5,
+            0.5,
+            DecodeTransform {
+                image_size: (64, 64),
+                scale_x: 1.0,
+                scale_y: 1.0,
+                pad_x: 0.0,
+                pad_y: 0.0
+            }
+        )
+        .is_err()
+    );
     }
 
     #[test]
@@ -714,11 +746,13 @@ mod tests {
             &TensorData::new(vec![1, n as i64, 10], vec![0.0; n * 10]).unwrap(),
             0.5,
             0.5,
-            (64, 64),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
+            DecodeTransform {
+                image_size: (64, 64),
+                scale_x: 1.0,
+                scale_y: 1.0,
+                pad_x: 0.0,
+                pad_y: 0.0,
+            },
         )
         .unwrap();
         assert_eq!(dets.len(), 1);
@@ -743,11 +777,13 @@ mod tests {
             ],
             0.5,
             0.4,
-            (128, 128),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
+            DecodeTransform {
+                image_size: (128, 128),
+                scale_x: 1.0,
+                scale_y: 1.0,
+                pad_x: 0.0,
+                pad_y: 0.0,
+            },
         )
         .unwrap();
         assert_eq!(dets.len(), 1);
@@ -776,11 +812,13 @@ mod tests {
             ],
             0.5,
             0.4,
-            (100, 100),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
+            DecodeTransform {
+                image_size: (100, 100),
+                scale_x: 1.0,
+                scale_y: 1.0,
+                pad_x: 0.0,
+                pad_y: 0.0,
+            },
         )
         .unwrap();
         assert_eq!(dets.len(), 1);
@@ -794,11 +832,13 @@ mod tests {
             &[TensorData::new(vec![1, 3, 4, 4], vec![0.0; 48]).unwrap()],
             0.5,
             0.4,
-            (32, 32),
-            1.0,
-            1.0,
-            0.0,
-            0.0,
+            DecodeTransform {
+                image_size: (32, 32),
+                scale_x: 1.0,
+                scale_y: 1.0,
+                pad_x: 0.0,
+                pad_y: 0.0,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("MTCNN"));
