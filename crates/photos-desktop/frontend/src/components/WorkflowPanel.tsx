@@ -1,6 +1,7 @@
 // 工作流编排面板（图形化）：以分层 DAG 渲染步骤节点与 requires 依赖连线。
-// 交互：节点内「关闭」停用步骤、同层 ←/→ 调序、「恢复默认」置空 steps 回到服务端配置。
-// 数据源：GET /config 的 pipeline.steps（元数据）与 pipeline.effective（生效顺序）。
+// 交互：节点内「关闭」停用步骤、同层拖拽或 ←/→ 调序、「恢复默认」置空 steps 回到服务端配置。
+// 数据源：GET /config 的 pipeline.steps（元数据）与 pipeline.effective（生效顺序）；
+// 耗时标注取自当前选中任务的 metrics（stage 与步骤阶段名同源）。
 
 import { useState } from "react";
 import { useStore } from "../store";
@@ -13,8 +14,11 @@ const GAP_Y = 46;
 const MIN_CANVAS_W = 480;
 
 export default function WorkflowPanel() {
-  const { config, params, setParams } = useStore();
+  const { config, params, detail, setParams } = useStore();
   const [hover, setHover] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const [dragHint, setDragHint] = useState<string | null>(null);
 
   const metas = config?.pipeline.steps ?? [];
   const effective = config?.pipeline.effective ?? [];
@@ -109,6 +113,35 @@ export default function WorkflowPanel() {
     setParams({ steps: next });
   };
 
+  /** 仅同层可拖拽调序（跨层会破坏依赖，服务端会拒绝） */
+  const canDrop = (from: string, to: string) => from !== to && layerOf(from) === layerOf(to);
+
+  /** 松手：把拖动节点插入到目标节点所在位置（目标及其后节点右移） */
+  const dropOn = (target: string) => {
+    const from = dragId;
+    setDragId(null);
+    setOverId(null);
+    setDragHint(null);
+    if (!from || !canDrop(from, target)) return;
+    const next = enabled.filter((s) => s !== from);
+    const at = next.indexOf(target);
+    if (at < 0) return;
+    next.splice(at, 0, from);
+    setParams({ steps: next });
+  };
+
+  // 分阶段耗时标注：同名阶段按出现次序一一对应（自定义步骤可复用同一算子）
+  const metrics = detail?.metrics ?? [];
+  const stageSeen = new Map<string, number>();
+  const cost = new Map<string, number>();
+  for (const id of enabled) {
+    const stage = metaOf(id)?.stage ?? "";
+    const k = stageSeen.get(stage) ?? 0;
+    stageSeen.set(stage, k + 1);
+    const hit = metrics.filter((m) => m.stage === stage)[k];
+    if (hit) cost.set(id, hit.ms);
+  }
+
   // 依赖缺失与请求冲突提示（服务端同样会校验并告警）
   const missing = enabled.flatMap((id) =>
     (metaOf(id)?.requires ?? [])
@@ -147,8 +180,23 @@ export default function WorkflowPanel() {
         {params.steps === null
           ? `当前沿用默认步骤表（${effective.length} 步），调整后即自定义`
           : `当前为自定义步骤表（${enabled.length} 步）`}
-        ，箭头为依赖方向，同一行内可用 ←/→ 调序
+        ，箭头为依赖方向，同一行内可拖动节点或用 ←/→ 调序
       </p>
+
+      {dragHint && (
+        <p className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+          {dragHint}
+        </p>
+      )}
+
+      {cost.size > 0 && (
+        <p className="mb-2 text-[11px] text-gray-400">
+          节点右下角为分阶段耗时，取自当前选中任务
+          {detail?.id ? ` ${detail.id}` : ""}
+          {detail?.elapsed_ms ? `（总耗时 ${detail.elapsed_ms} ms）` : ""}
+          ；步骤或参数变更后需重新处理才会更新。
+        </p>
+      )}
 
       <div className="overflow-x-auto">
         <div className="relative mx-auto" style={{ width: canvasW, height: canvasH }}>
@@ -204,11 +252,42 @@ export default function WorkflowPanel() {
             const row = rows[layerOf(id)] ?? [];
             const i = row.indexOf(id);
             const lack = (meta.requires ?? []).some((r) => !isOn(r));
+            const ms = cost.get(id);
+            const dragging = dragId === id;
+            const target = dragId !== null && overId === id && canDrop(dragId, id);
             return (
               <div
                 key={id}
+                draggable
                 onMouseEnter={() => setHover(id)}
                 onMouseLeave={() => setHover(null)}
+                onDragStart={(e) => {
+                  setDragId(id);
+                  setDragHint(null);
+                  e.dataTransfer.effectAllowed = "move";
+                  e.dataTransfer.setData("text/plain", id);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setOverId(null);
+                  setDragHint(null);
+                }}
+                onDragOver={(e) => {
+                  if (!dragId) return;
+                  if (canDrop(dragId, id)) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                    setOverId(id);
+                  } else {
+                    // 跨层拖拽会破坏依赖：不阻止默认行为以显示禁止光标，并给出中文提示
+                    setDragHint((h) => h ?? "仅支持同一行内拖动调序：跨行会破坏步骤依赖，服务端将拒绝");
+                  }
+                }}
+                onDragLeave={() => setOverId((o) => (o === id ? null : o))}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  dropOn(id);
+                }}
                 style={{
                   left: p.x,
                   top: p.y,
@@ -216,13 +295,15 @@ export default function WorkflowPanel() {
                   height: NODE_H,
                   transition: "left 300ms ease, top 300ms ease",
                 }}
-                className={`absolute rounded-lg border px-2 py-1.5 shadow-sm transition-colors ${
-                  lack
-                    ? "animate-pulse border-red-300 bg-red-50"
-                    : hover === id
-                      ? "border-blue-400 bg-white"
-                      : "border-gray-300 bg-white"
-                }`}
+                className={`absolute cursor-grab rounded-lg border px-2 py-1.5 shadow-sm transition-colors active:cursor-grabbing ${
+                  target
+                    ? "border-blue-500 ring-2 ring-blue-300"
+                    : lack
+                      ? "animate-pulse border-red-300 bg-red-50"
+                      : hover === id
+                        ? "border-blue-400 bg-white"
+                        : "border-gray-300 bg-white"
+                } ${dragging ? "opacity-40" : ""}`}
               >
                 <div className="flex items-center justify-between gap-1">
                   <span className="truncate text-xs font-medium text-gray-800">{meta.label}</span>
@@ -245,9 +326,14 @@ export default function WorkflowPanel() {
                     </button>
                   </div>
                 </div>
-                <div className="mt-1 flex items-center justify-between gap-1 text-[10px] text-gray-400">
-                  <span className="truncate">
-                    第 {enabled.indexOf(id) + 1} 步 · {meta.stage}
+                <div className="mt-1 flex items-center gap-1 text-[10px] text-gray-400">
+                  <span className="shrink-0">第 {enabled.indexOf(id) + 1} 步</span>
+                  <span
+                    className={`ml-auto shrink-0 rounded px-1 ${
+                      ms === undefined ? "text-gray-300" : "bg-gray-100 text-gray-600"
+                    }`}
+                  >
+                    {ms === undefined ? "—" : `${ms} ms`}
                   </span>
                   <button
                     type="button"
