@@ -2,6 +2,19 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.22] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【姿态纠偏·俯仰告警】`vision::geometry::pitch_ratio_from_landmarks`——由人脸 5 点关键点（双眼 / 鼻尖 / 双嘴角）估算鼻尖相对眼线的垂直占比（占「眼线→嘴线」垂直距离比例，无量纲、不随脸大小变化），常量 `PITCH_FRONTAL_RATIO = 0.55`（平视基准）/ `PITCH_RATIO_TOLERANCE = 0.15`（容差）；`workflow.rs::pitch_warning` 把偏离基准的方向与幅度映射为「疑似低头 / 仰头，建议提供平视正面照」中文告警（与侧脸告警口径一致，**仅告警不阻断出图**）。俯仰无法通过旋转纠偏，且 5 点 2D 关键点的垂直占比与真实俯仰角无可靠解析映射，故不输出估算角度，避免虚假精度
+
+### 📈 Improvements 性能/体验优化
+- 【推理引擎池·模式分桶】`engine_pool.rs` 空闲引擎由单列表改为 `HashMap<模式, Vec<引擎>>`：`acquire(mode, w, h)` 只复用**同模式**空闲引擎（跨模式复用会把上一模式常驻的模型带进本次任务，既浪费内存又语义不清），**总容量仍为 `max_concurrent_tasks`**（不按模式数翻倍）；容量已满且本模式无空闲时**驱逐其他模式的一个空闲引擎**腾出容量位（宁可重建也不跨模式复用），避免各模式互相饿死。`EngineFactory` 签名同步改为 `Fn(String, u32, u32) -> EngineLease`，任务入口按 `req.mode` 借出
+- 【代码质量】`storage::update_task` 由 7 参数改为聚合入参结构体 `TaskUpdate`（status / message / outputs / warnings / elapsed_ms / metrics），消除 `clippy::too_many_arguments` 警告，调用点（photos-api handlers、photos-cli process、storage 自测）统一构造
+
+### 📚 Docs 文档更新
+- `docs/02-架构设计.md`：§4.1 引擎池描述补「按运行模式分桶 + 满容量驱逐异模式空闲引擎」；姿态纠偏框补俯仰告警分支
+- `docs/07-能力增强.md`：§三.2、§一.9 补 2026.09.18.22 分桶与俯仰落地说明；能力矩阵表同步
+
 ## [2026.09.18.21] - 0.1.0
 
 ### 📈 Improvements 性能/体验优化

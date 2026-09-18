@@ -35,7 +35,7 @@ impl TestApp {
     }
 
     fn app(&self) -> axum::Router {
-        let factory: EngineFactory = Arc::new(|w, h| {
+        let factory: EngineFactory = Arc::new(|_mode, w, h| {
             photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
         });
         router(self.cfg.clone(), factory, false)
@@ -661,7 +661,7 @@ async fn 分页查询() {
 #[test]
 fn 并发上限取自配置() {
     let t = TestApp::new_with(|cfg| cfg.server.max_concurrent_tasks = 3);
-    let factory: EngineFactory = Arc::new(|w, h| {
+    let factory: EngineFactory = Arc::new(|_mode, w, h| {
         photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
     });
     let state = photos_api::handlers::AppState::new(t.cfg.clone(), factory, false).unwrap();
@@ -682,7 +682,7 @@ async fn 引擎池复用连续任务() {
         1,
     );
     let acquired = pool.clone();
-    let factory: EngineFactory = Arc::new(move |w, h| acquired.acquire(w, h));
+    let factory: EngineFactory = Arc::new(move |mode, w, h| acquired.acquire(&mode, w, h));
     let app = router(t.cfg.clone(), factory, false);
 
     for _ in 0..2 {
@@ -1366,7 +1366,7 @@ async fn 指标聚合与错误上报端点() {
 
 /// 测试用引擎工厂（demo 回放，不入池）
 fn test_factory() -> EngineFactory {
-    Arc::new(|w, h| {
+    Arc::new(|_mode, w, h| {
         photos_api::engine_pool::EngineLease::owned(Box::new(demo_balanced_engine(w, h)))
     })
 }

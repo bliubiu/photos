@@ -30,9 +30,9 @@ use crate::artifact;
 use crate::engine_pool::EngineLease;
 use crate::error::{ApiError, model_missing};
 
-/// 引擎工厂：按输入图片尺寸借出推理引擎（真实 OrtEngine 复用进程级池中的引擎 / 演示
-/// FakeEngine 每次新建；测试注入 stub）。尺寸参数用于演示引擎（需按图宽高回放），真实引擎忽略。
-pub type EngineFactory = Arc<dyn Fn(u32, u32) -> EngineLease + Send + Sync>;
+/// 引擎工厂：按运行模式与图片尺寸借出推理引擎（真实 OrtEngine 复用进程级池中**同模式桶**
+/// 的引擎 / 演示 FakeEngine 每次新建；测试注入 stub）。尺寸参数仅演示引擎需要（按图宽高回放）。
+pub type EngineFactory = Arc<dyn Fn(String, u32, u32) -> EngineLease + Send + Sync>;
 
 /// 应用状态（Config 只读共享；Store 由 Mutex 串行化 sqlite 访问）
 pub struct AppState {
@@ -1070,9 +1070,17 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         };
         {
             let store = state.store.lock().unwrap();
-            if let Err(e) =
-                store.update_task(task_id, "running", "开始处理", "[]", "[]", None, None)
-            {
+            if let Err(e) = store.update_task(
+                task_id,
+                &photos_core::storage::TaskUpdate {
+                    status: "running".into(),
+                    message: "开始处理".into(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: None,
+                    metrics: None,
+                },
+            ) {
                 tracing::error!("更新任务运行状态失败：{e}");
                 return;
             }
@@ -1139,8 +1147,8 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             // 与流水线内部预缩放对齐：引擎按缩放后尺寸构造
             let (w, h) =
                 photos_core::pipeline::limited_dimensions(w, h, state2.cfg.general.max_input_side);
-            // 借出引擎（生产模式来自进程级池，复用已装载模型的引擎；用完自动归还）
-            let mut lease = (state2.engine_factory)(w, h);
+            // 借出引擎（生产模式来自进程级池的同模式桶，复用已装载模型的引擎；用完自动归还）
+            let mut lease = (state2.engine_factory)(req.mode.clone(), w, h);
             // 分阶段耗时指标：失败时仍保留已记录阶段，供错误上报定位
             let mut metrics = TaskMetrics::new();
             let r = run_pipeline_with_metrics(&state2.cfg, lease.engine_mut(), &req, &mut metrics);
@@ -1194,20 +1202,30 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                         serde_json::to_string(warnings).unwrap_or_else(|_| "[]".into());
                     if let Err(e) = store.update_task(
                         task_id,
-                        "succeeded",
-                        "处理完成",
-                        &outputs_json,
-                        &warnings_json,
-                        Some(elapsed),
-                        Some(&metrics_json),
+                        &photos_core::storage::TaskUpdate {
+                            status: "succeeded".into(),
+                            message: "处理完成".into(),
+                            outputs: outputs_json,
+                            warnings: warnings_json,
+                            elapsed_ms: Some(elapsed),
+                            metrics: Some(metrics_json),
+                        },
                     ) {
                         tracing::error!("更新任务成功状态失败：{e}");
                     }
                 }
                 Err(msg) => {
-                    if let Err(e) =
-                        store.update_task(task_id, "failed", msg, "[]", "[]", Some(elapsed), None)
-                    {
+                    if let Err(e) = store.update_task(
+                        task_id,
+                        &photos_core::storage::TaskUpdate {
+                            status: "failed".into(),
+                            message: msg.into(),
+                            outputs: "[]".into(),
+                            warnings: "[]".into(),
+                            elapsed_ms: Some(elapsed),
+                            metrics: None,
+                        },
+                    ) {
                         tracing::error!("更新任务失败状态出错：{e}");
                     }
                 }

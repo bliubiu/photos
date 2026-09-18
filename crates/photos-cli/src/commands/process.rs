@@ -312,12 +312,14 @@ fn process_one(
             let metrics_json = metrics.to_json();
             store.update_task(
                 task_id,
-                "succeeded",
-                "处理完成",
-                &outputs_json,
-                &warnings,
-                Some(started.elapsed().as_millis() as i64),
-                Some(&metrics_json),
+                &photos_core::storage::TaskUpdate {
+                    status: "succeeded".into(),
+                    message: "处理完成".into(),
+                    outputs: outputs_json,
+                    warnings,
+                    elapsed_ms: Some(started.elapsed().as_millis() as i64),
+                    metrics: Some(metrics_json),
+                },
             )?;
             photos_core::logging::log_metrics(task_id, &metrics);
             println!("已生成 {}：{}", input.display(), outputs.join("、"));
@@ -333,12 +335,14 @@ fn process_one(
             let msg = e.to_string();
             store.update_task(
                 task_id,
-                "failed",
-                &msg,
-                "[]",
-                "[]",
-                Some(started.elapsed().as_millis() as i64),
-                None,
+                &photos_core::storage::TaskUpdate {
+                    status: "failed".into(),
+                    message: msg.clone(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: Some(started.elapsed().as_millis() as i64),
+                    metrics: None,
+                },
             )?;
             // 错误上报：结构化错误日志 + 落库（失败阶段取最后已记录阶段）
             let failed_stage = metrics.last_stage().unwrap_or("处理").to_string();

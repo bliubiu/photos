@@ -96,14 +96,16 @@ pub fn production_engine_factory(cfg: &Config) -> anyhow::Result<EngineFactory> 
         );
     }
     let capacity = cfg.server.max_concurrent_tasks;
-    tracing::info!("推理引擎池已启用：容量 {capacity}（任务复用已装载模型的引擎）");
+    tracing::info!(
+        "推理引擎池已启用：容量 {capacity}（按模式分桶，任务复用同模式已装载模型的引擎）"
+    );
     let pool = EnginePool::new(
         Arc::new(|_, _| photos_core::inference::default_engine()),
         capacity,
     );
     // 启动预热：异步装载默认模式（balanced）的小模型，首个任务免去冷启动装载开销（失败不阻断）
     prewarm_default(pool.clone(), cfg);
-    Ok(Arc::new(move |w, h| pool.acquire(w, h)))
+    Ok(Arc::new(move |mode, w, h| pool.acquire(&mode, w, h)))
 }
 
 /// 异步预热默认模式的引擎：与首个任务同构地装载默认步骤所需模型后归还池中，
@@ -122,7 +124,7 @@ fn prewarm_default(pool: Arc<EnginePool>, cfg: &Config) {
     std::thread::spawn(move || {
         let steps = photos_core::workflow::effective_steps(&cfg, None);
         let ids = photos_core::workflow::required_model_ids(&cfg, &suite, &steps);
-        let mut lease = pool.acquire(side, side);
+        let mut lease = pool.acquire(&mode, side, side);
         for id in &ids {
             if let Err(e) = lease.engine_mut().load(&cfg, id, suite.execution_provider) {
                 tracing::warn!("预热模型“{id}”失败（任务执行时将重试）：{e}");
@@ -134,7 +136,9 @@ fn prewarm_default(pool: Arc<EnginePool>, cfg: &Config) {
 /// 演示引擎工厂：内置 mock 回放（椭圆人形），**仅限显式 `--demo` 或 PHOTOS_DEMO=1**。
 /// 演示引擎按输入尺寸回放，不入池（每次新建）。
 pub fn demo_engine_factory() -> EngineFactory {
-    Arc::new(|w, h| EngineLease::owned(Box::new(photos_core::pipeline::demo_balanced_engine(w, h))))
+    Arc::new(|_mode, w, h| {
+        EngineLease::owned(Box::new(photos_core::pipeline::demo_balanced_engine(w, h)))
+    })
 }
 
 /// 根据 `PHOTOS_DEMO` 环境变量选择工厂：`1`/`true`/`yes` → demo，否则要求 ort。

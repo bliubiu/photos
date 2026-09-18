@@ -3,7 +3,13 @@
 //!
 //! 池容量取 `[server] max_concurrent_tasks`：并发任务各持一个引擎互不阻塞，空闲引擎留在
 //! 池中复用（已装载的模型会话常驻，含按需加载的换装解析模型）。
+//!
+//! 空闲引擎**按运行模式分桶**（speed / balanced / quality）：跨模式复用会把上一模式常驻的
+//! 模型带进来，既浪费内存又语义不清；分桶后只复用同模式引擎，总容量仍为
+//! `max_concurrent_tasks`（不按模式数翻倍）。容量已满且本模式无空闲引擎时，驱逐其他模式的
+//! 空闲引擎腾出容量位（宁可重建也不跨模式复用），避免各模式互相饿死。
 
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 
 use photos_core::inference::InferenceEngine;
@@ -11,10 +17,10 @@ use photos_core::inference::InferenceEngine;
 /// 引擎构造器：按输入图尺寸构造引擎（真实引擎忽略尺寸；演示引擎按尺寸回放）
 pub type EngineBuilder = Arc<dyn Fn(u32, u32) -> Box<dyn InferenceEngine> + Send + Sync>;
 
-/// 池内状态（空闲引擎列表 + 已建引擎数）
+/// 池内状态（各模式空闲引擎桶 + 已建引擎数，后者为全池总容量口径）
 #[derive(Default)]
 struct PoolState {
-    idle: Vec<Box<dyn InferenceEngine>>,
+    idle: HashMap<String, Vec<Box<dyn InferenceEngine>>>,
     created: usize,
 }
 
@@ -31,6 +37,8 @@ pub struct EnginePool {
 pub struct EngineLease {
     /// 归还目标（None = 一次性引擎，用完丢弃）
     pool: Option<Arc<EnginePool>>,
+    /// 借出时的运行模式（归还回同模式桶）
+    mode: String,
     /// 借出的引擎（None 表示已归还）
     engine: Option<Box<dyn InferenceEngine>>,
     /// 引擎已损坏：归还时直接丢弃（不污染池）并释放一个容量位
@@ -42,6 +50,7 @@ impl EngineLease {
     pub fn owned(engine: Box<dyn InferenceEngine>) -> Self {
         Self {
             pool: None,
+            mode: String::new(),
             engine: Some(engine),
             broken: false,
         }
@@ -67,7 +76,7 @@ impl Drop for EngineLease {
             if self.broken {
                 pool.discard();
             } else {
-                pool.put_back(engine);
+                pool.put_back(&self.mode, engine);
             }
         }
     }
@@ -84,11 +93,13 @@ impl EnginePool {
         })
     }
 
-    /// 借出引擎：优先复用空闲引擎；未达容量上限时新建；已达上限时等待其他任务归还
-    pub fn acquire(self: &Arc<Self>, w: u32, h: u32) -> EngineLease {
-        let engine = self.take(w, h);
+    /// 借出引擎（限 `mode` 模式）：优先复用同模式空闲引擎；未达总容量上限时新建；
+    /// 已达上限且本模式无空闲时驱逐其他模式的空闲引擎；否则等待其他任务归还
+    pub fn acquire(self: &Arc<Self>, mode: &str, w: u32, h: u32) -> EngineLease {
+        let engine = self.take(mode, w, h);
         EngineLease {
             pool: Some(self.clone()),
+            mode: mode.to_string(),
             engine: Some(engine),
             broken: false,
         }
@@ -99,10 +110,10 @@ impl EnginePool {
         self.state.lock().unwrap().created
     }
 
-    fn take(&self, w: u32, h: u32) -> Box<dyn InferenceEngine> {
+    fn take(&self, mode: &str, w: u32, h: u32) -> Box<dyn InferenceEngine> {
         let mut state = self.state.lock().unwrap();
         loop {
-            if let Some(engine) = state.idle.pop() {
+            if let Some(engine) = state.idle.get_mut(mode).and_then(|bucket| bucket.pop()) {
                 return engine;
             }
             if state.created < self.capacity {
@@ -111,13 +122,25 @@ impl EnginePool {
                 drop(state);
                 return (self.builder)(w, h);
             }
+            // 容量已满且本模式无空闲：驱逐其他模式的一个空闲引擎，其容量位由本次新建接管
+            // （不调整 created，避免并发下短暂超容），避免各模式互相饿死
+            let victim = state
+                .idle
+                .iter_mut()
+                .find(|(k, bucket)| k.as_str() != mode && !bucket.is_empty())
+                .and_then(|(_, bucket)| bucket.pop());
+            if let Some(victim) = victim {
+                drop(state);
+                drop(victim); // 释放旧会话（可能较慢），不持锁
+                return (self.builder)(w, h);
+            }
             state = self.idle_ready.wait(state).unwrap();
         }
     }
 
-    fn put_back(&self, engine: Box<dyn InferenceEngine>) {
+    fn put_back(&self, mode: &str, engine: Box<dyn InferenceEngine>) {
         if let Ok(mut state) = self.state.lock() {
-            state.idle.push(engine);
+            state.idle.entry(mode.to_string()).or_default().push(engine);
             self.idle_ready.notify_one();
         }
     }
@@ -177,11 +200,11 @@ mod tests {
     fn 归还后复用同一引擎() {
         let (pool, built) = counter_pool(1);
         {
-            let mut lease = pool.acquire(100, 100);
+            let mut lease = pool.acquire("balanced", 100, 100);
             let tensor = TensorData::new(vec![1], vec![0.0]).unwrap();
             assert!(lease.engine_mut().run("任意", &tensor).unwrap().is_empty());
         }
-        let _lease = pool.acquire(100, 100);
+        let _lease = pool.acquire("balanced", 100, 100);
         assert_eq!(
             built.load(Ordering::SeqCst),
             1,
@@ -193,15 +216,15 @@ mod tests {
     #[test]
     fn 借出至容量上限后归还再复用() {
         let (pool, built) = counter_pool(2);
-        let first = pool.acquire(10, 10);
-        let second = pool.acquire(10, 10);
+        let first = pool.acquire("balanced", 10, 10);
+        let second = pool.acquire("balanced", 10, 10);
         assert_eq!(
             built.load(Ordering::SeqCst),
             2,
             "两个并发借出应各建一个引擎"
         );
         drop(first);
-        let third = pool.acquire(10, 10);
+        let third = pool.acquire("balanced", 10, 10);
         assert_eq!(
             built.load(Ordering::SeqCst),
             2,
@@ -210,6 +233,39 @@ mod tests {
         drop((second, third));
         assert_eq!(pool.created(), 2);
         assert_eq!(built.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn 不同模式不互相复用() {
+        let (pool, built) = counter_pool(2);
+        {
+            let _speed = pool.acquire("speed", 10, 10);
+            let _balanced = pool.acquire("balanced", 10, 10);
+        }
+        assert_eq!(built.load(Ordering::SeqCst), 2, "两个模式应各建一个引擎");
+        // 归还后各自复用同模式引擎，不跨模式复用（speed 的引擎不得被 balanced 借走）
+        let _speed = pool.acquire("speed", 10, 10);
+        let _balanced = pool.acquire("balanced", 10, 10);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "同模式归还后应复用，不得因跨模式而新建"
+        );
+        assert_eq!(pool.created(), 2);
+    }
+
+    #[test]
+    fn 容量满时跨模式借用驱逐空闲引擎而不阻塞() {
+        let (pool, built) = counter_pool(1);
+        drop(pool.acquire("speed", 10, 10));
+        // 容量已满且 balanced 桶为空：应驱逐 speed 的空闲引擎并新建（而非永久等待）
+        let _balanced = pool.acquire("balanced", 10, 10);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "应驱逐异模式空闲引擎并新建本模式引擎"
+        );
+        assert_eq!(pool.created(), 1, "驱逐后容量位由新引擎接管，总数不变");
     }
 
     #[test]
@@ -223,12 +279,12 @@ mod tests {
     fn 标记损坏的引擎被驱逐且释放容量位() {
         let (pool, built) = counter_pool(1);
         {
-            let mut lease = pool.acquire(10, 10);
+            let mut lease = pool.acquire("balanced", 10, 10);
             lease.mark_broken();
         }
         assert_eq!(pool.created(), 0, "损坏引擎应被丢弃并释放容量位");
         // 容量位释放后应能新建健康引擎（而不是复用损坏的那个）
-        let _lease = pool.acquire(10, 10);
+        let _lease = pool.acquire("balanced", 10, 10);
         assert_eq!(
             built.load(Ordering::SeqCst),
             2,

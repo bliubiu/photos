@@ -25,8 +25,9 @@ use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
 use crate::vision::dressing::{self, SuitStyle};
 use crate::vision::face::{DecodeTransform, FaceBox, FaceDetection, decode_retinaface};
 use crate::vision::geometry::{
-    Point2, RotationDecision, SIDE_FACE_YAW_DEG, decide_rotation, fused_angle,
-    fused_angle_with_torso, head_angle, shoulder_angle, torso_angle, yaw_from_landmarks,
+    PITCH_FRONTAL_RATIO, PITCH_RATIO_TOLERANCE, Point2, RotationDecision, SIDE_FACE_YAW_DEG,
+    decide_rotation, fused_angle, fused_angle_with_torso, head_angle, pitch_ratio_from_landmarks,
+    shoulder_angle, torso_angle, yaw_from_landmarks,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
 use crate::vision::matting::{distance_feather, levelset_alpha};
@@ -644,6 +645,9 @@ fn step_pose(ctx: &mut PipelineCtx) -> CoreResult<()> {
         if let Some(warn) = side_face_warning(face) {
             ctx.warnings.push(warn);
         }
+        if let Some(warn) = pitch_warning(face) {
+            ctx.warnings.push(warn);
+        }
     }
     ctx.decision = Some(decision);
     timer.stop(ctx.metrics);
@@ -1049,6 +1053,25 @@ fn side_face_warning(face: &FaceDetection) -> Option<String> {
         .then(|| format!("疑似侧脸（估算偏转 {yaw:.0}°），建议提供正面照"))
 }
 
+/// 俯仰告警：由人脸 5 点关键点估算鼻尖相对眼线的垂直占比，明显偏离正面平视基准时返回
+/// 中文提示（低头 / 仰头）。俯仰无法通过旋转纠偏，故仅告警提示重拍，不阻断出图。
+/// 关键点退化（演示/桩数据）时无法判断，返回 None 不告警。
+fn pitch_warning(face: &FaceDetection) -> Option<String> {
+    let ratio = pitch_ratio_from_landmarks(
+        &face.landmarks[0],
+        &face.landmarks[1],
+        &face.landmarks[2],
+        &face.landmarks[3],
+        &face.landmarks[4],
+    )?;
+    let deviation = ratio - PITCH_FRONTAL_RATIO;
+    if deviation.abs() <= PITCH_RATIO_TOLERANCE {
+        return None;
+    }
+    let direction = if deviation > 0.0 { "低头" } else { "仰头" };
+    Some(format!("疑似{direction}，建议提供平视正面照"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1351,6 +1374,67 @@ mod tests {
             ..frontal
         };
         assert!(side_face_warning(&degenerate).is_none());
+    }
+
+    #[test]
+    fn 俯仰超容差告警且正面与退化不告警() {
+        let face_box = FaceBox {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 200.0,
+            y2: 200.0,
+            score: 0.99,
+        };
+        // 眼线 y=140、嘴线 y=185（跨度 45）：鼻尖 y=165 → 比例 0.556 ≈ 正面基准
+        let frontal = FaceDetection {
+            face: face_box,
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(150.0, 165.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+        };
+        assert!(pitch_warning(&frontal).is_none(), "正面平视不应告警");
+        // 低头：鼻尖下移到 y=185 → 比例 1.0，偏离基准 0.45 > 容差
+        let down = FaceDetection {
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(150.0, 185.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+            ..frontal
+        };
+        let warn = pitch_warning(&down).unwrap();
+        assert!(warn.contains("低头") && warn.contains("平视"), "{warn}");
+        // 仰头：鼻尖上移到 y=145 → 比例 0.111，偏离基准 0.44
+        let up = FaceDetection {
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(150.0, 145.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+            ..frontal
+        };
+        let warn = pitch_warning(&up).unwrap();
+        assert!(warn.contains("仰头") && warn.contains("平视"), "{warn}");
+        // 关键点重合（演示/桩数据退化）→ 无法判断，不告警
+        let degenerate = FaceDetection {
+            landmarks: [
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 140.0),
+            ],
+            ..frontal
+        };
+        assert!(pitch_warning(&degenerate).is_none());
     }
 
     #[test]

@@ -21,6 +21,10 @@ pub const TORSO_SHOULDER_WEIGHT: f64 = 0.3;
 pub const TORSO_WEIGHT: f64 = 0.2;
 /// 侧脸（yaw）告警阈值（度）
 pub const SIDE_FACE_YAW_DEG: f64 = 30.0;
+/// 俯仰正面基准比：平视正面照下「眼中点→鼻尖」占「眼中点→嘴中点」垂直距离的比例
+pub const PITCH_FRONTAL_RATIO: f64 = 0.55;
+/// 俯仰告警容差：比例偏离基准超过该值即视为明显低头/仰头
+pub const PITCH_RATIO_TOLERANCE: f64 = 0.15;
 
 /// 平面点（图像坐标，x 向右、y 向下）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +96,26 @@ pub fn yaw_from_landmarks(left_eye: &Point2, right_eye: &Point2, nose: &Point2) 
     }
     let offset = nose.x - (left_eye.x + right_eye.x) / 2.0;
     Some((offset / half_span).clamp(-1.0, 1.0).asin().to_degrees())
+}
+
+/// 由人脸 5 点关键点（双眼、鼻尖、双嘴角）估计俯仰比：鼻尖相对眼线的垂直位置占
+/// 「眼线→嘴线」垂直距离的比例。正面平视约为 [`PITCH_FRONTAL_RATIO`]；低头时鼻尖下移、
+/// 比例增大，仰头时比例减小（比值无量纲，与脸大小无关）。
+/// 眼线→嘴线垂直距离退化（< 2px，如演示/桩数据关键点重合）时返回 None（无法判断）。
+pub fn pitch_ratio_from_landmarks(
+    left_eye: &Point2,
+    right_eye: &Point2,
+    nose: &Point2,
+    left_mouth: &Point2,
+    right_mouth: &Point2,
+) -> Option<f64> {
+    let eye_y = (left_eye.y + right_eye.y) / 2.0;
+    let mouth_y = (left_mouth.y + right_mouth.y) / 2.0;
+    let span = mouth_y - eye_y;
+    if span < 2.0 {
+        return None;
+    }
+    Some((nose.y - eye_y) / span)
 }
 
 /// 纠偏决策结果
@@ -225,6 +249,34 @@ mod tests {
         assert!(right.abs() > SIDE_FACE_YAW_DEG && left.abs() > SIDE_FACE_YAW_DEG);
         // 双眼重合（桩数据退化）→ 无法判断
         assert!(yaw_from_landmarks(&l, &l, &Point2::new(100.0, 140.0)).is_none());
+    }
+
+    #[test]
+    fn 俯仰比估计() {
+        let le = Point2::new(50.0, 100.0);
+        let re = Point2::new(150.0, 100.0);
+        let lm = Point2::new(70.0, 200.0);
+        let rm = Point2::new(130.0, 200.0);
+        // 眼线 y=100、嘴线 y=200：鼻尖 y=155 → 比例 0.55（正面基准）
+        let frontal =
+            pitch_ratio_from_landmarks(&le, &re, &Point2::new(100.0, 155.0), &lm, &rm).unwrap();
+        assert!(
+            (frontal - PITCH_FRONTAL_RATIO).abs() < 1e-9,
+            "实际 {frontal}"
+        );
+        assert!((frontal - PITCH_FRONTAL_RATIO).abs() <= PITCH_RATIO_TOLERANCE);
+        // 低头：鼻尖下移到 y=185 → 比例 0.85，超出容差
+        let down =
+            pitch_ratio_from_landmarks(&le, &re, &Point2::new(100.0, 185.0), &lm, &rm).unwrap();
+        assert!((down - 0.85).abs() < 1e-9, "实际 {down}");
+        assert!(down - PITCH_FRONTAL_RATIO > PITCH_RATIO_TOLERANCE);
+        // 仰头：鼻尖上移到 y=125 → 比例 0.25，超出容差且方向相反
+        let up =
+            pitch_ratio_from_landmarks(&le, &re, &Point2::new(100.0, 125.0), &lm, &rm).unwrap();
+        assert!((up - 0.25).abs() < 1e-9, "实际 {up}");
+        assert!(PITCH_FRONTAL_RATIO - up > PITCH_RATIO_TOLERANCE);
+        // 眼线→嘴线垂直距离退化（关键点重合）→ 无法判断
+        assert!(pitch_ratio_from_landmarks(&le, &re, &le, &le, &re).is_none());
     }
 
     #[test]

@@ -63,6 +63,23 @@ pub struct ErrorRecord {
     pub task_id: Option<i64>,
 }
 
+/// 任务状态更新（运行中 / 成功 / 失败；`metrics` 为 None 时保留原值）
+#[derive(Debug, Clone)]
+pub struct TaskUpdate {
+    /// 目标状态（running / succeeded / failed）
+    pub status: String,
+    /// 结果消息（成功 / 失败说明）
+    pub message: String,
+    /// 输出文件 JSON 数组
+    pub outputs: String,
+    /// 告警 JSON 数组
+    pub warnings: String,
+    /// 耗时毫秒（未计时为 None）
+    pub elapsed_ms: Option<i64>,
+    /// 分阶段指标 JSON（None 保留原值）
+    pub metrics: Option<String>,
+}
+
 /// 新任务（插入用）
 #[derive(Debug, Clone)]
 pub struct NewTask {
@@ -317,23 +334,22 @@ impl Store {
     }
 
     /// 更新任务状态与结果（运行中 / 成功 / 失败）；`metrics` 为 None 时保留原值
-    pub fn update_task(
-        &self,
-        id: i64,
-        status: &str,
-        message: &str,
-        outputs: &str,
-        warnings: &str,
-        elapsed_ms: Option<i64>,
-        metrics: Option<&str>,
-    ) -> CoreResult<()> {
+    pub fn update_task(&self, id: i64, update: &TaskUpdate) -> CoreResult<()> {
         self.conn
             .execute(
                 "UPDATE task_history
                  SET status = ?1, message = ?2, outputs = ?3, warnings = ?4, elapsed_ms = ?5,
                      metrics = COALESCE(?6, metrics)
                  WHERE id = ?7",
-                params![status, message, outputs, warnings, elapsed_ms, metrics, id],
+                params![
+                    update.status,
+                    update.message,
+                    update.outputs,
+                    update.warnings,
+                    update.elapsed_ms,
+                    update.metrics,
+                    id
+                ],
             )
             .map_err(|e| CoreError::Storage(format!("更新任务失败：{e}")))?;
         Ok(())
@@ -655,11 +671,31 @@ mod tests {
 
         // 更新为运行中 → 失败
         store
-            .update_task(id, "running", "处理中", "", "", None, None)
+            .update_task(
+                id,
+                &TaskUpdate {
+                    status: "running".into(),
+                    message: "处理中".into(),
+                    outputs: String::new(),
+                    warnings: String::new(),
+                    elapsed_ms: None,
+                    metrics: None,
+                },
+            )
             .unwrap();
         assert_eq!(store.get_task(id).unwrap().unwrap().status, "running");
         store
-            .update_task(id, "failed", "处理失败：示例错误", "", "", Some(1), None)
+            .update_task(
+                id,
+                &TaskUpdate {
+                    status: "failed".into(),
+                    message: "处理失败：示例错误".into(),
+                    outputs: String::new(),
+                    warnings: String::new(),
+                    elapsed_ms: Some(1),
+                    metrics: None,
+                },
+            )
             .unwrap();
         let failed = store.get_task(id).unwrap().unwrap();
         assert_eq!(failed.status, "failed");
@@ -845,12 +881,14 @@ mod tests {
         store
             .update_task(
                 1,
-                "succeeded",
-                "处理完成",
-                "[]",
-                "[]",
-                Some(5),
-                Some(r#"{"stages":[{"stage":"读图","ms":3.0}]}"#),
+                &TaskUpdate {
+                    status: "succeeded".into(),
+                    message: "处理完成".into(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: Some(5),
+                    metrics: Some(r#"{"stages":[{"stage":"读图","ms":3.0}]}"#.into()),
+                },
             )
             .unwrap();
         assert!(store.get_task(1).unwrap().unwrap().metrics.contains("读图"));
@@ -895,24 +933,28 @@ mod tests {
         store
             .update_task(
                 id1,
-                "succeeded",
-                "处理完成",
-                "[]",
-                "[]",
-                Some(100),
-                Some(&m1.to_json()),
+                &TaskUpdate {
+                    status: "succeeded".into(),
+                    message: "处理完成".into(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: Some(100),
+                    metrics: Some(m1.to_json()),
+                },
             )
             .unwrap();
         let id2 = store.insert_task(&new_task()).unwrap();
         store
             .update_task(
                 id2,
-                "succeeded",
-                "处理完成",
-                "[]",
-                "[]",
-                Some(300),
-                Some(&m2.to_json()),
+                &TaskUpdate {
+                    status: "succeeded".into(),
+                    message: "处理完成".into(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: Some(300),
+                    metrics: Some(m2.to_json()),
+                },
             )
             .unwrap();
         // 失败任务不参与指标聚合
@@ -920,12 +962,14 @@ mod tests {
         store
             .update_task(
                 id3,
-                "failed",
-                "处理失败",
-                "[]",
-                "[]",
-                Some(500),
-                Some(&m1.to_json()),
+                &TaskUpdate {
+                    status: "failed".into(),
+                    message: "处理失败".into(),
+                    outputs: "[]".into(),
+                    warnings: "[]".into(),
+                    elapsed_ms: Some(500),
+                    metrics: Some(m1.to_json()),
+                },
             )
             .unwrap();
 
