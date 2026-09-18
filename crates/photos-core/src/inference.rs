@@ -53,12 +53,8 @@ impl TensorData {
 pub trait InferenceEngine: Send + Sync {
     /// 装载模型（惰性；模型缺失/校验失败返回中文错误）。
     /// `provider` 指定执行提供方（cpu | cuda），cuda 未编译时降级 cpu 并在日志告警。
-    fn load(
-        &mut self,
-        cfg: &Config,
-        model_id: &str,
-        provider: ExecutionProvider,
-    ) -> CoreResult<()>;
+    fn load(&mut self, cfg: &Config, model_id: &str, provider: ExecutionProvider)
+    -> CoreResult<()>;
     /// 执行推理，返回输出张量列表
     fn run(&self, model_id: &str, input: &TensorData) -> CoreResult<Vec<TensorData>>;
 }
@@ -140,7 +136,10 @@ impl OrtEngine {
 
     fn model_path(cfg: &Config, model_id: &str) -> CoreResult<PathBuf> {
         let spec = cfg.model_spec(model_id)?;
-        Ok(crate::model::resolve_model_path(cfg, std::path::Path::new(&spec.path)))
+        Ok(crate::model::resolve_model_path(
+            cfg,
+            std::path::Path::new(&spec.path),
+        ))
     }
 }
 

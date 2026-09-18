@@ -2,6 +2,22 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.0] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【抠图质量】新增边缘**去色边**（color decontamination）：对 `alpha` 处于 `26..250` 的半透明边缘按 `F = (C - B×(1-α))/α` 解混，还原被原背景污染的前景颜色，消除换底后的白边/黑边/环境色残留；背景色由「前景掩膜膨胀 2 像素邻域内的透明像素均值」估计（`vision/blend.rs`）
+- 【抠图质量】新增**透明底 PNG 输出**：CLI `--transparent`、API `params.transparent`，产物 `task_{id}_{尺寸}_transparent.png`（RGBA，alpha 取羽化后掩膜），可二次合成任意背景
+- 【抠图质量】新增**自定义背景图替换**：CLI `--bg-image <背景图>`、API `params.bg_image`，背景图按证件照尺寸 cover 等比铺满并居中裁切后与人像合成，额外出 `background=custombg` 产物；新增算子 `fit_cover` / `composite_with_image` / `to_rgba` 与 RGBA 裁剪 `crop_resize_rgba`
+- 【前端】参数面板新增「透明底 PNG」开关与「自定义背景图」路径输入，预览区对 `transparent`/`custombg` 产物显示中文标签
+
+### 🐛 Bug Fixes  问题修复
+- 【裁剪缩放】新增 `crop_resize_rgba`，修复透明底路径缺少 RGBA 版裁剪缩放算子的问题
+
+### 📚 Docs 文档更新
+- `docs/05-API契约.md`：`params` 补 `transparent`/`bg_image` 字段契约与约束，`id_photo` 产物类型补充 `transparent`/`custombg` 说明
+- `docs/06-运行使用手册.md`：CLI 参数表补 `--transparent`/`--bg-image`，产物命名规约与常用示例同步
+- 新增 `docs/07-能力增强.md`：能力增强路线与优先级清单
+
 ## [2026.09.17.14]
 
 ### 🐛 Bug Fixes  问题修复

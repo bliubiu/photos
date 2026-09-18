@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use photos_core::config::Config;
 use photos_core::inference::InferenceEngine;
-use photos_core::pipeline::{BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine, run_pipeline};
+use photos_core::pipeline::{
+    BeautyParams, DressParams, GarmentSet, ProcessRequest, demo_balanced_engine, run_pipeline,
+};
 use photos_core::storage::{NewTask, Store};
 
 use crate::cli::ProcessArgs;
@@ -32,8 +34,9 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
         // 禁止静默 demo：无 ort 时直接失败（--demo 才走 mock 回放）
         if !photos_core::inference::ORT_BUILT {
             anyhow::bail!(
-                "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法真实处理图片。\n\
-                 启用真实推理：cargo build -p photos-cli --features photos-core/ort\n\
+                "当前构建未启用 ONNX 推理，无法真实处理图片。\n\
+                 启用真实推理：cargo build -p photos-cli（默认 features 含 ort）\n\
+                 或显式：cargo build -p photos-cli --features photos-core/ort\n\
                  或显式演示：photos process --demo"
             );
         }
@@ -87,7 +90,11 @@ pub fn run(cfg: &Config, args: &ProcessArgs) -> Result<()> {
         eprintln!("处理失败：{e}");
     }
     let total_ms: u128 = costs.iter().sum();
-    let avg_ms = if costs.is_empty() { 0 } else { total_ms / costs.len() as u128 };
+    let avg_ms = if costs.is_empty() {
+        0
+    } else {
+        total_ms / costs.len() as u128
+    };
     let rate = files.len() as f64;
     let success_rate = if rate > 0.0 {
         ok_count as f64 / rate * 100.0
@@ -241,6 +248,8 @@ fn process_one(
             None
         },
         dress,
+        transparent: args.transparent,
+        bg_image: args.bg_image.clone(),
     };
     match run_pipeline(cfg, engine, &req) {
         Ok(r) => {
@@ -268,6 +277,13 @@ fn process_one(
                 let out_path = out_dir.join(format!("task_{task_id}_layout_{layout_id}.jpg"));
                 canvas
                     .save(&out_path)
+                    .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
+                outputs.push(out_path.display().to_string());
+            }
+            // 透明底证件照：task_{id}_{size}_transparent.png
+            if let Some(rgba) = &r.transparent {
+                let out_path = out_dir.join(format!("task_{task_id}_{size}_transparent.png"));
+                rgba.save(&out_path)
                     .with_context(|| format!("保存输出失败：{}", out_path.display()))?;
                 outputs.push(out_path.display().to_string());
             }
@@ -300,7 +316,7 @@ fn process_one(
             // 模型已就位但当前构建未启用 ONNX 推理时给出迁移指引
             if msg.contains("无可用推理输出") {
                 bail!(
-                    "{msg}\n当前构建未启用 ONNX 推理（M1 链路以 mock 回放打通）。启用真实推理：cargo build --features photos-core/ort 并重新放置模型"
+                    "{msg}\n当前构建未启用 ONNX 推理。启用真实推理：cargo build -p photos-cli（默认含 ort），或 --features photos-core/ort"
                 );
             }
             bail!(msg)

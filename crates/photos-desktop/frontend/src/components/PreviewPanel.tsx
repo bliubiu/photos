@@ -23,6 +23,13 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+/** 底色标签：自定义背景图与透明底使用中文名，其余沿用配置 id */
+function bgLabel(id?: string | null): string {
+  if (id === "transparent") return "透明底";
+  if (id === "custombg") return "自定义背景";
+  return id ?? "";
+}
+
 export default function PreviewPanel() {
   const { detail, selectedId, files } = useStore();
   const [tab, setTab] = useState<Artifact | null>(null);
@@ -87,7 +94,7 @@ export default function PreviewPanel() {
                 active === a ? "border-blue-500 bg-blue-50 text-blue-700" : "border-gray-200 text-gray-600"
               }`}
             >
-              证件照·{a.background}
+              证件照·{bgLabel(a.background)}
             </button>
           ))}
           {layouts.map((a) => (

@@ -80,10 +80,20 @@ fn parsing_layout(out: &TensorData) -> CoreResult<(ParsingLayout, usize, u32, u3
     let d = &out.shape;
     if d.len() == 4 {
         if d[1] == 20 {
-            return Ok((ParsingLayout::Nchw, 20, d[3].max(1) as u32, d[2].max(1) as u32));
+            return Ok((
+                ParsingLayout::Nchw,
+                20,
+                d[3].max(1) as u32,
+                d[2].max(1) as u32,
+            ));
         }
         if d[3] == 20 {
-            return Ok((ParsingLayout::Nhwc, 20, d[2].max(1) as u32, d[1].max(1) as u32));
+            return Ok((
+                ParsingLayout::Nhwc,
+                20,
+                d[2].max(1) as u32,
+                d[1].max(1) as u32,
+            ));
         }
     }
     Err(CoreError::Inference(format!(
@@ -390,8 +400,12 @@ mod tests {
     #[test]
     fn 衣服mask仅标记服装类() {
         // 4x4 类别图：5上衣 13脸 0背景 10连体裤 / 2头发 6连衣裙 7外套 9裤子 / ... / 3手套 4太阳镜 14左臂 15右臂
-        let m = GrayImage::from_raw(4, 4, vec![5, 13, 0, 10, 2, 6, 7, 9, 0, 0, 0, 0, 3, 4, 14, 15])
-            .unwrap();
+        let m = GrayImage::from_raw(
+            4,
+            4,
+            vec![5, 13, 0, 10, 2, 6, 7, 9, 0, 0, 0, 0, 3, 4, 14, 15],
+        )
+        .unwrap();
         let c = clothes_mask(&m);
         let vals: Vec<u8> = c.pixels().map(|p| p[0]).collect();
         assert_eq!(
@@ -492,7 +506,10 @@ mod tests {
 
     #[test]
     fn 全身正装样式解析() {
-        assert_eq!(SuitStyle::parse("suit_full_navy").unwrap(), SuitStyle::FullNavy);
+        assert_eq!(
+            SuitStyle::parse("suit_full_navy").unwrap(),
+            SuitStyle::FullNavy
+        );
         assert_eq!(
             SuitStyle::parse("suit_full_black").unwrap(),
             SuitStyle::FullBlack

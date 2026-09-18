@@ -18,6 +18,8 @@ export interface ParamsState {
   layout: string | null;
   effect: boolean;
   rotate: number | null; // null = 自动
+  transparent: boolean; // 额外输出透明底 PNG
+  bgImage: string | null; // 自定义背景图路径
 }
 
 interface AppState {
@@ -54,6 +56,8 @@ export const useStore = create<AppState>((set, get) => ({
     layout: null,
     effect: false,
     rotate: null,
+    transparent: false,
+    bgImage: null,
   },
   submitting: false,
   error: null,
@@ -76,6 +80,8 @@ export const useStore = create<AppState>((set, get) => ({
           layout: null,
           effect: false,
           rotate: null,
+          transparent: false,
+          bgImage: null,
         },
       });
     } catch (e) {
@@ -125,6 +131,8 @@ export const useStore = create<AppState>((set, get) => ({
         rotate: params.rotate,
         layout: params.layout,
         effect_image: params.effect,
+        transparent: params.transparent,
+        bg_image: params.bgImage,
       };
       const ids = await submitTasks(files, payload);
       // 选中第一个新任务并开启轮询

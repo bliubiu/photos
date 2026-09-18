@@ -147,6 +147,29 @@ export default function ParamsPanel() {
         输出通用效果图（保持原尺寸）
       </label>
 
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input
+          type="checkbox"
+          checked={params.transparent}
+          onChange={(e) => setParams({ transparent: e.target.checked })}
+        />
+        输出透明底 PNG（带 alpha 通道）
+      </label>
+
+      <div>
+        <label className="mb-1 block text-xs text-gray-500">自定义背景图（本地路径，可选）</label>
+        <input
+          type="text"
+          value={params.bgImage ?? ""}
+          placeholder="如 D:\\图片\\背景.jpg（留空则不输出）"
+          onChange={(e) => setParams({ bgImage: e.target.value.trim() || null })}
+          className="w-full rounded-md border border-gray-300 px-2 py-1.5 text-xs"
+        />
+        <p className="mt-1 text-[11px] text-gray-400">
+          按证件照尺寸等比裁切后合成，额外出 custombg 产物。
+        </p>
+      </div>
+
       <button
         type="button"
         disabled={submitting}

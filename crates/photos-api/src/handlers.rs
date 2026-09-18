@@ -5,10 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use axum::Json;
 use axum::extract::{Multipart, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -42,7 +42,11 @@ pub struct AppState {
 
 impl AppState {
     /// 构建状态；打开 data_dir/photos.db，创建 out/tmp 目录
-    pub fn new(cfg: Config, engine_factory: EngineFactory, model_precheck: bool) -> photos_core::error::CoreResult<Self> {
+    pub fn new(
+        cfg: Config,
+        engine_factory: EngineFactory,
+        model_precheck: bool,
+    ) -> photos_core::error::CoreResult<Self> {
         let store = Store::open(Path::new(&cfg.general.data_dir).join("photos.db").as_path())?;
         let out_dir = PathBuf::from(&cfg.general.data_dir).join("out");
         let upload_dir = PathBuf::from(&cfg.general.data_dir).join("tmp");
@@ -76,6 +80,10 @@ pub struct TaskParams {
     pub rotate: Option<f64>,
     pub layout: Option<String>,
     pub effect_image: Option<bool>,
+    /// 是否额外输出透明底 PNG（RGBA）
+    pub transparent: Option<bool>,
+    /// 自定义背景图路径（服务端本地路径，cover 缩放裁切后与人像合成）
+    pub bg_image: Option<String>,
 }
 
 /// 美颜参数（enabled 开关；强度缺省取全局配置 `[beauty]` 默认值）
@@ -211,7 +219,13 @@ fn safe_upload_name(filename: &str) -> String {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "upload".into());
     base.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -255,17 +269,17 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// POST /tasks：multipart 提交（file + params JSON）→ 202 任务 id
-pub async fn create_task(
-    State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
-) -> Response {
+pub async fn create_task(State(state): State<Arc<AppState>>, mut multipart: Multipart) -> Response {
     match create_task_inner(&state, &mut multipart).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     }
 }
 
-async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> Result<Response, ApiError> {
+async fn create_task_inner(
+    state: &Arc<AppState>,
+    multipart: &mut Multipart,
+) -> Result<Response, ApiError> {
     // 1. 收集 multipart 字段
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;
@@ -297,7 +311,8 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     }
 
     // 2. 文件校验（存在 / 大小 / 类型）
-    let file_bytes = file_bytes.ok_or_else(|| ApiError::InvalidParams("缺少上传文件字段 file".into()))?;
+    let file_bytes =
+        file_bytes.ok_or_else(|| ApiError::InvalidParams("缺少上传文件字段 file".into()))?;
     if file_bytes.is_empty() {
         return Err(ApiError::InvalidParams("上传文件为空".into()));
     }
@@ -321,16 +336,25 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
         _ => TaskParams::default(),
     };
     let cfg = &state.cfg;
-    let mode = params.mode.clone().unwrap_or_else(|| cfg.general.default_mode.clone());
-    cfg.mode(&mode).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+    let mode = params
+        .mode
+        .clone()
+        .unwrap_or_else(|| cfg.general.default_mode.clone());
+    cfg.mode(&mode)
+        .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
     let size = params.size.clone().unwrap_or_else(|| "one_inch".into());
-    cfg.size(&size).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
-    let bgs = params.backgrounds.clone().unwrap_or_else(|| vec!["white".into()]);
+    cfg.size(&size)
+        .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+    let bgs = params
+        .backgrounds
+        .clone()
+        .unwrap_or_else(|| vec!["white".into()]);
     if bgs.is_empty() {
         return Err(ApiError::InvalidParams("底色列表不能为空".into()));
     }
     for bg in &bgs {
-        cfg.background(bg).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+        cfg.background(bg)
+            .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
     }
     if let Some(layout) = &params.layout {
         if !cfg.layout.contains_key(layout) {
@@ -339,7 +363,9 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     }
     if let Some(r) = params.rotate {
         if !(-45.0..=45.0).contains(&r) {
-            return Err(ApiError::InvalidParams(format!("手动纠偏角度需在 ±45° 内，收到 {r}°")));
+            return Err(ApiError::InvalidParams(format!(
+                "手动纠偏角度需在 ±45° 内，收到 {r}°"
+            )));
         }
     }
     let effect = params.effect_image.unwrap_or(false);
@@ -350,7 +376,9 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     if state.model_precheck {
         let store = state.store.lock().unwrap();
         let statuses = check_models(cfg, &store).map_err(ApiError::from)?;
-        let suite = cfg.mode(&mode).map_err(|e| ApiError::InvalidParams(e.to_string()))?;
+        let suite = cfg
+            .mode(&mode)
+            .map_err(|e| ApiError::InvalidParams(e.to_string()))?;
         let suite_ids = if suite.face == photos_core::vision::mtcnn::CASCADE_FACE_ID {
             let mut ids: Vec<String> = photos_core::vision::mtcnn::cascade_model_ids()
                 .iter()
@@ -376,9 +404,17 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
     }
 
     // 5. 保存上传文件 + 落库 queued
-    let upload_name = format!("{}_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0), safe_upload_name(&raw_name));
+    let upload_name = format!(
+        "{}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        safe_upload_name(&raw_name)
+    );
     let input_path = state.upload_dir.join(upload_name);
-    std::fs::write(&input_path, &file_bytes).map_err(|e| ApiError::Internal(format!("保存上传文件失败：{e}")))?;
+    std::fs::write(&input_path, &file_bytes)
+        .map_err(|e| ApiError::Internal(format!("保存上传文件失败：{e}")))?;
 
     let beauty_json = match &params.beauty {
         Some(b) if b.enabled => serde_json::json!({
@@ -422,21 +458,31 @@ async fn create_task_inner(state: &Arc<AppState>, multipart: &mut Multipart) -> 
                 elapsed_ms: None,
             })
             .map_err(ApiError::from)?;
-        let rec = store.get_task(id).map_err(ApiError::from)?.ok_or(ApiError::Internal("任务入库后查询失败".into()))?;
+        let rec = store
+            .get_task(id)
+            .map_err(ApiError::from)?
+            .ok_or(ApiError::Internal("任务入库后查询失败".into()))?;
         (id, rec.created_at)
     };
 
     // 6. 后台异步处理（状态机 queued → running → succeeded | failed）
-    spawn_task(state.clone(), task_id, TaskParams {
-        mode: Some(mode),
-        size: Some(size),
-        backgrounds: Some(bgs),
-        rotate: params.rotate,
-        layout: params.layout,
-        effect_image: Some(effect),
-        beauty: params.beauty,
-        dress: params.dress,
-    }, input_path);
+    spawn_task(
+        state.clone(),
+        task_id,
+        TaskParams {
+            mode: Some(mode),
+            size: Some(size),
+            backgrounds: Some(bgs),
+            rotate: params.rotate,
+            layout: params.layout,
+            effect_image: Some(effect),
+            beauty: params.beauty,
+            dress: params.dress,
+            transparent: params.transparent,
+            bg_image: params.bg_image,
+        },
+        input_path,
+    );
 
     // 7. 202 返回
     let mut resp = Json(json!({
@@ -462,7 +508,8 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         };
         {
             let store = state.store.lock().unwrap();
-            if let Err(e) = store.update_task(task_id, "running", "开始处理", "[]", "[]", None) {
+            if let Err(e) = store.update_task(task_id, "running", "开始处理", "[]", "[]", None)
+            {
                 tracing::error!("更新任务运行状态失败：{e}");
                 return;
             }
@@ -474,22 +521,28 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         let effect = params.effect_image.unwrap_or(false);
         let layout = params.layout.clone();
         let rotate = params.rotate;
-        let beauty = params.beauty.clone().map(|b| photos_core::pipeline::BeautyParams {
-            enabled: b.enabled,
-            skin_smooth: b.skin_smooth,
-            brighten: b.brighten,
-            whiten: b.whiten,
-        });
-        let dress = params.dress.clone().map(|d| photos_core::pipeline::DressParams {
-            enabled: d.enabled,
-            garment: d.garment_path.map(PathBuf::from),
-            style: d.style,
-            garments: d.garments.map(|g| photos_core::pipeline::GarmentSet {
-                top: g.top.map(PathBuf::from),
-                bottom: g.bottom.map(PathBuf::from),
-                shoes: g.shoes.map(PathBuf::from),
-            }),
-        });
+        let beauty = params
+            .beauty
+            .clone()
+            .map(|b| photos_core::pipeline::BeautyParams {
+                enabled: b.enabled,
+                skin_smooth: b.skin_smooth,
+                brighten: b.brighten,
+                whiten: b.whiten,
+            });
+        let dress = params
+            .dress
+            .clone()
+            .map(|d| photos_core::pipeline::DressParams {
+                enabled: d.enabled,
+                garment: d.garment_path.map(PathBuf::from),
+                style: d.style,
+                garments: d.garments.map(|g| photos_core::pipeline::GarmentSet {
+                    top: g.top.map(PathBuf::from),
+                    bottom: g.bottom.map(PathBuf::from),
+                    shoes: g.shoes.map(PathBuf::from),
+                }),
+            });
 
         let started = std::time::Instant::now();
         let state2 = state.clone();
@@ -503,15 +556,14 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
             layout: layout.clone(),
             beauty,
             dress,
+            transparent: params.transparent.unwrap_or(false),
+            bg_image: params.bg_image.clone().map(PathBuf::from),
         };
         let result = tokio::task::spawn_blocking(move || {
             let (w, h) = image::image_dimensions(&req.input).unwrap_or((640, 640));
             // 与流水线内部预缩放对齐：引擎按缩放后尺寸构造
-            let (w, h) = photos_core::pipeline::limited_dimensions(
-                w,
-                h,
-                state2.cfg.general.max_input_side,
-            );
+            let (w, h) =
+                photos_core::pipeline::limited_dimensions(w, h, state2.cfg.general.max_input_side);
             let mut engine = (state2.engine_factory)(w, h);
             run_pipeline(&state2.cfg, engine.as_mut(), &req)
         })
@@ -525,7 +577,9 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                 let mut save_err: Option<String> = None;
                 std::fs::create_dir_all(&state.out_dir).ok();
                 for photo in &r.photos {
-                    let out_path = state.out_dir.join(format!("task_{task_id}_{size}_{}.jpg", photo.bg));
+                    let out_path = state
+                        .out_dir
+                        .join(format!("task_{task_id}_{size}_{}.jpg", photo.bg));
                     if let Err(e) = photo.image.save(&out_path) {
                         save_err = Some(format!("保存证件照失败：{e}"));
                         break;
@@ -533,7 +587,9 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                     outputs.push(out_path.display().to_string());
                 }
                 for eff in &r.effects {
-                    let out_path = state.out_dir.join(format!("task_{task_id}_effect_{}.jpg", eff.bg));
+                    let out_path = state
+                        .out_dir
+                        .join(format!("task_{task_id}_effect_{}.jpg", eff.bg));
                     if let Err(e) = eff.image.save(&out_path) {
                         save_err = Some(format!("保存效果图失败：{e}"));
                         break;
@@ -542,9 +598,21 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
                 }
                 if let Some(canvas) = &r.layout {
                     let layout_id = layout.as_deref().unwrap_or("layout");
-                    let out_path = state.out_dir.join(format!("task_{task_id}_layout_{layout_id}.jpg"));
+                    let out_path = state
+                        .out_dir
+                        .join(format!("task_{task_id}_layout_{layout_id}.jpg"));
                     if let Err(e) = canvas.save(&out_path) {
                         save_err = Some(format!("保存排版失败：{e}"));
+                    } else {
+                        outputs.push(out_path.display().to_string());
+                    }
+                }
+                if let Some(rgba) = &r.transparent {
+                    let out_path = state
+                        .out_dir
+                        .join(format!("task_{task_id}_{size}_transparent.png"));
+                    if let Err(e) = rgba.save(&out_path) {
+                        save_err = Some(format!("保存透明底证件照失败：{e}"));
                     } else {
                         outputs.push(out_path.display().to_string());
                     }
@@ -563,13 +631,23 @@ fn spawn_task(state: Arc<AppState>, task_id: i64, params: TaskParams, input: Pat
         match outcome {
             Ok((outputs, warnings)) => {
                 let outputs_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "[]".into());
-                let warnings_json = serde_json::to_string(&warnings).unwrap_or_else(|_| "[]".into());
-                if let Err(e) = store.update_task(task_id, "succeeded", "处理完成", &outputs_json, &warnings_json, Some(elapsed)) {
+                let warnings_json =
+                    serde_json::to_string(&warnings).unwrap_or_else(|_| "[]".into());
+                if let Err(e) = store.update_task(
+                    task_id,
+                    "succeeded",
+                    "处理完成",
+                    &outputs_json,
+                    &warnings_json,
+                    Some(elapsed),
+                ) {
                     tracing::error!("更新任务成功状态失败：{e}");
                 }
             }
             Err(msg) => {
-                if let Err(e) = store.update_task(task_id, "failed", &msg, "[]", "[]", Some(elapsed)) {
+                if let Err(e) =
+                    store.update_task(task_id, "failed", &msg, "[]", "[]", Some(elapsed))
+                {
                     tracing::error!("更新任务失败状态出错：{e}");
                 }
             }
@@ -704,23 +782,36 @@ pub async fn task_output(
             }
         };
         let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/zip"),
+        );
         headers.insert(
             header::CONTENT_DISPOSITION,
-            HeaderValue::from_str(&format!("attachment; filename=\"{}_bundle.zip\"", public_task_id(id)))
-                .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+            HeaderValue::from_str(&format!(
+                "attachment; filename=\"{}_bundle.zip\"",
+                public_task_id(id)
+            ))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
         );
         return (headers, bytes).into_response();
     }
 
-    let picked = match artifact::pick(&artifacts, kind, q.background.as_deref(), q.layout.as_deref()) {
+    let picked = match artifact::pick(
+        &artifacts,
+        kind,
+        q.background.as_deref(),
+        q.layout.as_deref(),
+    ) {
         Some(a) => a,
         None => {
-            return ApiError::ArtifactNotFound(format!("产物不存在：artifact={kind}")).into_response();
+            return ApiError::ArtifactNotFound(format!("产物不存在：artifact={kind}"))
+                .into_response();
         }
     };
     if !picked.path.exists() {
-        return ApiError::ArtifactNotFound(format!("产物文件缺失：{}", picked.filename)).into_response();
+        return ApiError::ArtifactNotFound(format!("产物文件缺失：{}", picked.filename))
+            .into_response();
     }
     let bytes = match std::fs::read(&picked.path) {
         Ok(b) => b,

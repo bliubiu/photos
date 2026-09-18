@@ -41,12 +41,6 @@ struct Box5 {
 }
 
 impl Box5 {
-    fn width(&self) -> f32 {
-        self.x2 - self.x1 + 1.0
-    }
-    fn height(&self) -> f32 {
-        self.y2 - self.y1 + 1.0
-    }
     fn to_face(self, landmarks: [Point2; 5]) -> FaceDetection {
         FaceDetection {
             face: FaceBox {
@@ -92,23 +86,14 @@ pub fn detect_mtcnn_cascade(
     if total.is_empty() {
         return Ok(Vec::new());
     }
-    // 回归 + 方形化
-    for b in &mut total {
-        let w = b.x2 - b.x1;
-        let h = b.y2 - b.y1;
-        // pnet_decode 已把回归并入框；此处仅 rerec
-        let _ = (w, h);
-    }
+    // pnet_decode 已把回归并入框；此处仅 rerec 方形化
     total = rerec(total);
     total = fix_boxes(&total, img_w, img_h);
 
     // ---- Stage2: R-Net ----
     let r_in = crop_batch_mtcnn(img, &total, 24)?;
     if !r_in.is_empty() {
-        let tensor = TensorData::new(
-            vec![total.len() as i64, 24, 24, 3],
-            r_in,
-        )?;
+        let tensor = TensorData::new(vec![total.len() as i64, 24, 24, 3], r_in)?;
         let outs = engine.run(RNET_ID, &tensor)?;
         total = refine_stage(&total, &outs, 24, THRESHOLDS[1], img_w, img_h)?;
         total = nms_boxes(&total, 0.7);
@@ -135,8 +120,6 @@ pub fn detect_mtcnn_cascade(
     // 关键点：相对框归一化 → 像素，再 NMS(Min)
     let mut faces = Vec::with_capacity(boxes.len());
     for (i, b) in boxes.iter().enumerate() {
-        let w = b.width();
-        let h = b.height();
         let mut pts = [Point2::new(0.0, 0.0); 5];
         // landmarks_raw: 每框 10 个值 [x0..x4, y0..y4] 已在 refine_onet 转为像素
         if landmarks_raw.len() >= (i + 1) * 10 {
@@ -154,7 +137,6 @@ pub fn detect_mtcnn_cascade(
                 *p = Point2::new(cx as f64, cy as f64);
             }
         }
-        let _ = (w, h);
         faces.push(b.to_face(pts));
     }
 
@@ -225,7 +207,7 @@ fn split_hm_reg(outs: &[TensorData]) -> CoreResult<(&TensorData, &TensorData)> {
     // 兜底：按元素数与空间维推断
     if hm.is_none() || reg.is_none() {
         for t in outs {
-            if let Some((c, h, w)) = chw_shape(t) {
+            if let Some((c, _, _)) = chw_shape(t) {
                 if c == 2 && hm.is_none() {
                     hm = Some(t);
                 } else if c == 4 && reg.is_none() {
@@ -245,9 +227,17 @@ fn split_hm_reg(outs: &[TensorData]) -> CoreResult<(&TensorData, &TensorData)> {
 
 fn chw_shape(t: &TensorData) -> Option<(usize, usize, usize)> {
     if t.shape.len() == 4 {
-        Some((t.shape[1] as usize, t.shape[2] as usize, t.shape[3] as usize))
+        Some((
+            t.shape[1] as usize,
+            t.shape[2] as usize,
+            t.shape[3] as usize,
+        ))
     } else if t.shape.len() == 3 {
-        Some((t.shape[0] as usize, t.shape[1] as usize, t.shape[2] as usize))
+        Some((
+            t.shape[0] as usize,
+            t.shape[1] as usize,
+            t.shape[2] as usize,
+        ))
     } else {
         None
     }
@@ -257,7 +247,8 @@ fn chw_shape(t: &TensorData) -> Option<(usize, usize, usize)> {
 fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5>> {
     let (hm, reg) = split_hm_reg(outs)?;
     let (h, w) = {
-        let (_, h, w) = chw_shape(hm).ok_or_else(|| CoreError::Image("P-Net heatmap 布局非法".into()))?;
+        let (_, h, w) =
+            chw_shape(hm).ok_or_else(|| CoreError::Image("P-Net heatmap 布局非法".into()))?;
         (h, w)
     };
     if h == 0 || w == 0 {
@@ -274,13 +265,12 @@ fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5
         for x in 0..w {
             let score = if hm_is_nchw {
                 // channel 1 = face
-                let idx = 1 * h * w + y * w + x;
+                let idx = h * w + y * w + x;
                 hm_data.get(idx).copied().unwrap_or(0.0)
             } else {
                 // NHWC [1,H,W,2] or [H,W,2]
                 let base = y * w + x;
-                let chw = if hm.shape.len() == 4 { 2 } else { 2 };
-                hm_data.get(base * chw + 1).copied().unwrap_or(0.0)
+                hm_data.get(base * 2 + 1).copied().unwrap_or(0.0)
             };
             if score < thr {
                 continue;
@@ -289,8 +279,8 @@ fn pnet_decode(outs: &[TensorData], scale: f32, thr: f32) -> CoreResult<Vec<Box5
                 // NCHW 4 通道
                 let n = h * w;
                 (
-                    reg_data[n * 0 + y * w + x],
-                    reg_data[n * 1 + y * w + x],
+                    reg_data[y * w + x],
+                    reg_data[n + y * w + x],
                     reg_data[n * 2 + y * w + x],
                     reg_data[n * 3 + y * w + x],
                 )
@@ -337,14 +327,9 @@ fn nms_boxes(boxes: &[Box5], thr: f32) -> Vec<Box5> {
     }
     let faces: Vec<FaceDetection> = boxes
         .iter()
-        .map(|b| {
-            b.to_face([Point2::new(0.0, 0.0); 5])
-        })
+        .map(|b| b.to_face([Point2::new(0.0, 0.0); 5]))
         .collect();
-    let idx = nms(
-        &faces.iter().map(|f| f.face).collect::<Vec<_>>(),
-        thr,
-    );
+    let idx = nms(&faces.iter().map(|f| f.face).collect::<Vec<_>>(), thr);
     idx.into_iter().map(|i| boxes[i]).collect()
 }
 
@@ -422,11 +407,7 @@ fn fix_boxes(boxes: &[Box5], w: u32, h: u32) -> Vec<Box5> {
 }
 
 /// 裁剪并缩放到固定边长，输出 NHWC 展平 + MTCNN 归一化
-fn crop_batch_mtcnn(
-    img: &RgbImage,
-    boxes: &[Box5],
-    side: u32,
-) -> CoreResult<Vec<f32>> {
+fn crop_batch_mtcnn(img: &RgbImage, boxes: &[Box5], side: u32) -> CoreResult<Vec<f32>> {
     let (iw, ih) = img.dimensions();
     let mut out = Vec::with_capacity(boxes.len() * (side * side * 3) as usize);
     for b in boxes {
@@ -485,7 +466,10 @@ fn refine_stage(
 }
 
 /// 批次输出：scores[N] + regs[N,4]（按元素数与 shape 推断）
-fn split_score_reg(outs: &[TensorData], n: usize) -> CoreResult<(Vec<f32>, Vec<(f32, f32, f32, f32)>)> {
+fn split_score_reg(
+    outs: &[TensorData],
+    n: usize,
+) -> CoreResult<(Vec<f32>, Vec<(f32, f32, f32, f32)>)> {
     let mut scores = None;
     let mut regs = None;
     for t in outs {
@@ -528,31 +512,15 @@ fn split_score_reg(outs: &[TensorData], n: usize) -> CoreResult<(Vec<f32>, Vec<(
 }
 
 /// O-Net：分数 + 回归 + landmarks（相对归一化 → 像素）
-fn refine_onet(
-    prev: &[Box5],
-    outs: &[TensorData],
-    thr: f32,
-) -> CoreResult<(Vec<Box5>, Vec<f32>)> {
+fn refine_onet(prev: &[Box5], outs: &[TensorData], thr: f32) -> CoreResult<(Vec<Box5>, Vec<f32>)> {
     let n = prev.len();
     let (scores, regs) = split_score_reg(outs, n)?;
-    // landmarks：10n 元素
+    // landmarks：[N,10] 元素（x0..x4, y0..y4）
     let mut lm = None;
     for t in outs {
         if t.data.len() == n * 10 {
             lm = Some(t.data.clone());
             break;
-        }
-        if t.data.len() == n * 10 * 1 {
-            lm = Some(t.data.clone());
-            break;
-        }
-    }
-    // 有的导出是 [N,10]；也可能是两个 5
-    if lm.is_none() {
-        for t in outs {
-            if t.data.len() == n * 5 {
-                // 仅一半，忽略
-            }
         }
     }
 

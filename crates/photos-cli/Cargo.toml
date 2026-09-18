@@ -12,8 +12,16 @@ authors.workspace = true
 name = "photos"
 path = "src/main.rs"
 
+[features]
+# 真实 ONNX 推理默认启用（模型已就位）；关闭用 --no-default-features
+default = ["ort"]
+# 转发 photos-core 的 ort：真实 ONNX 推理
+ort = ["photos-core/ort"]
+# CUDA 执行提供方（quality 模式；需 N 卡 + 驱动）
+ort-cuda = ["photos-core/ort-cuda"]
+
 [dependencies]
-photos-core = { path = "../photos-core" }
+photos-core = { path = "../photos-core", default-features = false }
 photos-api = { path = "../photos-api" }
 anyhow.workspace = true
 clap.workspace = true

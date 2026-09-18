@@ -1,8 +1,8 @@
 //! API 统一错误体：`{ "code": "...", "message": "中文" }`（契约 §1）。
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Serialize;
 
 /// API 错误（message 必为中文且脱敏）
@@ -84,9 +84,7 @@ impl From<photos_core::error::CoreError> for ApiError {
         // 模型缺失/校验类错误映射为 MODEL_MISSING；其余按内部错误（中文消息透传）
         match &e {
             photos_core::error::CoreError::Model(_)
-            | photos_core::error::CoreError::Download(_) => {
-                ApiError::ModelMissing(e.to_string())
-            }
+            | photos_core::error::CoreError::Download(_) => ApiError::ModelMissing(e.to_string()),
             _ => ApiError::Internal(e.to_string()),
         }
     }

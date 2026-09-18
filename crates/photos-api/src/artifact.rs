@@ -95,7 +95,8 @@ pub fn bundle_zip(artifacts: &[Artifact]) -> Result<Vec<u8>> {
     let mut buf = Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut buf);
-        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         for a in artifacts {
             let bytes = std::fs::read(&a.path)?;
             zip.start_file(a.filename.clone(), options)?;

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use image::{GrayImage, Luma, RgbImage};
+use image::{GrayImage, Luma, RgbImage, RgbaImage};
 
 use crate::config::{BeautyConfig, Config};
 use crate::error::{CoreError, CoreResult};
@@ -14,16 +14,16 @@ use crate::inference::{FakeEngine, InferenceEngine, TensorData, ensure_models_re
 use crate::preprocess::{LetterBox, build_input, probability_map};
 use crate::vision::affine::rotate_image_same;
 use crate::vision::beauty::apply_beauty;
-use crate::vision::blend::composite_feathered;
-use crate::vision::crop::{compute_crop, crop_resize};
-use crate::vision::dressing::{SuitStyle, self};
+use crate::vision::blend::{composite, composite_with_image, decontaminate, fit_cover, to_rgba};
+use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
+use crate::vision::dressing::{self, SuitStyle};
 use crate::vision::face::{decode_retinaface, retinaface_prior_count};
-use crate::vision::mtcnn::{CASCADE_FACE_ID, detect_mtcnn_cascade};
 use crate::vision::geometry::{
     RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
-use crate::vision::matting::{morph_open, threshold_mask};
+use crate::vision::matting::{feather, morph_open, threshold_mask};
+use crate::vision::mtcnn::{CASCADE_FACE_ID, detect_mtcnn_cascade};
 
 /// 人脸检测分数阈值
 const FACE_SCORE_THRESHOLD: f32 = 0.5;
@@ -39,6 +39,8 @@ const MASK_FEATHER_SIGMA: f32 = 1.0;
 const CROP_TOP_RATIO: f64 = 0.2;
 /// 下巴余量 = 0.1 × 脸高
 const CROP_BOTTOM_RATIO: f64 = 0.1;
+/// 自定义背景图产物的底色标识（产物命名 `task_{id}_{size}_custombg.jpg`）
+pub const CUSTOM_BG_ID: &str = "custombg";
 
 /// 处理请求（单图，多产物）
 #[derive(Debug, Clone)]
@@ -61,6 +63,10 @@ pub struct ProcessRequest {
     pub beauty: Option<BeautyParams>,
     /// 换装参数（None 不换装；启用时人像解析 + 服装贴合，作用于纠偏后原图）
     pub dress: Option<DressParams>,
+    /// 是否额外输出透明底 PNG（RGBA，alpha 取抠图掩膜）
+    pub transparent: bool,
+    /// 自定义背景图路径（可选；按证件照尺寸 cover 缩放裁切后与人像合成，额外出一张 `custombg` 产物）
+    pub bg_image: Option<PathBuf>,
 }
 
 /// 美颜请求参数（M4 实现算子）
@@ -118,6 +124,8 @@ pub struct PipelineResult {
     pub effects: Vec<BgOutput>,
     /// 排版相纸（可选，layout 指定时）
     pub layout: Option<RgbImage>,
+    /// 透明底证件照（可选，transparent=true 时；alpha 取羽化掩膜）
+    pub transparent: Option<RgbaImage>,
     /// 纠偏决策（含校正角与告警）
     pub decision: RotationDecision,
     /// 处理告警（降级原因等）
@@ -261,7 +269,10 @@ pub fn run_pipeline(
                         images.push(
                             image::open(p)
                                 .map_err(|e| {
-                                    CoreError::Image(format!("读取服装图 {} 失败：{e}", p.display()))
+                                    CoreError::Image(format!(
+                                        "读取服装图 {} 失败：{e}",
+                                        p.display()
+                                    ))
                                 })?
                                 .to_rgb8(),
                         );
@@ -320,7 +331,7 @@ pub fn run_pipeline(
         _ => dressed,
     };
 
-    // 7. 换底色（mask 羽化后逐像素 alpha 混合，按底色重复；廉价操作只做一次检测/抠图/纠偏）
+    // 7. 换底色（mask 羽化 + 边缘去色边后逐像素 alpha 混合；廉价操作只做一次检测/抠图/纠偏）
     // 7.1 裁剪框与底色无关，先算一次
     let crop = compute_crop(
         &face.face,
@@ -331,11 +342,14 @@ pub fn run_pipeline(
         CROP_TOP_RATIO,
         CROP_BOTTOM_RATIO,
     )?;
-    let mut photos = Vec::with_capacity(bgs.len());
+    // 7.2 羽化掩膜 + 边缘去色边（按估计的原始背景色解混半透明边缘，抑制白边/黑边/底色残留）
+    let alpha = feather(&rot_mask, MASK_FEATHER_SIGMA);
+    let cleaned = decontaminate(&beautified, &alpha);
+    let mut photos = Vec::with_capacity(bgs.len() + 1);
     let mut effects = Vec::new();
     for (bg_id, bg) in &bgs {
         // 效果图：换底后保持旋转全图尺寸
-        let composed = composite_feathered(&beautified, &rot_mask, bg.rgb, MASK_FEATHER_SIGMA);
+        let composed = composite(&cleaned, &alpha, bg.rgb);
         if req.effect {
             effects.push(BgOutput {
                 bg: bg_id.clone(),
@@ -349,6 +363,33 @@ pub fn run_pipeline(
             image: final_img,
         });
     }
+
+    // 7.3 自定义背景图（可选）：按原图尺寸 cover 缩放裁切后与人像合成，产物底色标识 custombg
+    if let Some(path) = &req.bg_image {
+        let bg_img = image::open(path)
+            .map_err(|e| CoreError::Image(format!("读取背景图 {} 失败：{e}", path.display())))?
+            .to_rgb8();
+        let canvas = fit_cover(&bg_img, w, h);
+        let composed = composite_with_image(&cleaned, &alpha, &canvas);
+        let final_img = crop_resize(&composed, &crop, size.width_px, size.height_px)?;
+        photos.push(BgOutput {
+            bg: CUSTOM_BG_ID.to_string(),
+            image: final_img,
+        });
+    }
+
+    // 7.4 透明底证件照（可选）：RGB 取去色边后前景，alpha 取羽化掩膜（PNG 输出）
+    let transparent = if req.transparent {
+        let rgba = to_rgba(&cleaned, &alpha);
+        Some(crop_resize_rgba(
+            &rgba,
+            &crop,
+            size.width_px,
+            size.height_px,
+        )?)
+    } else {
+        None
+    };
 
     // 8. 排版相纸（可选）：以首个底色证件照按相纸规格铺版
     let layout_img = match &req.layout {
@@ -372,6 +413,7 @@ pub fn run_pipeline(
         photos,
         effects,
         layout: layout_img,
+        transparent,
         decision,
         warnings,
     })
@@ -444,7 +486,9 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
     // 避免「灰度编码 + Triangle 插值」在类别边界产生假类别（真实模型为 one-hot logits，
     // argmax 后类别干净，不受插值污染），随后转 one-hot logits（对应类 +10，其余 -10）
     let (tw, th) = (473u32, 473u32);
-    let lb_scale = (tw as f32 / w.max(1) as f32).min(th as f32 / h.max(1) as f32).max(1e-6);
+    let lb_scale = (tw as f32 / w.max(1) as f32)
+        .min(th as f32 / h.max(1) as f32)
+        .max(1e-6);
     let new_w = (w as f32 * lb_scale).round().max(1.0) as u32;
     let new_h = (h as f32 * lb_scale).round().max(1.0) as u32;
     let pad_x = ((tw - new_w) / 2) as f32;
@@ -531,6 +575,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -556,7 +602,7 @@ mod tests {
         let mut hm = vec![0.0f32; 2 * fh * fw];
         let reg = vec![0.0f32; 4 * fh * fw];
         // 单个高置信 cell：解码得框 (9,9)-(20,20)，落在 30x30 图内
-        hm[1 * fh * fw + 4 * fw + 4] = 0.99;
+        hm[fh * fw + 4 * fw + 4] = 0.99;
         let pnet_out = vec![
             TensorData::new(vec![1, 2, fh as i64, fw as i64], hm).unwrap(),
             TensorData::new(vec![1, 4, fh as i64, fw as i64], reg).unwrap(),
@@ -618,6 +664,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -641,6 +689,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
             rotate: Some(10.0),
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -671,6 +721,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
             rotate: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
@@ -711,6 +763,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
             rotate: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
@@ -742,6 +796,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         assert_eq!(result.photos.len(), 3);
@@ -778,6 +834,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图 = 旋转后全图尺寸（纠偏角 0 → 原图 100x140）
@@ -820,6 +878,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         // 效果图与全链路均基于缩放后尺寸
@@ -845,6 +905,8 @@ mod tests {
             layout: Some("6inch".into()),
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
         let canvas = result.layout.expect("应有排版相纸");
@@ -870,6 +932,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
         assert!(err.to_string().contains("底色"), "实际：{err}");
@@ -884,6 +948,8 @@ mod tests {
             layout: Some("b5".into()),
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let err2 = run_pipeline(&cfg, &mut engine, &req2).unwrap_err();
         assert!(err2.to_string().contains("未知排版"), "实际：{err2}");
@@ -909,6 +975,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -929,6 +997,8 @@ mod tests {
                 whiten: None, // 未指定 → 取全局配置 0.1
             }),
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -964,6 +1034,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -984,6 +1056,8 @@ mod tests {
                 style: Some("suit_navy".into()),
                 garments: None,
             }),
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -991,7 +1065,10 @@ mod tests {
         let pb = *base.effects[0].image.get_pixel(50, 60);
         let pa = *result.effects[0].image.get_pixel(50, 60);
         assert!(pb[2] < 60, "基准上衣区不应为藏青：{pb:?}");
-        assert!(pa[2] > 60 && pa[0] < 80, "换装后上衣区应偏藏青，实际 {pa:?}");
+        assert!(
+            pa[2] > 60 && pa[0] < 80,
+            "换装后上衣区应偏藏青，实际 {pa:?}"
+        );
         // 效果图尺寸保持全图
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
     }
@@ -1016,6 +1093,8 @@ mod tests {
             layout: None,
             beauty: None,
             dress: None,
+            transparent: false,
+            bg_image: None,
         };
         let base = run_pipeline(&cfg, &mut engine, &base).unwrap();
 
@@ -1036,6 +1115,8 @@ mod tests {
                 style: Some("suit_full_navy".into()),
                 garments: None,
             }),
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine2, &req).unwrap();
 
@@ -1046,7 +1127,10 @@ mod tests {
         assert!(pa != pb, "裤区应被西裤覆盖：{pb:?} → {pa:?}");
         // 鞋区（椭圆下缘 (50,121)）：黑皮鞋，接近全黑
         let sa = *result.effects[0].image.get_pixel(50, 121);
-        assert!(sa[0] < 60 && sa[1] < 60 && sa[2] < 60, "鞋区应偏黑，实际 {sa:?}");
+        assert!(
+            sa[0] < 60 && sa[1] < 60 && sa[2] < 60,
+            "鞋区应偏黑，实际 {sa:?}"
+        );
         // 效果图尺寸保持全图
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
     }
@@ -1086,6 +1170,8 @@ mod tests {
                     shoes: None,
                 }),
             }),
+            transparent: false,
+            bg_image: None,
         };
         let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
 
@@ -1095,5 +1181,122 @@ mod tests {
         let pb = *result.effects[0].image.get_pixel(50, 105);
         assert!(pb[2] > 150 && pb[0] < 80, "下装应偏蓝，实际 {pb:?}");
         assert_eq!(result.effects[0].image.dimensions(), (100, 140));
+    }
+
+    #[test]
+    fn 透明底输出携带alpha通道() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input: input.clone(),
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: true,
+            bg_image: None,
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        let rgba = result.transparent.expect("应输出透明底证件照");
+        assert_eq!(rgba.dimensions(), (295, 413));
+        // 人像中心不透明、画布角落全透明
+        assert_eq!(rgba.get_pixel(147, 206)[3], 255);
+        assert_eq!(rgba.get_pixel(0, 0)[3], 0);
+
+        // 未请求时不产生透明底产物
+        let mut engine2 = demo_balanced_engine(100, 140);
+        let req2 = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: None,
+        };
+        assert!(
+            run_pipeline(&cfg, &mut engine2, &req2)
+                .unwrap()
+                .transparent
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn 自定义背景图替换额外出图() {
+        let cfg = Config::default();
+        let img = RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        img.save(&input).unwrap();
+        // 纯红背景图（200x200，cover 缩放到证件照尺寸后仍为纯色）
+        let bg_path = dir.path().join("bg.png");
+        RgbImage::from_pixel(200, 200, Rgb([200, 30, 30]))
+            .save(&bg_path)
+            .unwrap();
+
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: Some(bg_path),
+        };
+        let result = run_pipeline(&cfg, &mut engine, &req).unwrap();
+        // 纯色底色 1 张 + 自定义背景 1 张
+        assert_eq!(result.photos.len(), 2);
+        assert_eq!(result.photos[0].bg, "white");
+        assert_eq!(result.photos[1].bg, CUSTOM_BG_ID);
+        let custom = &result.photos[1].image;
+        assert_eq!(custom.dimensions(), (295, 413));
+        // 画布角落为自定义背景图颜色，人像区保留原图前景
+        assert_eq!(custom.get_pixel(0, 0), &Rgb([200, 30, 30]));
+        assert_ne!(custom.get_pixel(147, 206), &Rgb([200, 30, 30]));
+    }
+
+    #[test]
+    fn 背景图路径非法报错() {
+        let cfg = Config::default();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        RgbImage::from_pixel(100, 140, Rgb([10, 20, 30]))
+            .save(&input)
+            .unwrap();
+        let mut engine = demo_balanced_engine(100, 140);
+        let req = ProcessRequest {
+            input,
+            mode: "balanced".into(),
+            size: "one_inch".into(),
+            bgs: vec!["white".into()],
+            rotate: None,
+            effect: false,
+            layout: None,
+            beauty: None,
+            dress: None,
+            transparent: false,
+            bg_image: Some(dir.path().join("不存在.png")),
+        };
+        let err = run_pipeline(&cfg, &mut engine, &req).unwrap_err();
+        assert!(err.to_string().contains("读取背景图"), "实际：{err}");
     }
 }

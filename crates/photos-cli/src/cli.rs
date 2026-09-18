@@ -120,6 +120,12 @@ pub struct ProcessArgs {
     /// 分部位服装图：鞋（多图分部位贴合）
     #[arg(long, value_name = "鞋图")]
     pub dress_shoes: Option<PathBuf>,
+    /// 额外输出透明底 PNG（RGBA，alpha 取抠图掩膜）
+    #[arg(long)]
+    pub transparent: bool,
+    /// 自定义背景图路径（按证件照尺寸 cover 缩放裁切后合成，额外出 custombg 产物）
+    #[arg(long, value_name = "背景图")]
+    pub bg_image: Option<PathBuf>,
     /// 输出目录（默认 data/out）
     #[arg(short, long, value_name = "目录")]
     pub out: Option<PathBuf>,

@@ -77,6 +77,10 @@ export interface SubmitParams {
   rotate: number | null;
   layout: string | null;
   effect_image: boolean;
+  /** 额外输出透明底 PNG */
+  transparent: boolean;
+  /** 自定义背景图（服务端本地路径） */
+  bg_image: string | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -131,6 +135,8 @@ export async function submitTasks(files: File[], params: SubmitParams): Promise<
         rotate: params.rotate,
         layout: params.layout,
         effect_image: params.effect_image,
+        transparent: params.transparent,
+        bg_image: params.bg_image,
       }),
     );
     const created = await request<{ id: string; status: string }>("/tasks", {

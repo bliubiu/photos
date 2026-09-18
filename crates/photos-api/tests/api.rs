@@ -127,12 +127,19 @@ async fn ping健康检查() {
 async fn 配置驱动前端下拉() {
     let t = TestApp::new();
     let app = t.app();
-    let req = Request::builder().uri("/config").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/config")
+        .body(Body::empty())
+        .unwrap();
     let (status, json) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["default_mode"], "balanced");
     let modes = json["modes"].as_array().unwrap();
-    assert!(modes.iter().any(|m| m["id"] == "balanced" && m["label"] == "CPU 高性能"));
+    assert!(
+        modes
+            .iter()
+            .any(|m| m["id"] == "balanced" && m["label"] == "CPU 高性能")
+    );
     let sizes = json["sizes"].as_array().unwrap();
     let one = sizes.iter().find(|s| s["id"] == "one_inch").unwrap();
     assert_eq!(one["width_px"], 295);
@@ -148,7 +155,10 @@ async fn 配置驱动前端下拉() {
 async fn 模型列表结构() {
     let t = TestApp::new();
     let app = t.app();
-    let req = Request::builder().uri("/models").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/models")
+        .body(Body::empty())
+        .unwrap();
     let (status, json) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
     let items = json["items"].as_array().unwrap();
@@ -164,11 +174,18 @@ async fn 任务全链路成功() {
     let t = TestApp::new();
     let app = t.app();
     let (_id, detail) = create_and_wait(&app, &t.out_dir()).await;
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     let artifacts = detail["artifacts"].as_array().unwrap();
     // 两底色 → 2 个 id_photo 产物
     assert_eq!(artifacts.len(), 2);
-    let white = artifacts.iter().find(|a| a["background"] == "white").unwrap();
+    let white = artifacts
+        .iter()
+        .find(|a| a["background"] == "white")
+        .unwrap();
     assert_eq!(white["kind"], "id_photo");
     assert!(white["filename"].as_str().unwrap().contains("white.jpg"));
     assert!(detail["elapsed_ms"].is_number());
@@ -244,7 +261,11 @@ async fn 美颜开启任务成功且记录参数() {
             break;
         }
     }
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     // 任务记录含美颜参数（磨皮/提亮非缺省）
     assert!(detail["beauty"].as_str().unwrap().contains("0.8"));
 }
@@ -301,7 +322,11 @@ async fn 换装开启任务成功且记录参数() {
             break;
         }
     }
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     // 任务记录含换装参数（正装样式）
     assert!(detail["dress"].as_str().unwrap().contains("suit_navy"));
 }
@@ -338,7 +363,11 @@ async fn 全身套装样式任务成功且记录参数() {
             break;
         }
     }
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     // 任务记录含全身套装换装参数
     assert!(detail["dress"].as_str().unwrap().contains("suit_full_navy"));
 }
@@ -392,7 +421,11 @@ async fn 多图分部位换装任务成功() {
             break;
         }
     }
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     // 任务记录含分部位服装图参数
     assert!(detail["dress"].as_str().unwrap().contains("garments"));
 }
@@ -401,10 +434,7 @@ async fn 多图分部位换装任务成功() {
 async fn 换装分部位集合全空返回400() {
     let t = TestApp::new();
     let app = t.app();
-    let (body, ctype) = multipart_body(
-        &demo_jpeg(),
-        r#"{"dress":{"enabled":true,"garments":{}}}"#,
-    );
+    let (body, ctype) = multipart_body(&demo_jpeg(), r#"{"dress":{"enabled":true,"garments":{}}}"#);
     let req = Request::builder()
         .method("POST")
         .uri("/tasks")
@@ -431,7 +461,10 @@ async fn 不支持媒体返回415() {
     let req = Request::builder()
         .method("POST")
         .uri("/tasks")
-        .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
         .body(Body::from(body))
         .unwrap();
     let (status, json) = send(&app, req).await;
@@ -443,7 +476,10 @@ async fn 不支持媒体返回415() {
 async fn 任务不存在返回404() {
     let t = TestApp::new();
     let app = t.app();
-    let req = Request::builder().uri("/tasks/task_999999").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/tasks/task_999999")
+        .body(Body::empty())
+        .unwrap();
     let (status, json) = send(&app, req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(json["code"], "TASK_NOT_FOUND");
@@ -456,7 +492,10 @@ async fn 历史任务列表与下载() {
     let (id, _) = create_and_wait(&app, &t.out_dir()).await;
 
     // 列表
-    let req = Request::builder().uri("/tasks?limit=10&offset=0").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/tasks?limit=10&offset=0")
+        .body(Body::empty())
+        .unwrap();
     let (status, json) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["total"], 1);
@@ -469,7 +508,9 @@ async fn 历史任务列表与下载() {
 
     // 下载单个产物
     let req = Request::builder()
-        .uri(format!("/tasks/{id}/output?artifact=id_photo&background=white"))
+        .uri(format!(
+            "/tasks/{id}/output?artifact=id_photo&background=white"
+        ))
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -491,7 +532,9 @@ async fn 历史任务列表与下载() {
 
     // 不存在的产物 → 404
     let req = Request::builder()
-        .uri(format!("/tasks/{id}/output?artifact=id_photo&background=red"))
+        .uri(format!(
+            "/tasks/{id}/output?artifact=id_photo&background=red"
+        ))
         .body(Body::empty())
         .unwrap();
     let (status, json) = send(&app, req).await;
@@ -506,12 +549,18 @@ async fn 分页查询() {
     for _ in 0..3 {
         let (_, _) = create_and_wait(&app, &t.out_dir()).await;
     }
-    let req = Request::builder().uri("/tasks?limit=2&offset=0").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/tasks?limit=2&offset=0")
+        .body(Body::empty())
+        .unwrap();
     let (_, json) = send(&app, req).await;
     assert_eq!(json["total"], 3);
     assert_eq!(json["items"].as_array().unwrap().len(), 2);
     // limit 超上限被钳制为 100，不报错
-    let req = Request::builder().uri("/tasks?limit=999").body(Body::empty()).unwrap();
+    let req = Request::builder()
+        .uri("/tasks?limit=999")
+        .body(Body::empty())
+        .unwrap();
     let (status, _) = send(&app, req).await;
     assert_eq!(status, StatusCode::OK);
 }
@@ -554,7 +603,11 @@ async fn 输入图超限时按最大边长预缩放() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
-    assert_eq!(detail["status"], "succeeded", "任务失败：{}", detail["message"]);
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
     // 100x140 长边缩到 80 → 57x80（与流水线内部预缩放一致）
     let effect = detail["artifacts"]
         .as_array()
@@ -564,4 +617,75 @@ async fn 输入图超限时按最大边长预缩放() {
         .expect("应有效果图产物");
     let path = t.out_dir().join(effect["filename"].as_str().unwrap());
     assert_eq!(image::image_dimensions(path).unwrap(), (57, 80));
+}
+
+#[tokio::test]
+async fn 透明底与自定义背景图产物() {
+    let t = TestApp::new();
+    let app = t.app();
+    // 自定义背景图（纯红）
+    let bg_path = t.dir.path().join("bg.png");
+    image::RgbImage::from_pixel(200, 200, image::Rgb([200, 30, 30]))
+        .save(&bg_path)
+        .unwrap();
+    let params = serde_json::json!({
+        "mode": "balanced",
+        "size": "one_inch",
+        "backgrounds": ["white"],
+        "transparent": true,
+        "bg_image": bg_path.display().to_string(),
+    })
+    .to_string();
+    let (body, ctype) = multipart_body(&demo_jpeg(), &params);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tasks")
+        .header(header::CONTENT_TYPE, ctype)
+        .body(Body::from(body))
+        .unwrap();
+    let (status, json) = send(&app, req).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "创建任务失败：{json}");
+    let id = json["id"].as_str().unwrap().to_string();
+
+    let detail = loop {
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/tasks/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        let (_, d) = send(&app, req).await;
+        let st = d["status"].as_str().unwrap();
+        if st == "succeeded" || st == "failed" {
+            break d;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        detail["status"], "succeeded",
+        "任务失败：{}",
+        detail["message"]
+    );
+
+    let artifacts = detail["artifacts"].as_array().unwrap();
+    // 纯色底色 + 自定义背景（custombg）各一张证件照
+    assert_eq!(artifacts.len(), 3, "实际产物：{artifacts:?}");
+    assert!(artifacts.iter().any(|a| a["background"] == "custombg"));
+    assert!(artifacts.iter().any(|a| a["background"] == "transparent"));
+
+    // 透明底产物可下载且为 PNG
+    let req = Request::builder()
+        .uri(format!(
+            "/tasks/{id}/output?artifact=id_photo&background=transparent"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    // PNG 魔数
+    assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
 }

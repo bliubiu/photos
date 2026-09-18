@@ -252,12 +252,13 @@ fn pnet_proposals(
     let mut dets = Vec::new();
     for y in 0..h {
         for x in 0..w {
-            let score = hm[1 * h * w + y * w + x];
+            // 通道 1 = face；回归 4 通道依次为左/上/右/下偏移
+            let score = hm[h * w + y * w + x];
             if score < score_threshold {
                 continue;
             }
-            let r0 = reg[0 * h * w + y * w + x];
-            let r1 = reg[1 * h * w + y * w + x];
+            let r0 = reg[y * w + x];
+            let r1 = reg[h * w + y * w + x];
             let r2 = reg[2 * h * w + y * w + x];
             let r3 = reg[3 * h * w + y * w + x];
             // 对齐常见 P-Net 解码：左上 = stride*x - cell*r，右下 = stride*(x+1) + cell*r
@@ -295,7 +296,11 @@ fn pnet_proposals(
 }
 
 /// 从张量取出 `[C,H,W]` 通道布局（兼容丢掉 batch 维）。
-fn split_hw_channels(t: &TensorData, channels: usize, name: &str) -> CoreResult<(Vec<f32>, usize, usize)> {
+fn split_hw_channels(
+    t: &TensorData,
+    channels: usize,
+    name: &str,
+) -> CoreResult<(Vec<f32>, usize, usize)> {
     let data = &t.data;
     let shape = &t.shape;
     // [1,C,H,W] 或 [C,H,W]
@@ -324,7 +329,9 @@ fn split_hw_channels(t: &TensorData, channels: usize, name: &str) -> CoreResult<
 }
 
 /// 判断是否「融合终态」布局：三元组 [boxes N×4, scores N, landmarks N×10]（任意 batch 维）。
-fn try_fused_mtcnn_outputs(outputs: &[TensorData]) -> Option<(&TensorData, &TensorData, &TensorData)> {
+fn try_fused_mtcnn_outputs(
+    outputs: &[TensorData],
+) -> Option<(&TensorData, &TensorData, &TensorData)> {
     if outputs.len() < 3 {
         return None;
     }
@@ -332,10 +339,14 @@ fn try_fused_mtcnn_outputs(outputs: &[TensorData]) -> Option<(&TensorData, &Tens
     for (i, t) in outputs.iter().enumerate() {
         if t.data.len() >= 10 && t.data.len() % 10 == 0 {
             let n = t.data.len() / 10;
-            if outputs.iter().enumerate().any(|(j, u)| j != i && u.data.len() == n * 4)
-                && outputs.iter().enumerate().any(|(j, u)| {
-                    j != i && (u.data.len() == n || u.data.len() == n * 2)
-                })
+            if outputs
+                .iter()
+                .enumerate()
+                .any(|(j, u)| j != i && u.data.len() == n * 4)
+                && outputs
+                    .iter()
+                    .enumerate()
+                    .any(|(j, u)| j != i && (u.data.len() == n || u.data.len() == n * 2))
             {
                 lm_idx = Some(i);
                 break;
@@ -344,10 +355,10 @@ fn try_fused_mtcnn_outputs(outputs: &[TensorData]) -> Option<(&TensorData, &Tens
     }
     let li = lm_idx?;
     let n = outputs[li].data.len() / 10;
-    let bi = (0..outputs.len())
-        .find(|&i| i != li && outputs[i].data.len() == n * 4)?;
-    let si = (0..outputs.len())
-        .find(|&i| i != li && i != bi && (outputs[i].data.len() == n || outputs[i].data.len() == n * 2))?;
+    let bi = (0..outputs.len()).find(|&i| i != li && outputs[i].data.len() == n * 4)?;
+    let si = (0..outputs.len()).find(|&i| {
+        i != li && i != bi && (outputs[i].data.len() == n || outputs[i].data.len() == n * 2)
+    })?;
     Some((&outputs[bi], &outputs[si], &outputs[li]))
 }
 
@@ -504,11 +515,23 @@ pub fn decode_mtcnn(
     }
     // 否则按 P-Net：找 2 通道 heatmap 与 4 通道回归
     let heatmap = outputs.iter().find(|t| {
-        let c = if t.shape.len() == 4 { t.shape[1] } else if t.shape.len() == 3 { t.shape[0] } else { 0 };
+        let c = if t.shape.len() == 4 {
+            t.shape[1]
+        } else if t.shape.len() == 3 {
+            t.shape[0]
+        } else {
+            0
+        };
         c == 2
     });
     let bbox = outputs.iter().find(|t| {
-        let c = if t.shape.len() == 4 { t.shape[1] } else if t.shape.len() == 3 { t.shape[0] } else { 0 };
+        let c = if t.shape.len() == 4 {
+            t.shape[1]
+        } else if t.shape.len() == 3 {
+            t.shape[0]
+        } else {
+            0
+        };
         c == 4
     });
     match (heatmap, bbox) {
@@ -711,8 +734,8 @@ mod tests {
         let w = 12usize;
         let mut hm = vec![0.0f32; 2 * h * w];
         let reg = vec![0.0f32; 4 * h * w];
-        hm[1 * h * w + 3 * w + 2] = 0.95;
-        hm[1 * h * w + 0 * w + 0] = 0.2; // 低分过滤
+        hm[h * w + 3 * w + 2] = 0.95;
+        hm[h * w] = 0.2; // 低分过滤
         let dets = decode_mtcnn(
             &[
                 TensorData::new(vec![1, 2, h as i64, w as i64], hm).unwrap(),

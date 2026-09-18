@@ -50,7 +50,7 @@
 
 | kind | 额外字段 | 含义 |
 |---|---|---|
-| `id_photo` | `background` | 某底色证件照 |
+| `id_photo` | `background` | 某底色证件照；`background=transparent` 为透明底 PNG（`params.transparent` 触发），`background=custombg` 为自定义背景图合成结果（`params.bg_image` 触发） |
 | `layout` | `layout`（`6inch`\|`a4`） | 排版相纸 |
 | `effect` | — | 通用效果图 |
 | `bundle` | — | 全部产物打包 zip（仅下载侧） |
@@ -87,7 +87,9 @@
   "dress": { "enabled": false, "garment_path": null, "style": "suit_navy", "garments": { "top": null, "bottom": null, "shoes": null } },
   "rotate": null,
   "layout": null,
-  "effect_image": false
+  "effect_image": false,
+  "transparent": false,
+  "bg_image": null
 }
 ```
 
@@ -101,6 +103,8 @@
 | `rotate` | number\|null | 手动纠偏角（度），`[-45,45]`；null=自动 |
 | `layout` | string\|null | `6inch`\|`a4`\|null |
 | `effect_image` | bool | 是否输出通用效果图 |
+| `transparent` | bool | 是否额外输出透明底 PNG（RGBA，alpha 取抠图掩膜）；缺省 false |
+| `bg_image` | string\|null | 自定义背景图服务端本地路径；按证件照尺寸 cover 等比铺满并居中裁切后与人像合成，额外出 `background=custombg` 产物；读取失败返回 `400` |
 
 #### 成功响应
 

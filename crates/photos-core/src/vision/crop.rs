@@ -81,6 +81,28 @@ pub fn crop_resize(
     Ok(resized)
 }
 
+/// 裁剪并缩放到目标像素（RGBA 版本，供透明底 PNG 输出使用）
+pub fn crop_resize_rgba(
+    img: &image::RgbaImage,
+    rect: &CropRect,
+    target_w: u32,
+    target_h: u32,
+) -> CoreResult<image::RgbaImage> {
+    if rect.width == 0 || rect.height == 0 || target_w == 0 || target_h == 0 {
+        return Err(CoreError::Image("裁剪目标尺寸不能为零".into()));
+    }
+    let mut cropped = image::RgbaImage::new(rect.width, rect.height);
+    for (dx, dy, p) in cropped.enumerate_pixels_mut() {
+        *p = *img.get_pixel(rect.x + dx, rect.y + dy);
+    }
+    Ok(image::imageops::resize(
+        &cropped,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +176,22 @@ mod tests {
         let r = compute_crop(&face, 100, 140, 295, 413, 0.2, 0.1).unwrap();
         let out = crop_resize(&img, &r, 295, 413).unwrap();
         assert_eq!(out.dimensions(), (295, 413));
+    }
+
+    #[test]
+    fn 透明底裁剪缩放尺寸正确() {
+        let img = image::RgbaImage::from_pixel(100, 140, image::Rgba([5, 6, 7, 128]));
+        let face = FaceBox {
+            x1: 30.0,
+            y1: 40.0,
+            x2: 70.0,
+            y2: 90.0,
+            score: 0.99,
+        };
+        let r = compute_crop(&face, 100, 140, 295, 413, 0.2, 0.1).unwrap();
+        let out = crop_resize_rgba(&img, &r, 295, 413).unwrap();
+        assert_eq!(out.dimensions(), (295, 413));
+        assert!(out.pixels().all(|p| (p[3] as i32 - 128).abs() <= 2));
+        assert!(crop_resize_rgba(&img, &r, 0, 413).is_err());
     }
 }

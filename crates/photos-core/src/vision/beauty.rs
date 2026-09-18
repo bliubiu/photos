@@ -187,7 +187,10 @@ mod tests {
         let out = apply_beauty(&img, &cfg(true, 1.0, 0.0, 0.0));
         let before = local_variance(&img);
         let after = local_variance(&out);
-        assert!(after < before * 0.5, "磨皮后方差 {after} 应显著低于磨皮前 {before}");
+        assert!(
+            after < before * 0.5,
+            "磨皮后方差 {after} 应显著低于磨皮前 {before}"
+        );
     }
 
     #[test]
@@ -198,7 +201,12 @@ mod tests {
         let after = mean_rgb(&out);
         // 提亮 0.2 → 全图 +51（上限 255）：每通道应提升约 51，断言 > 40
         for c in 0..3 {
-            assert!(after[c] > before[c] + 40.0, "通道{c} 提亮后 {:.0} 应高于提亮前 {:.0}", after[c], before[c]);
+            assert!(
+                after[c] > before[c] + 40.0,
+                "通道{c} 提亮后 {:.0} 应高于提亮前 {:.0}",
+                after[c],
+                before[c]
+            );
         }
     }
 
@@ -210,7 +218,12 @@ mod tests {
         let after = mean_rgb(&out);
         // 美白仅作用肤色区域，图片全部为肤色 → 各通道整体提升
         for c in 0..3 {
-            assert!(after[c] > before[c] + 30.0, "通道{c} 美白后 {:.0} 应高于美白前 {:.0}", after[c], before[c]);
+            assert!(
+                after[c] > before[c] + 30.0,
+                "通道{c} 美白后 {:.0} 应高于美白前 {:.0}",
+                after[c],
+                before[c]
+            );
         }
     }
 

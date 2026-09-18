@@ -69,7 +69,8 @@ pub fn production_engine_factory() -> anyhow::Result<EngineFactory> {
     if !photos_core::inference::ORT_BUILT {
         anyhow::bail!(
             "当前构建未启用 ONNX 推理（feature=photos-core/ort），无法以真实模式启动 serve/桌面版。\n\
-             请使用：cargo run -p photos-cli --features photos-core/ort -- serve\n\
+             请使用：cargo run -p photos-cli -- serve（CLI 默认已含 ort）\n\
+             或显式：cargo run -p photos-cli --features photos-core/ort -- serve\n\
              或显式演示模式：photos serve --demo（输出为模拟数据，非真实证件照）"
         );
     }

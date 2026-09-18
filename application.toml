@@ -60,7 +60,7 @@ input_dims = [1, 3, 1024, 1024]
 
 [models.birefnet_full]
 path = "models/birefnet-full.onnx"
-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sha256 = "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c"
 input_dims = [1, 3, 1024, 1024]
 download.url = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx"
 

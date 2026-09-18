@@ -547,18 +547,22 @@ fn default_download_url(id: &str) -> Option<ModelDownload> {
         "birefnet_full" => {
             "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx"
         }
-        "rmbg" => {
-            "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx"
-        }
+        "rmbg" => "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
         "modnet" => {
             "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/modnet_photographic_portrait_matting.onnx"
         }
         "parsing_lip" => {
             "https://hf-mirror.com/levihsu/OOTDiffusion/resolve/main/checkpoints/humanparsing/parsing_lip.onnx"
         }
-        "mtcnn_pnet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/pnet.onnx",
-        "mtcnn_rnet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/rnet.onnx",
-        "mtcnn_onet" => "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/onet.onnx",
+        "mtcnn_pnet" => {
+            "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/pnet.onnx"
+        }
+        "mtcnn_rnet" => {
+            "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/rnet.onnx"
+        }
+        "mtcnn_onet" => {
+            "https://raw.githubusercontent.com/linxiaohui/mtcnn-opencv/main/mtcnn_cv2/onet.onnx"
+        }
         _ => return None,
     };
     Some(ModelDownload {
