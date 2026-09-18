@@ -204,8 +204,8 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
         kp[i * 3 + 2] = 0.99;
     }
     // mask：中心椭圆不透明（a=0.32w、b=0.38h），边缘透明以演示换底色。
-    // 与真实 BiRefNet 输出一致：先按原图生成椭圆，再 letterbox 到 1024x1024 画布，
-    // 使 pipeline 的 letterbox 逆变换能还原回原图几何
+    // 与真实 BiRefNet 输出一致：先按原图生成椭圆，再直接拉伸到 1024x1024
+    // （stretch 预处理，无灰边；pipeline 侧按同一几何映射 resize 回原图）
     let mut el = RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
     let a = 0.32 * fw;
     let b = 0.38 * fh;
@@ -218,7 +218,8 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
             }
         }
     }
-    let (canvas, _) = crate::preprocess::letterbox(&el, 1024, 1024);
+    let canvas =
+        image::imageops::resize(&el, 1024, 1024, image::imageops::FilterType::Triangle);
     let matting = canvas
         .pixels()
         .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
@@ -399,14 +400,16 @@ mod tests {
             kp_v[i * 3 + 1] = x / 30.0;
             kp_v[i * 3 + 2] = 0.95;
         }
-        // 与 demo 一致：先在原图画前景，再 letterbox 到 1024（rmbg input_dims）
+        // 与真实 hivision_modnet 输出一致：先在原图画前景，再直接拉伸到 512x512
+        // （stretch 预处理，无灰边；speed 套件抠图模型为 hivision_modnet）
         let mut el = RgbImage::from_pixel(30, 30, Rgb([0, 0, 0]));
         for y in 5..25 {
             for x in 5..25 {
                 el.put_pixel(x, y, Rgb([255, 255, 255]));
             }
         }
-        let (canvas, _) = crate::preprocess::letterbox(&el, 1024, 1024);
+        let canvas =
+            image::imageops::resize(&el, 512, 512, image::imageops::FilterType::Triangle);
         let matting = canvas
             .pixels()
             .map(|p| if p[0] == 255 { 1.0 } else { 0.0 })
@@ -420,8 +423,8 @@ mod tests {
                 vec![TensorData::new(vec![1, 17, 3], kp_v).unwrap()],
             )
             .stub(
-                "rmbg",
-                vec![TensorData::new(vec![1, 1, 1024, 1024], matting).unwrap()],
+                "hivision_modnet",
+                vec![TensorData::new(vec![1, 1, 512, 512], matting).unwrap()],
             );
 
         let req = ProcessRequest {
@@ -523,7 +526,7 @@ mod tests {
                 ]
             },
             vec![TensorData::new(vec![1, 17, 3], vec![0.0; 17 * 3]).unwrap()],
-            // mask 为 1024x1024 letterbox 画布布局（模拟 BiRefNet 输出 ≠ 原图尺寸）→ 逆变换对齐
+            // mask 为 1024x1024（模拟 BiRefNet stretch 输出 ≠ 原图尺寸）→ 自动 resize 对齐
             vec![TensorData::new(vec![1, 1, 1024, 1024], vec![0.0; 1024 * 1024]).unwrap()],
         );
         let req = ProcessRequest {

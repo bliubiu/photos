@@ -65,22 +65,36 @@ input_dims = [1, 256, 256, 3]
 path = "models/rmbg-1.4.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 1024, 1024]
+# 官方预处理：直接拉伸 + (x/255 − 0.5)/0.5（[−1,1]，0-255 值域仿射等价）
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.birefnet_lite]
-path = "models/birefnet-lite.onnx"
+path = "models/birefnet-portrait.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 1024, 1024]
+# 官方预处理：直接拉伸 + (x/255 − ImageNet均值)/ImageNet标准差（0-255 值域仿射等价）
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [123.675, 116.28, 103.53], std = [58.395, 57.12, 57.375] } }, channel = "rgb" }
 
 [models.birefnet_full]
 path = "models/birefnet-full.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 1024, 1024]
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [123.675, 116.28, 103.53], std = [58.395, 57.12, 57.375] } }, channel = "rgb" }
+
+[models.hivision_modnet]
+path = "models/hivision_modnet.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 512, 512]
+# HivisionIDPhotos 默认抠图模型：人像专用、为纯色换底调优（speed 套件默认）
+download.url = "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/hivision_modnet.onnx"
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.modnet]
 path = "models/modnet.onnx"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 512, 512]
 # 兼容保留，不进任何预设
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.parsing_lip]
 path = "models/parsing_lip.onnx"

@@ -93,7 +93,18 @@ url = ""
 sha256 = ""
 size = 0
 license = "MIT"
-source = "BiRefNet general（bb_swin_v1_tiny）"
+source = "BiRefNet portrait（人像专用，epoch_150）"
+enabled = false
+
+[[models]]
+id = "hivision_modnet"
+version = "1.0.0"
+role = "matting"
+url = ""
+sha256 = ""
+size = 0
+license = "MIT"
+source = "HivisionIDPhotos 默认人像抠图（hivision_modnet）"
 enabled = false
 
 [[models]]

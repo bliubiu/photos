@@ -13,6 +13,61 @@ const CLOSE_RADIUS: u32 = 1;
 /// 高于该值（如淡发丝、薄纱的半透明像素）即纳入前景骨架，避免被距离场当背景压灭。
 const SKELETON_EXIST_ALPHA: u8 = 16;
 
+/// 填充二值 mask 中不与图像边界连通的内部孔洞（Hivision `hollow_out_fix` 的等价实现：
+/// 泛洪标记「与边界连通的外部背景」，其余背景像素即为内部孔洞 → 置为前景）。
+/// 闭运算只能填半径内的小孔，手臂与腰间、双臂环抱等大孔洞需本函数兜底。
+pub fn fill_holes(bin: &GrayImage) -> GrayImage {
+    let (w, h) = bin.dimensions();
+    let n = (w * h) as usize;
+    // outside：与边界连通的背景像素（4 连通泛洪）
+    let mut outside = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let seed = |x: u32, y: u32, outside: &mut [bool], stack: &mut Vec<usize>| {
+        let i = (y * w + x) as usize;
+        if bin.get_pixel(x, y)[0] == 0 && !outside[i] {
+            outside[i] = true;
+            stack.push(i);
+        }
+    };
+    for x in 0..w {
+        seed(x, 0, &mut outside, &mut stack);
+        seed(x, h - 1, &mut outside, &mut stack);
+    }
+    for y in 0..h {
+        seed(0, y, &mut outside, &mut stack);
+        seed(w - 1, y, &mut outside, &mut stack);
+    }
+    while let Some(i) = stack.pop() {
+        let x = (i as u32) % w;
+        let y = (i as u32) / w;
+        let mut push = |nx: u32, ny: u32| {
+            if nx < w && ny < h {
+                let j = (ny * w + nx) as usize;
+                if bin.get_pixel(nx, ny)[0] == 0 && !outside[j] {
+                    outside[j] = true;
+                    stack.push(j);
+                }
+            }
+        };
+        if x > 0 {
+            push(x - 1, y);
+        }
+        push(x + 1, y);
+        if y > 0 {
+            push(x, y - 1);
+        }
+        push(x, y + 1);
+    }
+    let mut out = bin.clone();
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        let i = (y * w + x) as usize;
+        if p[0] == 0 && !outside[i] {
+            *p = Luma([255]);
+        }
+    }
+    out
+}
+
 /// 概率 mask（[0,255] 灰度）阈值化得到二值 mask
 pub fn threshold_mask(mask: &GrayImage, threshold: u8) -> GrayImage {
     let mut out = GrayImage::new(mask.width(), mask.height());
@@ -66,7 +121,11 @@ pub fn levelset_alpha(prob: &GrayImage, threshold: u8, soft_range: u8) -> GrayIm
 /// 主阈值（如 128），若以此划骨架会被当背景压灭（发丝细节丢失）。
 pub fn distance_feather(alpha: &GrayImage, feather_px: f32) -> GrayImage {
     let (w, h) = alpha.dimensions();
-    let bin = morph_close(&threshold_mask(alpha, SKELETON_EXIST_ALPHA), CLOSE_RADIUS);
+    // 骨架清理：闭运算填小孔 + 泛洪填内部大孔（不与边界连通的背景）
+    let bin = fill_holes(&morph_close(
+        &threshold_mask(alpha, SKELETON_EXIST_ALPHA),
+        CLOSE_RADIUS,
+    ));
     // 补图：非零像素为源，故原前景像素得到「到最近背景像素的距离」
     let mut inv = GrayImage::new(w, h);
     for (x, y, p) in bin.enumerate_pixels() {
@@ -163,6 +222,45 @@ mod tests {
     fn 软阈值零范围退化为硬阈值() {
         let m = gray(&[0, 127, 128, 255], 4, 1);
         assert_eq!(levelset_alpha(&m, 128, 0), threshold_mask(&m, 128));
+    }
+
+    #[test]
+    fn 孔洞填补() {
+        // 环形：中心 2x2 孔洞不与边界连通 → 填充
+        let mut px = vec![255u8; 36]; // 6x6
+        for (x, y) in [(2usize, 2), (3, 2), (2, 3), (3, 3)] {
+            px[y * 6 + x] = 0;
+        }
+        let f = fill_holes(&gray(&px, 6, 6));
+        assert_eq!(f.get_pixel(2, 2)[0], 255, "内部孔洞应被填充");
+        assert_eq!(f.get_pixel(0, 0)[0], 255);
+
+        // C 形前景（开口朝右）：开口处背景与边界连通 → 不填充
+        let mut px = [0u8; 25]; // 5x5 全背景
+        for (x, y) in [(1usize, 1), (2, 1), (1, 2), (1, 3), (2, 3)] {
+            px[y * 5 + x] = 255;
+        }
+        let f3 = fill_holes(&gray(&px, 5, 5));
+        assert_eq!(f3.get_pixel(1, 1)[0], 255, "前景应保持不变");
+        assert_eq!(f3.get_pixel(2, 2)[0], 0, "经开口连到边界的背景不应被填充");
+        assert_eq!(f3.get_pixel(4, 4)[0], 0, "边界背景不应被填充");
+    }
+
+    #[test]
+    fn 距离场羽化填充内部大孔() {
+        // 16x16：8x8 前景环（中心 4x4 孔）→ 羽化后内部应被填充为前景
+        let mut px = vec![0u8; 256];
+        for y in 4..12 {
+            for x in 4..12 {
+                let hole = (6..10).contains(&x) && (6..10).contains(&y);
+                if !hole {
+                    px[y * 16 + x] = 255;
+                }
+            }
+        }
+        let a = distance_feather(&gray(&px, 16, 16), 2.0);
+        assert_eq!(a.get_pixel(8, 8)[0], 255, "内部大孔应被填充");
+        assert_eq!(a.get_pixel(0, 0)[0], 0, "外部背景不受影响");
     }
 
     #[test]

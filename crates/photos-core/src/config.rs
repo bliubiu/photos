@@ -219,12 +219,27 @@ pub enum ChannelOrder {
     Bgr,
 }
 
+/// 输入缩放方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResizeMode {
+    /// 等比缩放 + 灰边填充（letterbox）：人脸/关键点检测类默认，坐标可逆变换还原
+    #[default]
+    Letterbox,
+    /// 直接拉伸到输入尺寸：抠图/分割类模型须与训练分布一致（BiRefNet/RMBG/MODNet
+    /// 官方与 HivisionIDPhotos 均为直接拉伸，letterbox 灰边会系统性劣化边缘置信度）
+    Stretch,
+}
+
 /// 模型预处理约定 `[models.<id>.preprocess]`
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct Preprocess {
     /// 输入布局
     #[serde(default)]
     pub layout: Layout,
+    /// 输入缩放方式
+    #[serde(default)]
+    pub resize: ResizeMode,
     /// 归一化方式
     #[serde(default)]
     pub norm: Norm,
@@ -977,7 +992,7 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
         ),
         (
             "birefnet_lite",
-            "models/birefnet-lite.onnx",
+            "models/birefnet-portrait.onnx",
             vec![1, 3, 1024, 1024],
             ModelRole::Matting,
         ),
@@ -985,6 +1000,12 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
             "birefnet_full",
             "models/birefnet-full.onnx",
             vec![1, 3, 1024, 1024],
+            ModelRole::Matting,
+        ),
+        (
+            "hivision_modnet",
+            "models/hivision_modnet.onnx",
+            vec![1, 3, 512, 512],
             ModelRole::Matting,
         ),
         (
@@ -1011,20 +1032,49 @@ fn default_models() -> BTreeMap<String, ModelSpec> {
                 enabled: true,
                 download: default_download_url(id),
                 role,
-                // RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)、不归一化
-                preprocess: if id == "retinaface" {
-                    Preprocess {
-                        layout: Layout::Nchw,
-                        norm: Norm::Mean([104.0, 117.0, 123.0]),
-                        channel: ChannelOrder::Rgb,
-                    }
-                } else {
-                    Preprocess::default()
-                },
+                preprocess: builtin_preprocess(id),
             },
         );
     }
     m
+}
+
+/// 内置模型的预处理声明（与官方/参考实现逐项对齐，见 docs/08-效果对标分析与改进方案.md）：
+/// - 抠图类（BiRefNet/RMBG/MODNet/hivision_modnet）：**直接拉伸** resize，与训练分布一致；
+///   归一化在 0-255 原始值域用仿射等价表达——BiRefNet 为 (x/255 − ImageNet均值)/ImageNet标准差，
+///   RMBG/MODNet/hivision_modnet 为 (x/255 − 0.5)/0.5（即 [−1,1]）
+/// - RetinaFace：RGB 0-255 减均值 (104,117,123)，letterbox
+/// - 其余（MoveNet 等）：内置默认
+fn builtin_preprocess(id: &str) -> Preprocess {
+    match id {
+        "retinaface" => Preprocess {
+            layout: Layout::Nchw,
+            resize: ResizeMode::Letterbox,
+            norm: Norm::Mean([104.0, 117.0, 123.0]),
+            channel: ChannelOrder::Rgb,
+        },
+        "birefnet_lite" | "birefnet_full" => Preprocess {
+            layout: Layout::Nchw,
+            resize: ResizeMode::Stretch,
+            // (raw/255 − m)/s = (raw − 255m)/(255s)：0-255 值域的 ImageNet 均值/标准差
+            norm: Norm::MeanStd {
+                mean: [123.675, 116.28, 103.53],
+                std: [58.395, 57.12, 57.375],
+            },
+            channel: ChannelOrder::Rgb,
+        },
+        "rmbg" | "modnet" | "hivision_modnet" => Preprocess {
+            layout: Layout::Nchw,
+            resize: ResizeMode::Stretch,
+            // (raw/255 − 0.5)/0.5 = (raw − 127.5)/127.5：归一化到 [−1,1]
+            norm: Norm::MeanStd {
+                mean: [127.5, 127.5, 127.5],
+                std: [127.5, 127.5, 127.5],
+            },
+            channel: ChannelOrder::Rgb,
+        },
+        _ => Preprocess::default(),
+    }
 }
 
 /// 默认注册表下载地址（一键下载开箱即用；优先 GitHub，HF 走 hf-mirror 以适配国内网络）
@@ -1039,11 +1089,16 @@ fn default_download_url(id: &str) -> Option<ModelDownload> {
         "movnet_thunder" => {
             "https://hf-mirror.com/Xenova/movenet-singlepose-thunder/resolve/main/onnx/model.onnx"
         }
+        // 人像专用权重：人像数据集训练（epoch_150），发丝边缘显著优于 DIS5K 通用权重
         "birefnet_lite" => {
-            "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx"
+            "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-portrait-epoch_150.onnx"
         }
         "birefnet_full" => {
             "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx"
+        }
+        // HivisionIDPhotos 默认抠图模型：人像专用、为纯色换底调优，体积小速度快
+        "hivision_modnet" => {
+            "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/hivision_modnet.onnx"
         }
         "rmbg" => "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
         "modnet" => {
@@ -1075,7 +1130,8 @@ fn default_modes() -> BTreeMap<String, ModeSuite> {
         ModeSuite {
             face: "mtcnn".into(),
             keypoint: "movnet_light".into(),
-            matting: "rmbg".into(),
+            // 极速模式：hivision_modnet 仅 25MB 且人像专用，比 RMBG-1.4（176MB）快得多
+            matting: "hivision_modnet".into(),
             execution_provider: ExecutionProvider::Cpu,
         },
     );
@@ -1531,8 +1587,25 @@ preprocess = { layout = "nhwc", norm = "none", channel = "bgr" }
             Norm::Mean([104.0, 117.0, 123.0])
         );
         assert_eq!(cfg.models["retinaface"].preprocess.layout, Layout::Nchw);
-        // 其余模型沿用内置约定（默认值）
-        assert!(cfg.models["rmbg"].preprocess.is_default());
+        // 抠图模型声明为直接拉伸 + 与训练分布一致的归一化（效果对标修正，见 docs/08）
+        assert_eq!(
+            cfg.models["rmbg"].preprocess.norm,
+            Norm::MeanStd {
+                mean: [127.5, 127.5, 127.5],
+                std: [127.5, 127.5, 127.5]
+            }
+        );
+        assert_eq!(cfg.models["rmbg"].preprocess.resize, ResizeMode::Stretch);
+        assert_eq!(
+            cfg.models["birefnet_lite"].preprocess.norm,
+            Norm::MeanStd {
+                mean: [123.675, 116.28, 103.53],
+                std: [58.395, 57.12, 57.375]
+            }
+        );
+        assert_eq!(cfg.models["hivision_modnet"].role, ModelRole::Matting);
+        // speed 套件抠图为人像专用轻量模型
+        assert_eq!(cfg.mode("speed").unwrap().matting, "hivision_modnet");
     }
 
     #[test]

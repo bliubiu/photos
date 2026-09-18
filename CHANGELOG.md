@@ -2,6 +2,26 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.27] - 0.1.0
+
+### ⚠️ Breaking Changes  破坏性变更
+- 【模型权重】`birefnet_lite` 权重由 DIS5K 通用版（`birefnet-lite.onnx` / general-bb_swin_v1_tiny）切换为**人像专用版 BiRefNet-portrait-epoch_150**（`models/birefnet-portrait.onnx`），旧文件与新配置不匹配，需重新下载；speed 套件抠图由 `rmbg` 切换为 `hivision_modnet`（~25MB）
+
+### ✨ New Features 新增功能
+- 【预处理声明】`Preprocess` 新增 `resize` 字段（`letterbox` 等比灰边填充 / `stretch` 直接拉伸）：抠图类模型（BiRefNet/RMBG/MODNet/hivision_modnet）统一声明 `stretch`，与官方训练分布一致——此前统一 letterbox 灰边 + 仅 ÷255 是效果差距的最大根因（docs/08 对标结论）
+- 【内置预处理声明】内置模型注册表补齐归一化：BiRefNet 为 ImageNet mean/std（0-255 值域仿射等价 `(raw−255m)/(255s)`），RMBG/MODNet/hivision_modnet 为 `[−1,1]`（`(raw−127.5)/127.5`）；声明式接入任意模型无需改代码
+- 【抠图构图】`vision::crop::compute_crop` 复刻 HivisionIDPhotos `adjust_photo` 两轮构图：第一轮「裁剪面积 = 5×脸面积 + 脸心置于 45% 高度」；第二轮用 alpha 人像边界修正（左右贴边等比收缩、头顶距顶 [10%,12%] 两轮调整、底部贴底），人像底部延伸出扫描窗时跳过贴底
+- 【mask 后处理】`vision::matting` 新增 `fill_holes`（边界泛洪标记外部背景，内部孔洞填前景，等价 Hivision `hollow_out_fix`），接入距离场羽化——闭运算只能填小孔，手臂与腰间等大孔洞由泛洪兜底
+
+### 🐛 Bug Fixes  问题修复
+- 【模型下载】`birefnet_lite` 下载地址指向人像专用权重；新增 `hivision_modnet` 一键下载地址（HivisionIDPhotos release）
+
+### 📈 Improvements 性能/体验优化
+- 【speed 模式】抠图模型 hivision_modnet（25MB）较原 rmbg-1.4（176MB）体积降 86%，且为人像专用权重
+
+### 📚 Docs 文档更新
+- `docs/04-模型清单.md`：模型总表、预设映射与定版表同步（人像权重、stretch 预处理、speed 套件变化）；`application.toml` 与 `docs/examples/application.toml` 同步新增预处理声明与 hivision_modnet 条目
+
 ## [2026.09.18.26] - 0.1.0
 
 ### 🐛 Bug Fixes  问题修复

@@ -52,22 +52,37 @@ input_dims = [1, 256, 256, 3]
 path = "models/rmbg-1.4.onnx"
 sha256 = "8cafcf770b06757c4eaced21b1a88e57fd2b66de01b8045f35f01535ba742e0f"
 input_dims = [1, 3, 1024, 1024]
+# 官方预处理：直接拉伸 + (x/255 − 0.5)/0.5（[−1,1]，0-255 值域仿射等价）
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.birefnet_lite]
-path = "models/birefnet-lite.onnx"
-sha256 = "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333"
+# 人像专用权重（epoch_150）：旧 general 权重与本条目不再匹配，请重新下载
+path = "models/birefnet-portrait.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 input_dims = [1, 3, 1024, 1024]
+download.url = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-portrait-epoch_150.onnx"
+# 官方预处理：直接拉伸 + (x/255 − ImageNet均值)/ImageNet标准差（0-255 值域仿射等价）
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [123.675, 116.28, 103.53], std = [58.395, 57.12, 57.375] } }, channel = "rgb" }
 
 [models.birefnet_full]
 path = "models/birefnet-full.onnx"
 sha256 = "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c"
 input_dims = [1, 3, 1024, 1024]
 download.url = "https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/BiRefNet-general-epoch_244.onnx"
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [123.675, 116.28, 103.53], std = [58.395, 57.12, 57.375] } }, channel = "rgb" }
+
+[models.hivision_modnet]
+path = "models/hivision_modnet.onnx"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+input_dims = [1, 3, 512, 512]
+download.url = "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/hivision_modnet.onnx"
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.modnet]
 path = "models/modnet.onnx"
 sha256 = "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9"
 input_dims = [1, 3, 512, 512]
+preprocess = { layout = "nchw", resize = "stretch", norm = { mean_std = { mean = [127.5, 127.5, 127.5], std = [127.5, 127.5, 127.5] } }, channel = "rgb" }
 
 [models.parsing_lip]
 path = "models/parsing_lip.onnx"

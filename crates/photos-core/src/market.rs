@@ -331,6 +331,7 @@ version = ""
             role: ModelRole::Matting,
             preprocess: crate::config::Preprocess {
                 layout: crate::config::Layout::Nchw,
+                resize: crate::config::ResizeMode::Stretch,
                 norm: crate::config::Norm::MeanStd {
                     mean: [0.5, 0.5, 0.5],
                     std: [0.5, 0.5, 0.5],

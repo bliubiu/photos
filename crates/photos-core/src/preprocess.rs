@@ -6,16 +6,18 @@
 //!
 //! 布局与归一化由模型注册表声明（`[models.<id>.preprocess]`）驱动：
 //! - `layout`：`auto`（按通道维位置推断，默认）| `nchw` | `nhwc`
-//! - `norm`：`unit`（RGB÷255→[0,1]，默认）| `none` | `mean` | `mean_std`
+//! - `resize`：`letterbox`（等比 + 灰边，检测类默认）| `stretch`（直接拉伸，抠图/分割类）
+//! - `norm`：`unit`（RGB÷255→[0,1]）| `none` | `mean` | `mean_std`
 //! - `channel`：`rgb`（默认）| `bgr`
 //!
-//! 内置模型的默认声明等价于旧行为：NCHW 走 letterbox + RGB÷255；NHWC 直接 resize；
-//! RetinaFace 由 `[models.retinaface.preprocess]` 声明为 RGB 0-255 减均值 (104,117,123)。
+//! 抠图模型（BiRefNet/RMBG/MODNet）官方与 HivisionIDPhotos 均为**直接拉伸** resize，
+//! letterbox 灰边不在训练分布内，会系统性劣化边缘/发丝置信度——内置抠图模型统一声明
+//! `stretch`；人脸/关键点检测类保持 `letterbox`（坐标可逆变换还原）。
 //! 插件化注册的模型只需在配置中声明预处理，pipeline 侧无需改动。
 
 use image::{GrayImage, RgbImage};
 
-use crate::config::{ChannelOrder, Layout, Norm, Preprocess};
+use crate::config::{ChannelOrder, Layout, Norm, Preprocess, ResizeMode};
 use crate::error::{CoreError, CoreResult};
 use crate::inference::TensorData;
 
@@ -40,7 +42,8 @@ pub struct ModelInput {
 }
 
 /// 依据模型 input_dims 构造推理输入：
-/// - NCHW（通道在 dims[1]）：等比缩放 + 灰边填充（letterbox），返回逆变换参数
+/// - NCHW（通道在 dims[1]）：按 `resize` 声明——`letterbox` 等比缩放 + 灰边填充（返回逆变换
+///   参数）；`stretch` 直接拉伸（mask 输出与原图为同一几何映射，无需逆变换）
 /// - NHWC（通道在最后一维）：直接 resize（MoveNet 官方约定），坐标为归一化，无需逆变换
 ///
 /// `retinaface` 为 true 时采用 RetinaFace 官方预处理：RGB 0-255 减均值 (104,117,123)，不归一化
@@ -52,6 +55,7 @@ pub fn build_input(img: &RgbImage, dims: &[i64], retinaface: bool) -> CoreResult
     let pp = if retinaface {
         Preprocess {
             layout: Layout::Auto,
+            resize: ResizeMode::Letterbox,
             norm: Norm::Mean([104.0, 117.0, 123.0]),
             channel: ChannelOrder::Rgb,
         }
@@ -69,12 +73,30 @@ pub fn build_input_with(img: &RgbImage, dims: &[i64], pp: &Preprocess) -> CoreRe
             if tw == 0 || th == 0 {
                 return Err(CoreError::Inference(format!("模型输入尺寸非法：{dims:?}")));
             }
-            let (canvas, lb) = letterbox(img, tw, th);
-            let data = rgb_to_nchw_with(&canvas, pp.norm, pp.channel);
-            Ok(ModelInput {
-                tensor: TensorData::new(dims.to_vec(), data)?,
-                letterbox: Some(lb),
-            })
+            match pp.resize {
+                // 直接拉伸：与训练分布一致（BiRefNet/RMBG/MODNet 官方约定）
+                ResizeMode::Stretch => {
+                    let resized = image::imageops::resize(
+                        img,
+                        tw,
+                        th,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    let data = rgb_to_nchw_with(&resized, pp.norm, pp.channel);
+                    Ok(ModelInput {
+                        tensor: TensorData::new(dims.to_vec(), data)?,
+                        letterbox: None,
+                    })
+                }
+                ResizeMode::Letterbox => {
+                    let (canvas, lb) = letterbox(img, tw, th);
+                    let data = rgb_to_nchw_with(&canvas, pp.norm, pp.channel);
+                    Ok(ModelInput {
+                        tensor: TensorData::new(dims.to_vec(), data)?,
+                        letterbox: Some(lb),
+                    })
+                }
+            }
         }
         Layout::Nhwc => {
             let (tw, th) = (dims[1] as u32, dims[2] as u32);
@@ -372,6 +394,7 @@ mod tests {
     fn 声明式bgr通道序() {
         let pp = Preprocess {
             layout: Layout::Auto,
+            resize: ResizeMode::Letterbox,
             norm: Norm::Unit,
             channel: ChannelOrder::Bgr,
         };
@@ -386,6 +409,7 @@ mod tests {
     fn 声明式不归一化保留原始值() {
         let pp = Preprocess {
             layout: Layout::Auto,
+            resize: ResizeMode::Letterbox,
             norm: Norm::None,
             channel: ChannelOrder::Rgb,
         };
@@ -401,6 +425,7 @@ mod tests {
     fn 声明式减均值除标准差() {
         let pp = Preprocess {
             layout: Layout::Auto,
+            resize: ResizeMode::Letterbox,
             norm: Norm::MeanStd {
                 mean: [104.0, 117.0, 123.0],
                 std: [58.0, 58.0, 58.0],
@@ -417,6 +442,7 @@ mod tests {
     fn 声明式nhwc按最后一维通道处理() {
         let pp = Preprocess {
             layout: Layout::Nhwc,
+            resize: ResizeMode::Letterbox,
             norm: Norm::Unit,
             channel: ChannelOrder::Bgr,
         };
@@ -428,6 +454,29 @@ mod tests {
         assert!((mi.tensor.data[0] - 50.0 / 255.0).abs() < 1e-6);
         assert!((mi.tensor.data[1] - 100.0 / 255.0).abs() < 1e-6);
         assert!((mi.tensor.data[2] - 200.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 声明式拉伸缩放无灰边() {
+        // 4x1 → 拉伸到 1x4：无灰边、无逆变换，mean_std 归一化按 0-255 值域仿射生效
+        let pp = Preprocess {
+            layout: Layout::Auto,
+            resize: ResizeMode::Stretch,
+            norm: Norm::MeanStd {
+                mean: [127.5, 127.5, 127.5],
+                std: [127.5, 127.5, 127.5],
+            },
+            channel: ChannelOrder::Rgb,
+        };
+        let img = solid(4, 1);
+        let mi = build_input_with(&img, &[1, 3, 1, 4], &pp).unwrap();
+        // 拉伸输入无 letterbox 逆变换（mask 输出与原图同一几何映射）
+        assert!(mi.letterbox.is_none());
+        // NCHW：通道 0 为 R、通道 1 为 G、通道 2 为 B（各 4 像素连块）
+        // R=200 → (200−127.5)/127.5 ≈ 0.5686（等价于 (200/255 − 0.5)/0.5）
+        assert!((mi.tensor.data[0] - (200.0 - 127.5) / 127.5).abs() < 1e-6);
+        assert!((mi.tensor.data[4] - (100.0 - 127.5) / 127.5).abs() < 1e-6);
+        assert!((mi.tensor.data[8] - (50.0 - 127.5) / 127.5).abs() < 1e-6);
     }
 
     #[test]

@@ -89,10 +89,8 @@ const MASK_THRESHOLD: u8 = 128;
 const MASK_SOFT_RANGE: u8 = 64;
 /// 距离场羽化过渡带宽度（像素）
 const MASK_FEATHER_PX: f32 = 2.0;
-/// 头顶留白 = 0.2 × 脸高
-const CROP_TOP_RATIO: f64 = 0.2;
-/// 下巴余量 = 0.1 × 脸高
-const CROP_BOTTOM_RATIO: f64 = 0.1;
+// 裁剪构图常量（HEAD_MEASURE_RATIO / HEAD_HEIGHT_RATIO / HEAD_TOP_MAX / HEAD_TOP_MIN）
+// 移至 vision::crop，与 Hivision adjust_photo 对齐的两轮构图在 compute_crop 内实现。
 
 /// 步骤实现函数：读写 [`PipelineCtx`] 中的中间态，失败返回中文错误
 pub type StepFn = fn(&mut PipelineCtx) -> CoreResult<()>;
@@ -838,16 +836,23 @@ fn step_background(ctx: &mut PipelineCtx) -> CoreResult<()> {
         .dimensions()
         .ok_or_else(|| missing_step(STEP_READ_IMAGE))?;
     let size = ctx.size.clone();
+    // 掩膜羽化先行：两轮裁剪的第二轮需要 alpha 人像边界
+    let alpha = ctx
+        .rot_mask
+        .as_ref()
+        .map(|m| distance_feather(m, MASK_FEATHER_PX));
+    if alpha.is_none() {
+        ctx.warn("未启用人像抠图步骤，跳过换底合成并直接裁切当前图像");
+    }
     // 裁剪框与底色无关，先算一次；无人脸框时退化为居中裁切
     let crop = match ctx.face.as_ref().map(|f| f.face) {
         Some(face_box) => compute_crop(
             &face_box,
+            alpha.as_ref(),
             w,
             h,
             size.width_px,
             size.height_px,
-            CROP_TOP_RATIO,
-            CROP_BOTTOM_RATIO,
         )?,
         None => {
             ctx.warn("未启用人脸检测步骤（或未检出人脸），裁切按图像居中处理");
@@ -859,22 +864,14 @@ fn step_background(ctx: &mut PipelineCtx) -> CoreResult<()> {
                     y2: h as f32,
                     score: 0.0,
                 },
+                alpha.as_ref(),
                 w,
                 h,
                 size.width_px,
                 size.height_px,
-                CROP_TOP_RATIO,
-                CROP_BOTTOM_RATIO,
             )?
         }
     };
-    let alpha = ctx
-        .rot_mask
-        .as_ref()
-        .map(|m| distance_feather(m, MASK_FEATHER_PX));
-    if alpha.is_none() {
-        ctx.warn("未启用人像抠图步骤，跳过换底合成并直接裁切当前图像");
-    }
     let cleaned = {
         let base = ctx.base_image().ok_or_else(|| missing_step(STEP_ROTATE))?;
         match &alpha {
@@ -1528,12 +1525,11 @@ mod tests {
                 y2: 140.0,
                 score: 0.0,
             },
+            None,
             100,
             140,
             295,
             413,
-            CROP_TOP_RATIO,
-            CROP_BOTTOM_RATIO,
         )
         .unwrap();
         assert!(crop.width > 0 && crop.height > 0);
