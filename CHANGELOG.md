@@ -2,6 +2,16 @@
 
 项目版本采用 CalVer（日历版本）：`YYYY.MM.DD.MICRO`。正式发布在稳定分支打 Tag，Tag 名称与版本号一致。
 
+## [2026.09.18.1] - 0.1.0
+
+### ✨ New Features 新增功能
+- 【尺寸规格库】内置尺寸由 3 个扩展至 15 个：常规新增 `big_one_inch`（大一寸 33×48）、`small_two_inch`（小二寸 35×45）；签证新增 `us_visa`（美国 2×2 英寸 600×600）、`japan_visa`（日本 45×45）、`schengen_visa`（申根 35×45）、`uk_visa`（英国 35×45）；国内证件新增 `passport`（护照 33×48）、`hkmo_permit`（港澳通行证 33×48）、`driver_license`（驾驶证 22×32）、`social_security_card`（社保卡 26×32）、`residence_permit`（居住证 26×32）；考试报名新增 `exam_registration`（35×45）
+- 【配置样例】`application.toml` 与 `docs/examples/application.toml` 同步新增全部尺寸段
+
+### 📚 Docs 文档更新
+- `docs/06-运行使用手册.md`：配置章节新增内置尺寸规格表（分类/id/毫米/像素）与自定义尺寸说明
+- `docs/07-能力增强.md`：尺寸规格库扩展标记为已落地
+
 ## [2026.09.18.0] - 0.1.0
 
 ### ✨ New Features 新增功能

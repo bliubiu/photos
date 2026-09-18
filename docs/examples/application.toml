@@ -123,6 +123,102 @@ dpi = 300
 width_px = 260
 height_px = 378
 
+[sizes.big_one_inch]
+name = "大一寸"
+width_mm = 33.0
+height_mm = 48.0
+dpi = 300
+width_px = 390
+height_px = 567
+
+[sizes.small_two_inch]
+name = "小二寸"
+width_mm = 35.0
+height_mm = 45.0
+dpi = 300
+width_px = 413
+height_px = 531
+
+[sizes.us_visa]
+name = "美国签证"
+width_mm = 50.8
+height_mm = 50.8
+dpi = 300
+width_px = 600
+height_px = 600
+
+[sizes.japan_visa]
+name = "日本签证"
+width_mm = 45.0
+height_mm = 45.0
+dpi = 300
+width_px = 531
+height_px = 531
+
+[sizes.schengen_visa]
+name = "申根签证"
+width_mm = 35.0
+height_mm = 45.0
+dpi = 300
+width_px = 413
+height_px = 531
+
+[sizes.uk_visa]
+name = "英国签证"
+width_mm = 35.0
+height_mm = 45.0
+dpi = 300
+width_px = 413
+height_px = 531
+
+[sizes.passport]
+name = "护照"
+width_mm = 33.0
+height_mm = 48.0
+dpi = 300
+width_px = 390
+height_px = 567
+
+[sizes.hkmo_permit]
+name = "港澳通行证"
+width_mm = 33.0
+height_mm = 48.0
+dpi = 300
+width_px = 390
+height_px = 567
+
+[sizes.driver_license]
+name = "驾驶证"
+width_mm = 22.0
+height_mm = 32.0
+dpi = 300
+width_px = 260
+height_px = 378
+
+[sizes.social_security_card]
+name = "社保卡"
+width_mm = 26.0
+height_mm = 32.0
+dpi = 300
+width_px = 307
+height_px = 378
+
+[sizes.residence_permit]
+name = "居住证"
+width_mm = 26.0
+height_mm = 32.0
+dpi = 300
+width_px = 307
+height_px = 378
+
+[sizes.exam_registration]
+name = "考试报名"
+width_mm = 35.0
+height_mm = 45.0
+dpi = 300
+width_px = 413
+height_px = 531
+
 [backgrounds.white]
 name = "白"
 rgb = [255, 255, 255]

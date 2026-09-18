@@ -637,6 +637,142 @@ fn default_sizes() -> BTreeMap<String, SizeSpec> {
             height_px: 378,
         },
     );
+    // 加宽规格：大一寸（33×48）、小二寸（35×45）
+    m.insert(
+        "big_one_inch".into(),
+        SizeSpec {
+            name: "大一寸".into(),
+            width_mm: 33.0,
+            height_mm: 48.0,
+            dpi: 300,
+            width_px: 390,
+            height_px: 567,
+        },
+    );
+    m.insert(
+        "small_two_inch".into(),
+        SizeSpec {
+            name: "小二寸".into(),
+            width_mm: 35.0,
+            height_mm: 45.0,
+            dpi: 300,
+            width_px: 413,
+            height_px: 531,
+        },
+    );
+    // 签证规格
+    m.insert(
+        "us_visa".into(),
+        SizeSpec {
+            name: "美国签证".into(),
+            width_mm: 50.8,
+            height_mm: 50.8,
+            dpi: 300,
+            width_px: 600,
+            height_px: 600,
+        },
+    );
+    m.insert(
+        "japan_visa".into(),
+        SizeSpec {
+            name: "日本签证".into(),
+            width_mm: 45.0,
+            height_mm: 45.0,
+            dpi: 300,
+            width_px: 531,
+            height_px: 531,
+        },
+    );
+    m.insert(
+        "schengen_visa".into(),
+        SizeSpec {
+            name: "申根签证".into(),
+            width_mm: 35.0,
+            height_mm: 45.0,
+            dpi: 300,
+            width_px: 413,
+            height_px: 531,
+        },
+    );
+    m.insert(
+        "uk_visa".into(),
+        SizeSpec {
+            name: "英国签证".into(),
+            width_mm: 35.0,
+            height_mm: 45.0,
+            dpi: 300,
+            width_px: 413,
+            height_px: 531,
+        },
+    );
+    // 国内证件规格
+    m.insert(
+        "passport".into(),
+        SizeSpec {
+            name: "护照".into(),
+            width_mm: 33.0,
+            height_mm: 48.0,
+            dpi: 300,
+            width_px: 390,
+            height_px: 567,
+        },
+    );
+    m.insert(
+        "hkmo_permit".into(),
+        SizeSpec {
+            name: "港澳通行证".into(),
+            width_mm: 33.0,
+            height_mm: 48.0,
+            dpi: 300,
+            width_px: 390,
+            height_px: 567,
+        },
+    );
+    m.insert(
+        "driver_license".into(),
+        SizeSpec {
+            name: "驾驶证".into(),
+            width_mm: 22.0,
+            height_mm: 32.0,
+            dpi: 300,
+            width_px: 260,
+            height_px: 378,
+        },
+    );
+    m.insert(
+        "social_security_card".into(),
+        SizeSpec {
+            name: "社保卡".into(),
+            width_mm: 26.0,
+            height_mm: 32.0,
+            dpi: 300,
+            width_px: 307,
+            height_px: 378,
+        },
+    );
+    m.insert(
+        "residence_permit".into(),
+        SizeSpec {
+            name: "居住证".into(),
+            width_mm: 26.0,
+            height_mm: 32.0,
+            dpi: 300,
+            width_px: 307,
+            height_px: 378,
+        },
+    );
+    // 考试报名规格
+    m.insert(
+        "exam_registration".into(),
+        SizeSpec {
+            name: "考试报名".into(),
+            width_mm: 35.0,
+            height_mm: 45.0,
+            dpi: 300,
+            width_px: 413,
+            height_px: 531,
+        },
+    );
     m
 }
 
@@ -854,6 +990,38 @@ mod tests {
         assert!(!cfg.beauty.enabled);
         // 默认配置中不存在 "download" 注册条目
         assert!(!cfg.models.contains_key("download"));
+    }
+
+    #[test]
+    fn 尺寸库覆盖签证与国内证件规格() {
+        let cfg = Config::default();
+        // 签证类：美国 2×2 英寸、日本 45×45、申根/英国 35×45
+        assert_eq!(cfg.size("us_visa").unwrap().width_px, 600);
+        assert_eq!(cfg.size("us_visa").unwrap().height_px, 600);
+        assert_eq!(cfg.size("japan_visa").unwrap().width_px, 531);
+        assert_eq!(cfg.size("japan_visa").unwrap().height_px, 531);
+        assert_eq!(cfg.size("schengen_visa").unwrap().width_px, 413);
+        assert_eq!(cfg.size("schengen_visa").unwrap().height_px, 531);
+        assert_eq!(cfg.size("uk_visa").unwrap().width_px, 413);
+        assert_eq!(cfg.size("uk_visa").unwrap().height_px, 531);
+        // 国内证件：护照/港澳通行证 33×48、驾驶证 22×32、社保卡与居住证 26×32
+        assert_eq!(cfg.size("passport").unwrap().width_px, 390);
+        assert_eq!(cfg.size("passport").unwrap().height_px, 567);
+        assert_eq!(cfg.size("hkmo_permit").unwrap().width_px, 390);
+        assert_eq!(cfg.size("hkmo_permit").unwrap().height_px, 567);
+        assert_eq!(cfg.size("driver_license").unwrap().width_px, 260);
+        assert_eq!(cfg.size("driver_license").unwrap().height_px, 378);
+        assert_eq!(cfg.size("social_security_card").unwrap().width_px, 307);
+        assert_eq!(cfg.size("social_security_card").unwrap().height_px, 378);
+        assert_eq!(cfg.size("residence_permit").unwrap().width_px, 307);
+        assert_eq!(cfg.size("residence_permit").unwrap().height_px, 378);
+        // 考试报名与加宽规格：大一寸 33×48、小二寸 35×45、考试报名 35×45
+        assert_eq!(cfg.size("big_one_inch").unwrap().width_px, 390);
+        assert_eq!(cfg.size("big_one_inch").unwrap().height_px, 567);
+        assert_eq!(cfg.size("small_two_inch").unwrap().width_px, 413);
+        assert_eq!(cfg.size("small_two_inch").unwrap().height_px, 531);
+        assert_eq!(cfg.size("exam_registration").unwrap().width_px, 413);
+        assert_eq!(cfg.size("exam_registration").unwrap().height_px, 531);
     }
 
     #[test]
