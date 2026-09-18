@@ -19,7 +19,8 @@ use crate::vision::crop::{compute_crop, crop_resize, crop_resize_rgba};
 use crate::vision::dressing::{self, SuitStyle};
 use crate::vision::face::{FaceBox, FaceDetection, decode_retinaface, retinaface_prior_count};
 use crate::vision::geometry::{
-    Point2, RotationDecision, decide_rotation, fused_angle, head_angle, shoulder_angle,
+    Point2, RotationDecision, SIDE_FACE_YAW_DEG, decide_rotation, fused_angle,
+    fused_angle_with_torso, head_angle, shoulder_angle, torso_angle, yaw_from_landmarks,
 };
 use crate::vision::keypoint::{KeypointSet, decode_movenet};
 use crate::vision::matting::{feather, morph_open, threshold_mask};
@@ -233,11 +234,14 @@ pub fn run_pipeline(
     let kps = decode_movenet(&kp_outs[0], w, h)?;
     let mask = probability_mask(&mat_outs[0], w, h, mat_in.letterbox.as_ref())?;
 
-    // 5. 姿态角度求解（0.6 头部 + 0.4 肩线，缺失降级并告警）
+    // 5. 姿态角度求解（0.6 头部 + 0.4 肩线；髋/膝可用时改用 0.5/0.3/0.2 三路，缺失降级并告警）
     let mut warnings = Vec::new();
     let measured = fused_measured(&kps, &mut warnings);
     let decision = decide_rotation(measured, req.rotate)?;
     if let Some(warn) = decision.warning() {
+        warnings.push(warn);
+    }
+    if let Some(warn) = side_face_warning(face) {
         warnings.push(warn);
     }
 
@@ -560,25 +564,40 @@ pub fn demo_balanced_engine(w: u32, h: u32) -> FakeEngine {
     .stub("parsing_lip", vec![parsing])
 }
 
-/// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；缺失时降级并记录告警
+/// 融合测量角：优先 0.6×双眼角 + 0.4×双肩角；髋/膝可用时改用三路融合；缺失时降级并记录告警
 fn fused_measured(kps: &KeypointSet, warnings: &mut Vec<String>) -> f64 {
     let head = kps.eyes().map(|(l, r)| head_angle(&l, &r));
     let shoulder = kps.shoulders().map(|(l, r)| shoulder_angle(&l, &r));
-    match (head, shoulder) {
-        (Some(h), Some(s)) => fused_angle(h, s),
-        (Some(h), None) => {
+    // 躯干垂直度：肩中点 → 髋（缺失退回膝）中点，二者缺一时无法求解
+    let torso = match (kps.shoulder_mid(), kps.lower_mid()) {
+        (Some(s), Some(lower)) => Some(torso_angle(&s, &lower)),
+        _ => None,
+    };
+    match (head, shoulder, torso) {
+        // 髋/膝可用 → 三路融合，额外修复高低肩之外的侧身倾斜
+        (Some(h), Some(s), Some(t)) => fused_angle_with_torso(h, s, t),
+        (Some(h), Some(s), None) => fused_angle(h, s),
+        (Some(h), None, _) => {
             warnings.push("未检测到双肩，仅用头部角度".into());
             h
         }
-        (None, Some(s)) => {
+        (None, Some(s), _) => {
             warnings.push("未检测到双眼，仅用肩线角度".into());
             s
         }
-        (None, None) => {
+        (None, None, _) => {
             warnings.push("未检测到双眼与双肩，跳过自动纠偏".into());
             0.0
         }
     }
+}
+
+/// 侧脸告警：由人脸 5 点关键点（左眼、右眼、鼻尖）估算 yaw，超过阈值时返回中文提示。
+/// 关键点退化（双眼重合，如演示/桩数据）时无法判断，返回 None 不告警。
+fn side_face_warning(face: &FaceDetection) -> Option<String> {
+    let yaw = yaw_from_landmarks(&face.landmarks[0], &face.landmarks[1], &face.landmarks[2])?;
+    (yaw.abs() > SIDE_FACE_YAW_DEG)
+        .then(|| format!("疑似侧脸（估算偏转 {yaw:.0}°），建议提供正面照"))
 }
 
 #[cfg(test)]
@@ -620,6 +639,82 @@ mod tests {
         }
         // 远离五官的背景不受保护
         assert_eq!(rotated.get_pixel(280, 20)[0], 0);
+    }
+
+    #[test]
+    fn 躯干垂直度参与三路姿态融合() {
+        use crate::vision::keypoint::{
+            LEFT_EYE, LEFT_HIP, LEFT_SHOULDER, RIGHT_EYE, RIGHT_HIP, RIGHT_SHOULDER,
+        };
+        let mut kps = KeypointSet { points: [None; 17] };
+        // 双眼、双肩水平（角度 0）
+        kps.points[LEFT_EYE] = Some(Point2::new(40.0, 40.0));
+        kps.points[RIGHT_EYE] = Some(Point2::new(60.0, 40.0));
+        kps.points[LEFT_SHOULDER] = Some(Point2::new(20.0, 100.0));
+        kps.points[RIGHT_SHOULDER] = Some(Point2::new(80.0, 100.0));
+        let mut w = Vec::new();
+        // 无髋/膝 → 退化为两路（0.6×0 + 0.4×0 = 0），无告警
+        assert!(fused_measured(&kps, &mut w).abs() < 1e-9);
+        assert!(w.is_empty());
+        // 髋中点在肩中点左侧 31.7px（垂直距离 180px）→ 躯干倾斜 atan(31.7/180) ≈ 10° → 0.2×10 = 2.0
+        let dy = 180.0f64;
+        let dx = dy * 10.0f64.to_radians().tan();
+        let hip_mid_x = 50.0 - dx;
+        kps.points[LEFT_HIP] = Some(Point2::new(hip_mid_x - 5.0, 280.0));
+        kps.points[RIGHT_HIP] = Some(Point2::new(hip_mid_x + 5.0, 280.0));
+        let measured = fused_measured(&kps, &mut w);
+        assert!((measured - 2.0).abs() < 0.02, "实际 {measured}");
+        assert!(w.is_empty(), "髋部可用时不应告警");
+    }
+
+    #[test]
+    fn 侧脸超阈值告警且退化不告警() {
+        let face_box = FaceBox {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 200.0,
+            y2: 200.0,
+            score: 0.99,
+        };
+        let frontal = FaceDetection {
+            face: face_box,
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(150.0, 165.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+        };
+        assert!(side_face_warning(&frontal).is_none(), "正面照不应告警");
+        // 鼻尖右移 30px（半间距 25px）→ asin(1.2) 钳制 → 90° → 告警
+        let side = FaceDetection {
+            landmarks: [
+                Point2::new(125.0, 140.0),
+                Point2::new(175.0, 140.0),
+                Point2::new(180.0, 165.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+            ..frontal
+        };
+        let warn = side_face_warning(&side).unwrap();
+        assert!(
+            warn.contains("疑似侧脸") && warn.contains("正面照"),
+            "{warn}"
+        );
+        // 双眼重合（演示/桩数据退化）→ 无法判断，不告警
+        let degenerate = FaceDetection {
+            landmarks: [
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 140.0),
+                Point2::new(150.0, 165.0),
+                Point2::new(133.0, 185.0),
+                Point2::new(167.0, 185.0),
+            ],
+            ..frontal
+        };
+        assert!(side_face_warning(&degenerate).is_none());
     }
 
     #[test]

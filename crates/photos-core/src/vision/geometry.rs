@@ -13,6 +13,14 @@ pub const MANUAL_LIMIT_DEG: f64 = 45.0;
 pub const HEAD_WEIGHT: f64 = 0.6;
 /// 肩线角权重
 pub const SHOULDER_WEIGHT: f64 = 0.4;
+/// 三路融合（髋/膝可用时）头部角权重
+pub const TORSO_HEAD_WEIGHT: f64 = 0.5;
+/// 三路融合（髋/膝可用时）肩线角权重
+pub const TORSO_SHOULDER_WEIGHT: f64 = 0.3;
+/// 三路融合（髋/膝可用时）躯干垂直度权重
+pub const TORSO_WEIGHT: f64 = 0.2;
+/// 侧脸（yaw）告警阈值（度）
+pub const SIDE_FACE_YAW_DEG: f64 = 30.0;
 
 /// 平面点（图像坐标，x 向右、y 向下）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +65,33 @@ fn horizontal_angle(a: &Point2, b: &Point2) -> f64 {
 /// 融合角：0.6 × 头部角 + 0.4 × 肩线角
 pub fn fused_angle(head: f64, shoulder: f64) -> f64 {
     HEAD_WEIGHT * head + SHOULDER_WEIGHT * shoulder
+}
+
+/// 躯干垂直度角：肩中点 → 髋（或膝）中点连线相对竖直方向的倾角（度，顺时针为正）。
+/// 符号与 `head_angle`/`shoulder_angle` 一致，可与滚动角同向加权融合；
+/// 修复高低肩之外的侧身倾斜（下半身相对上半身歪斜）。
+pub fn torso_angle(shoulder_mid: &Point2, lower_mid: &Point2) -> f64 {
+    let vx = shoulder_mid.x - lower_mid.x;
+    let vy = lower_mid.y - shoulder_mid.y; // 屏幕向上分量（下方点更靠下时为正）
+    vx.atan2(vy).to_degrees().clamp(-90.0, 90.0)
+}
+
+/// 三路融合角：0.5 × 头部角 + 0.3 × 肩线角 + 0.2 × 躯干垂直度
+pub fn fused_angle_with_torso(head: f64, shoulder: f64, torso: f64) -> f64 {
+    TORSO_HEAD_WEIGHT * head + TORSO_SHOULDER_WEIGHT * shoulder + TORSO_WEIGHT * torso
+}
+
+/// 由人脸 5 点关键点（左眼、右眼、鼻尖）估计头部偏转（yaw，度，正负表示左右转）。
+/// 正面时鼻尖投影落在双眼中点；转头时鼻尖向偏转方向偏移，偏移量与双眼半间距之比近似
+/// `sin(yaw)`（自归一化，不依赖脸框宽度这类随偏转同时收缩的参考量）。
+/// 双眼间距退化（< 2px，如桩数据双眼重合）时返回 None（无法判断）。
+pub fn yaw_from_landmarks(left_eye: &Point2, right_eye: &Point2, nose: &Point2) -> Option<f64> {
+    let half_span = (right_eye.x - left_eye.x).abs() / 2.0;
+    if half_span < 1.0 {
+        return None;
+    }
+    let offset = nose.x - (left_eye.x + right_eye.x) / 2.0;
+    Some((offset / half_span).clamp(-1.0, 1.0).asin().to_degrees())
 }
 
 /// 纠偏决策结果
@@ -149,6 +184,47 @@ mod tests {
     fn 融合角加权() {
         assert!((fused_angle(10.0, 20.0) - 14.0).abs() < 1e-9);
         assert!((fused_angle(0.0, 0.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn 躯干垂直度角符号与幅值() {
+        // 竖直躯干：肩中点与髋中点同 x → 0°
+        let s = Point2::new(100.0, 100.0);
+        assert!(torso_angle(&s, &Point2::new(100.0, 300.0)).abs() < 1e-9);
+        // 肩在髋右侧（身体顺时针倾斜）→ 正值
+        let a = torso_angle(&Point2::new(110.0, 100.0), &Point2::new(100.0, 300.0));
+        assert!((a - 2.8624).abs() < 1e-3, "实际 {a}");
+        // 肩在髋左侧 → 负值
+        let b = torso_angle(&Point2::new(90.0, 100.0), &Point2::new(100.0, 300.0));
+        assert!((b + 2.8624).abs() < 1e-3, "实际 {b}");
+    }
+
+    #[test]
+    fn 三路融合角加权() {
+        // 0.5×10 + 0.3×20 + 0.2×30 = 17
+        assert!((fused_angle_with_torso(10.0, 20.0, 30.0) - 17.0).abs() < 1e-9);
+        assert!(
+            (TORSO_HEAD_WEIGHT + TORSO_SHOULDER_WEIGHT + TORSO_WEIGHT - 1.0).abs() < 1e-9,
+            "三路权重应归一"
+        );
+    }
+
+    #[test]
+    fn 侧脸偏转估计() {
+        let l = Point2::new(50.0, 100.0);
+        let r = Point2::new(150.0, 100.0);
+        // 正面：鼻尖在双眼中点正下方 → 0°
+        let frontal = yaw_from_landmarks(&l, &r, &Point2::new(100.0, 140.0)).unwrap();
+        assert!(frontal.abs() < 1e-9, "实际 {frontal}");
+        // 右转：鼻尖右移 30px（半间距 50px）→ asin(0.6) ≈ 36.87°
+        let right = yaw_from_landmarks(&l, &r, &Point2::new(130.0, 140.0)).unwrap();
+        assert!((right - 36.8699).abs() < 1e-3, "实际 {right}");
+        // 左转符号相反
+        let left = yaw_from_landmarks(&l, &r, &Point2::new(70.0, 140.0)).unwrap();
+        assert!((left + 36.8699).abs() < 1e-3, "实际 {left}");
+        assert!(right.abs() > SIDE_FACE_YAW_DEG && left.abs() > SIDE_FACE_YAW_DEG);
+        // 双眼重合（桩数据退化）→ 无法判断
+        assert!(yaw_from_landmarks(&l, &l, &Point2::new(100.0, 140.0)).is_none());
     }
 
     #[test]

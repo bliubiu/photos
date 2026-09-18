@@ -13,6 +13,10 @@ pub const LEFT_EAR: usize = 3;
 pub const RIGHT_EAR: usize = 4;
 pub const LEFT_SHOULDER: usize = 5;
 pub const RIGHT_SHOULDER: usize = 6;
+pub const LEFT_HIP: usize = 11;
+pub const RIGHT_HIP: usize = 12;
+pub const LEFT_KNEE: usize = 13;
+pub const RIGHT_KNEE: usize = 14;
 
 /// 关键点集合（低置信度点置 None）
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +43,34 @@ impl KeypointSet {
             (Some(l), Some(r)) => Some((l, r)),
             _ => None,
         }
+    }
+
+    /// 双髋（左、右），任一缺失返回 None（证件照常只拍上半身，缺失属正常）
+    pub fn hips(&self) -> Option<(Point2, Point2)> {
+        match (self.points[LEFT_HIP], self.points[RIGHT_HIP]) {
+            (Some(l), Some(r)) => Some((l, r)),
+            _ => None,
+        }
+    }
+
+    /// 双膝（左、右），任一缺失返回 None（髋部不可用时的躯干垂直度兜底）
+    pub fn knees(&self) -> Option<(Point2, Point2)> {
+        match (self.points[LEFT_KNEE], self.points[RIGHT_KNEE]) {
+            (Some(l), Some(r)) => Some((l, r)),
+            _ => None,
+        }
+    }
+
+    /// 下半身参考中点：优先双髋中点，缺失时退回双膝中点，均缺失返回 None
+    pub fn lower_mid(&self) -> Option<Point2> {
+        let mid = |(a, b): (Point2, Point2)| Point2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        self.hips().or_else(|| self.knees()).map(mid)
+    }
+
+    /// 双肩中点，双肩缺失返回 None
+    pub fn shoulder_mid(&self) -> Option<Point2> {
+        self.shoulders()
+            .map(|(l, r)| Point2::new((l.x + r.x) / 2.0, (l.y + r.y) / 2.0))
     }
 }
 
@@ -124,5 +156,28 @@ mod tests {
         assert!(decode_movenet(&t, 100, 100).is_err());
         let t2 = TensorData::new(vec![1, 17, 4], vec![0.0; 17 * 4]).unwrap();
         assert!(decode_movenet(&t2, 100, 100).is_err());
+    }
+
+    #[test]
+    fn 下半身中点优先髋部并可退回膝部() {
+        let mut kps = KeypointSet { points: [None; 17] };
+        // 髋膝均缺失 → None
+        assert!(kps.lower_mid().is_none());
+        // 仅双膝：退回膝中点
+        kps.points[LEFT_KNEE] = Some(Point2::new(80.0, 400.0));
+        kps.points[RIGHT_KNEE] = Some(Point2::new(120.0, 400.0));
+        let by_knee = kps.lower_mid().unwrap();
+        assert!((by_knee.x - 100.0).abs() < 1e-9 && (by_knee.y - 400.0).abs() < 1e-9);
+        // 补上双髋：优先髋中点
+        kps.points[LEFT_HIP] = Some(Point2::new(90.0, 300.0));
+        kps.points[RIGHT_HIP] = Some(Point2::new(110.0, 300.0));
+        let by_hip = kps.lower_mid().unwrap();
+        assert!((by_hip.x - 100.0).abs() < 1e-9 && (by_hip.y - 300.0).abs() < 1e-9);
+        // 肩中点
+        assert!(kps.shoulder_mid().is_none());
+        kps.points[LEFT_SHOULDER] = Some(Point2::new(60.0, 100.0));
+        kps.points[RIGHT_SHOULDER] = Some(Point2::new(140.0, 100.0));
+        let sm = kps.shoulder_mid().unwrap();
+        assert!((sm.x - 100.0).abs() < 1e-9 && (sm.y - 100.0).abs() < 1e-9);
     }
 }
